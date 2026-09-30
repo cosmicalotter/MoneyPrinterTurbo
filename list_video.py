@@ -134,6 +134,17 @@ Automatic editing (on by default, --no-edit turns it off):
   Try it with a sample character:
     uv run python list_video.py --create-demo-assets ./assets
 
+Two languages at once:
+  --also-in en-US makes a second video in English from the same script: the
+  LLM adapts the text (title formulas and jokes included), pictures stay the
+  same, and the English version gets its own edit plan and voice. Review the
+  translation first with --script-only; it is saved next to the script as
+  <name>.en-US.json and can be passed back with --also-script.
+    uv run python list_video.py --subject "La electricidad explicada para nutrias" \\
+      --video-language es-CO --also-in en-US --script-only --output electricidad.json
+    uv run python list_video.py --script electricidad.json --also-in en-US \\
+      --also-script electricidad.en-US.json --voice-name es-CO-GonzaloNeural-Male
+
 Supported --video-source values: pexels, pixabay, coverr, openai_image and
 local (local needs an image_file for every item). List videos default to 16:9,
 no burned-in subtitles and no background music; pass --subtitle-enabled or
@@ -225,6 +236,27 @@ for the YouTube description, and edit-plan.json.
         help='delivery instructions for Gemini voices, e.g. "Narra con entusiasmo y curiosidad"',
     )
     edit_group.add_argument(
+        "--also-in",
+        metavar="LANG",
+        default=None,
+        help="also make the video in this language (e.g. en-US): the script is adapted by the LLM",
+    )
+    edit_group.add_argument(
+        "--also-voice",
+        default=None,
+        help="voice for the --also-in version (default: a free Edge voice for that language)",
+    )
+    edit_group.add_argument(
+        "--also-voice-style",
+        default=None,
+        help="Gemini delivery instructions for the --also-in version (default: none)",
+    )
+    edit_group.add_argument(
+        "--also-script",
+        default=None,
+        help="reviewed translation to use instead of translating again",
+    )
+    edit_group.add_argument(
         "--create-demo-assets",
         metavar="DIR",
         default=None,
@@ -306,6 +338,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         parser.error(f"--assets folder not found: {args.assets}")
     if args.edit_plan and not os.path.isfile(args.edit_plan):
         parser.error(f"--edit-plan file not found: {args.edit_plan}")
+    if not args.also_in and (args.also_voice or args.also_voice_style or args.also_script):
+        parser.error("--also-voice, --also-voice-style and --also-script need --also-in")
 
     forwarded = list(forwarded)
     if not _has_option(forwarded, "--video-aspect"):
@@ -328,14 +362,24 @@ def run(argv: Sequence[str] | None = None) -> int:
         params = cli.build_video_params(cli_args)
         cli.prepare_cli_files(params, stop_at="video")
         script = load_script_file(args.script) if args.script else None
+        also_script = load_script_file(args.also_script) if args.also_script else None
     except (ValueError, OSError, ValidationError) as exc:
         logger.error(f"invalid list video input: {exc}")
         return 2
 
+    from dataclasses import replace
+
     from app.config import config
-    from app.services import list_video, llm
+    from app.services import list_video, llm, voice
     from app.services.list_video_editor import EditOptions
     from app.utils import utils
+
+    also_voice = ""
+    if args.also_in:
+        also_voice = args.also_voice or voice.default_edge_voice(args.also_in)
+        if not also_voice:
+            logger.error(f"no default voice for {args.also_in}; pass --also-voice")
+            return 2
 
     if args.voice_style is not None:
         config.app["gemini_tts_style"] = args.voice_style
@@ -358,9 +402,23 @@ def run(argv: Sequence[str] | None = None) -> int:
             args.output or os.path.join(utils.task_dir(task_id), "list-script.json"),
         )
         logger.info(f"list script saved: {script_file}")
-        if args.script_only:
-            print(json.dumps({"task_id": task_id, "script_file": script_file}, ensure_ascii=False))
-            return 0
+
+    also_script_file = os.path.abspath(args.also_script) if args.also_script else ""
+    if args.also_in and also_script is None:
+        also_script = llm.translate_list_script(script, args.also_in)
+        if also_script is None:
+            logger.error(f"the LLM did not return a valid {args.also_in} script")
+            return 1
+        stem, extension = os.path.splitext(script_file)
+        also_script_file = save_script_file(also_script, f"{stem}.{args.also_in}{extension or '.json'}")
+        logger.info(f"{args.also_in} script saved: {also_script_file}")
+
+    if args.script_only:
+        summary = {"task_id": task_id, "script_file": script_file}
+        if also_script_file:
+            summary["also"] = {"language": args.also_in, "script_file": also_script_file}
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
 
     options = {}
     if args.gap is not None:
@@ -378,28 +436,55 @@ def run(argv: Sequence[str] | None = None) -> int:
             plan_file=os.path.abspath(args.edit_plan) if args.edit_plan else "",
             language=params.video_language or "",
         )
-    try:
-        result = list_video.generate_list_video(
-            task_id,
-            script,
-            params,
-            number_items=not args.no_numbers,
-            show_item_titles=not args.no_item_titles,
-            **options,
-        )
-    except (list_video.ListVideoError, ValueError) as exc:
-        logger.error(f"list video failed: task_id={task_id}, error={exc}")
-        return 1
-    except Exception as exc:
-        logger.exception(f"list video failed unexpectedly: task_id={task_id}, error={exc}")
-        return 1
 
-    print(
-        json.dumps(
-            {"task_id": task_id, "script_file": script_file, "result": result},
-            ensure_ascii=False,
+    def render(render_task_id, render_script, render_params, render_options):
+        try:
+            return list_video.generate_list_video(
+                render_task_id,
+                render_script,
+                render_params,
+                number_items=not args.no_numbers,
+                show_item_titles=not args.no_item_titles,
+                **render_options,
+            )
+        except (list_video.ListVideoError, ValueError) as exc:
+            logger.error(f"list video failed: task_id={render_task_id}, error={exc}")
+        except Exception as exc:
+            logger.exception(
+                f"list video failed unexpectedly: task_id={render_task_id}, error={exc}"
+            )
+        return None
+
+    result = render(task_id, script, params, options)
+    if result is None:
+        return 1
+    summary = {"task_id": task_id, "script_file": script_file, "result": result}
+
+    if args.also_in:
+        also_task_id = utils.get_uuid()
+        also_params = params.model_copy(
+            update={"voice_name": also_voice, "video_language": args.also_in}
         )
-    )
+        also_options = dict(options)
+        if "edit" in options:
+            # Edit plans anchor beats to words of one language, so the other
+            # version gets its own plan.
+            also_options["edit"] = replace(options["edit"], language=args.also_in, plan_file="")
+        # A delivery style is written for one language; never reuse it.
+        config.app["gemini_tts_style"] = args.also_voice_style or ""
+        logger.info(f"rendering the {args.also_in} version with voice {also_voice}")
+        also_result = render(also_task_id, also_script, also_params, also_options)
+        if also_result is None:
+            print(json.dumps(summary, ensure_ascii=False))
+            return 1
+        summary["also"] = {
+            "language": args.also_in,
+            "task_id": also_task_id,
+            "script_file": also_script_file,
+            "result": also_result,
+        }
+
+    print(json.dumps(summary, ensure_ascii=False))
     return 0
 
 

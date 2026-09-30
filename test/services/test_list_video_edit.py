@@ -603,5 +603,158 @@ class TestEditingCli(unittest.TestCase):
             self.assertIn(message, stderr)
 
 
+class TestBilingual(unittest.TestCase):
+    def setUp(self):
+        ui_patch = patch.dict(app_config.ui, {}, clear=True)
+        ui_patch.start()
+        self.addCleanup(ui_patch.stop)
+        self.temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
+        self.script_path = os.path.join(self.temp_dir, "electricidad.json")
+        Path(self.script_path).write_text(json.dumps({
+            "title": "La electricidad explicada para nutrias",
+            "intro": "Hola, nutrias.",
+            "intro_image_term": "lightning",
+            "items": [
+                {"name": "Voltaje", "text": "El voltaje empuja.", "image_term": "battery"},
+                {"name": "Corriente", "text": "La corriente fluye.", "image_term": "wire", "image_file": "a.png"},
+            ],
+        }), encoding="utf-8")
+        Image.new("RGB", (600, 600)).save(os.path.join(self.temp_dir, "a.png"))
+
+    def _run(self, argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                code = list_video_cli.run(argv)
+            except SystemExit as exc:
+                code = exc.code
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _translation(self, **overrides):
+        data = {
+            "title": "Electricity Explained for Otters",
+            "intro": "Hi, otters.",
+            "intro_image_term": "changed by the model",
+            "items": [
+                {"name": "Voltage", "text": "Voltage pushes.", "image_term": "x"},
+                {"name": "Current", "text": "Current flows.", "image_term": "y"},
+            ],
+        }
+        data.update(overrides)
+        return json.dumps(data)
+
+    def test_translation_keeps_pictures_and_structure(self):
+        script = list_video_cli.load_script_file(self.script_path)
+        with patch.object(llm, "_generate_response", return_value=self._translation()):
+            translated = llm.translate_list_script(script, "en-US")
+        self.assertEqual(translated.title, "Electricity Explained for Otters")
+        self.assertEqual(translated.items[1].name, "Current")
+        self.assertEqual(translated.intro_image_term, "lightning")
+        self.assertEqual(translated.items[0].image_term, "battery")
+        self.assertTrue(translated.items[1].image_file.endswith("a.png"))
+
+        prompt = llm.build_translate_list_script_prompt({"title": "x"}, "en-US")
+        self.assertIn("Explained for Otters", prompt)
+        self.assertIn("in en-US", prompt)
+
+    def test_translation_failures(self):
+        script = list_video_cli.load_script_file(self.script_path)
+        wrong_count = self._translation(items=[{"name": "A", "text": "B"}])
+        with patch.object(llm, "_generate_response", side_effect=[wrong_count, self._translation()]):
+            self.assertIsNotNone(llm.translate_list_script(script, "en-US"))
+        with patch.object(llm, "_generate_response", return_value="Error: quota"):
+            self.assertIsNone(llm.translate_list_script(script, "en-US"))
+        with patch.object(llm, "_generate_response", return_value=wrong_count):
+            self.assertIsNone(llm.translate_list_script(script, "en-US"))
+        with self.assertRaises(ValueError):
+            llm.translate_list_script(script, " ")
+
+    def test_default_voices(self):
+        from app.services import voice
+
+        self.assertEqual(voice.default_edge_voice("en-US"), "en-US-AndrewMultilingualNeural-Male")
+        self.assertEqual(voice.default_edge_voice("en"), "en-US-AndrewMultilingualNeural-Male")
+        self.assertTrue(voice.default_edge_voice("es-CO").endswith("-Male"))
+        self.assertEqual(voice.default_edge_voice("xx-YY"), "")
+        self.assertEqual(voice.default_edge_voice(""), "")
+
+    def test_script_only_saves_both_versions(self):
+        with patch.object(llm, "_generate_response", return_value=self._translation()):
+            code, stdout, _ = self._run(["--script", self.script_path, "--also-in", "en-US", "--script-only"])
+        self.assertEqual(code, 2)  # --script-only needs --subject
+
+        output = os.path.join(self.temp_dir, "new.json")
+        script = list_video_cli.load_script_file(self.script_path)
+        with patch.object(llm, "generate_list_script", return_value=script), patch.object(
+            llm, "_generate_response", return_value=self._translation()
+        ):
+            code, stdout, _ = self._run(
+                ["--subject", "Electricidad", "--also-in", "en-US", "--script-only", "--output", output]
+            )
+        self.assertEqual(code, 0)
+        summary = json.loads(stdout)
+        self.assertEqual(summary["also"]["script_file"], os.path.join(self.temp_dir, "new.en-US.json"))
+        saved = list_video_cli.load_script_file(summary["also"]["script_file"])
+        self.assertEqual(saved.title, "Electricity Explained for Otters")
+
+    def test_both_versions_are_rendered_with_their_own_voice_and_plan(self):
+        plan = os.path.join(self.temp_dir, "plan.json")
+        Path(plan).write_text('{"segments": []}', encoding="utf-8")
+        calls = []
+
+        def fake_generate(task_id, script, params, **kwargs):
+            calls.append((task_id, script.title, params.voice_name, params.video_language,
+                          kwargs["edit"], app_config.app.get("gemini_tts_style")))
+            return {"videos": [f"{task_id}.mp4"]}
+
+        with patch.dict(app_config.app, {}), patch.object(
+            llm, "_generate_response", return_value=self._translation()
+        ), patch.object(list_video, "generate_list_video", side_effect=fake_generate):
+            code, stdout, _ = self._run([
+                "--script", self.script_path, "--video-language", "es-CO",
+                "--voice-name", "es-CO-GonzaloNeural-Male", "--voice-style", "Con entusiasmo",
+                "--edit-plan", plan, "--also-in", "en-US",
+            ])
+        self.assertEqual(code, 0)
+        (_, title_es, voice_es, lang_es, edit_es, style_es), (_, title_en, voice_en, lang_en, edit_en, style_en) = calls
+        self.assertEqual((title_es, voice_es, lang_es, style_es), (
+            "La electricidad explicada para nutrias", "es-CO-GonzaloNeural-Male", "es-CO", "Con entusiasmo"))
+        self.assertEqual((title_en, voice_en, lang_en, style_en), (
+            "Electricity Explained for Otters", "en-US-AndrewMultilingualNeural-Male", "en-US", ""))
+        self.assertEqual((edit_es.language, edit_en.language), ("es-CO", "en-US"))
+        self.assertTrue(edit_es.plan_file.endswith("plan.json"))
+        self.assertEqual(edit_en.plan_file, "")
+        summary = json.loads(stdout)
+        self.assertEqual(summary["also"]["language"], "en-US")
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "electricidad.en-US.json")))
+
+    def test_reviewed_translation_and_failures(self):
+        reviewed = os.path.join(self.temp_dir, "reviewed.json")
+        Path(reviewed).write_text(self._translation(), encoding="utf-8")
+        with patch.object(llm, "translate_list_script") as translate, patch.object(
+            list_video, "generate_list_video", side_effect=[{"videos": ["a"]}, {"videos": ["b"]}]
+        ) as generate:
+            code, stdout, _ = self._run([
+                "--script", self.script_path, "--also-in", "en-US",
+                "--also-script", reviewed, "--also-voice", "en-GB-RyanNeural-Male",
+            ])
+        translate.assert_not_called()
+        self.assertEqual(generate.call_args.args[2].voice_name, "en-GB-RyanNeural-Male")
+        self.assertEqual(code, 0)
+
+        with patch.object(list_video, "generate_list_video", side_effect=[{"videos": ["a"]}, list_video.ListVideoError("x")]):
+            code, stdout, _ = self._run(["--script", self.script_path, "--also-in", "en-US", "--also-script", reviewed])
+        self.assertEqual(code, 1)
+        self.assertNotIn("also", json.loads(stdout))
+
+        with patch.object(llm, "translate_list_script", return_value=None):
+            self.assertEqual(self._run(["--script", self.script_path, "--also-in", "en-US"])[0], 1)
+        self.assertEqual(self._run(["--script", self.script_path, "--also-in", "xx-YY"])[0], 2)
+        code, _, stderr = self._run(["--script", self.script_path, "--also-voice", "x"])
+        self.assertEqual(code, 2)
+        self.assertIn("need --also-in", stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

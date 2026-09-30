@@ -1091,6 +1091,87 @@ def generate_list_script(
     return None
 
 
+def build_translate_list_script_prompt(script_data: dict, language: str) -> str:
+    return f"""
+# Role: Translator and adapter for an educational YouTube channel
+
+## Goal:
+Rewrite the list-video script below in {language} for native speakers, so it
+sounds as if it had been written in {language} from the start.
+
+## Constrains:
+1. return only a JSON object with exactly the same keys, and the same number of items in the same order; no markdown, no code fences.
+2. translate "title", "intro", "outro" and every item's "name" and "text" into natural spoken {language}; adapt idioms, jokes, puns and recurring title formulas naturally (for example "La electricidad explicada para nutrias" becomes "Electricity Explained for Otters" in English).
+3. keep the tone, the length and every fact; do not add or remove information.
+4. copy every "image_term", "intro_image_term" and "outro_image_term" unchanged.
+
+## Script:
+{json.dumps(script_data, ensure_ascii=False)}
+""".strip()
+
+
+def translate_list_script(script, language: str, app_config=None):
+    """Adapt a ListVideoScript to ``language``; None when the model fails.
+
+    Pictures are language-independent, so image terms and files are always
+    copied from the original rather than trusted from the model.
+    """
+    from app.models.schema import ListVideoScript
+
+    language = (language or "").strip()
+    if not language:
+        raise ValueError("a target language is required to translate a list script")
+    original = script.model_dump()
+    source = {
+        key: original[key]
+        for key in ("title", "intro", "intro_image_term", "outro", "outro_image_term")
+    }
+    source["items"] = [
+        {"name": item["name"], "text": item["text"], "image_term": item["image_term"]}
+        for item in original["items"]
+    ]
+    prompt = build_translate_list_script_prompt(source, language)
+    logger.info(f"translating list script to {language}: items={len(source['items'])}")
+
+    for i in range(_max_retries):
+        try:
+            if app_config is None:
+                response = _generate_response(prompt)
+            else:
+                response = _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                logger.error(f"failed to translate list script: {response}")
+                return None
+            data = _parse_list_script_response(response)
+            items = data.get("items")
+            if not isinstance(items, list) or len(items) != len(original["items"]):
+                raise ValueError("translated script has a different number of items")
+            translated = dict(original)
+            for key in ("title", "intro", "outro"):
+                value = data.get(key)
+                if isinstance(value, str) and (value.strip() or not original[key]):
+                    translated[key] = value.strip()
+            translated["items"] = []
+            for source_item, item in zip(original["items"], items):
+                if not isinstance(item, dict):
+                    raise ValueError("translated item is not an object")
+                translated["items"].append(
+                    {
+                        **source_item,
+                        "name": str(item.get("name") or "").strip(),
+                        "text": str(item.get("text") or "").strip(),
+                    }
+                )
+            result = ListVideoScript.model_validate(translated)
+            logger.success(f"list script translated to {language}: {result.title!r}")
+            return result
+        except Exception as e:
+            logger.warning(f"failed to parse translated list script: {type(e).__name__}: {e}")
+        if i < _max_retries - 1:
+            logger.warning(f"failed to translate list script, trying again... {i + 1}")
+    return None
+
+
 # =============================================================================
 # Edit plan for list videos
 #

@@ -369,6 +369,32 @@ def get_all_azure_voices(filter_locals=None) -> list[str]:
     return voices
 
 
+_DEFAULT_LOCALE_FOR_LANGUAGE = {"en": "en-US", "es": "es-MX", "pt": "pt-BR", "fr": "fr-FR", "de": "de-DE"}
+
+
+def default_edge_voice(language: str) -> str:
+    """A free Edge voice for ``language`` (e.g. "en-US" or "en").
+
+    Prefers male voices and the newer multilingual models, which sound the
+    most natural; returns "" when the catalog has no voice for the language.
+    """
+    locale = (language or "").strip()
+    if "-" not in locale:
+        locale = _DEFAULT_LOCALE_FOR_LANGUAGE.get(locale.lower(), locale)
+    voices = [
+        name
+        for name in get_all_azure_voices(filter_locals=[f"{locale}-"])
+        if "-V2-" not in name
+    ]
+    if not voices:
+        return ""
+
+    def rank(name: str):
+        return (not name.endswith("-Male"), "Multilingual" not in name, name)
+
+    return sorted(voices, key=rank)[0]
+
+
 def parse_voice_name(name: str):
     # zh-CN-XiaoyiNeural-Female
     # zh-CN-YunxiNeural-Male
