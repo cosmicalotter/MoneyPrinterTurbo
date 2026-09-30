@@ -991,7 +991,7 @@ exactly {item_count} items, one at a time, each shown with its own picture.
 4. "intro": a hook of at most 60 words; do not greet the viewer or say "welcome".
 5. "items": exactly {item_count} objects, ordered to keep curiosity high, with the most surprising item last.
 6. each item "name": at most 5 words.
-7. each item "text": about {words_per_item} words of plain spoken narration that starts by saying the item name, explains what it is, gives one surprising fact and why it matters; no lists, no markdown, no emojis.
+7. each item "text": about {words_per_item} words of natural spoken narration, like a friendly science YouTuber talking to a curious friend: start by saying the item name, use short sentences, an everyday comparison or a rhetorical question, one surprising fact and why it matters; no lists, no markdown, no emojis, no textbook tone.
 8. each "image_term" (including intro_image_term and outro_image_term): 3 to 8 English words describing one concrete, drawable picture, with no text in the picture.
 9. "outro": at most 40 words, closing the video with a question that invites comments.
 10. use only accurate, verifiable facts; for health topics never give treatment instructions or dosages.
@@ -1088,6 +1088,147 @@ def generate_list_script(
         if i < _max_retries - 1:
             logger.warning(f"failed to generate list script, trying again... {i + 1}")
 
+    return None
+
+
+# =============================================================================
+# Edit plan for list videos
+#
+# 让模型像剪辑师一样为每个片段安排画面节奏：角色表情、在说到某几个词时弹出
+# 的配图，以及关键数字/术语的文字标注。锚点必须是旁白原文，渲染层据此换算
+# 出精确的出现时间。
+# =============================================================================
+
+EDIT_BEAT_TYPES = ("image", "text")
+EDIT_IMAGE_LOOKS = ("diagram", "photo")
+MAX_EDIT_BEATS_PER_SEGMENT = 4
+MAX_EDIT_TEXT_LENGTH = 40
+
+
+def build_edit_plan_prompt(segments: list, expressions: list, language: str = "") -> str:
+    if expressions:
+        expression_rule = (
+            '"expression": one of '
+            + json.dumps(expressions, ensure_ascii=False)
+            + " that matches the emotion of what is being said"
+        )
+    else:
+        expression_rule = '"expression": always "" (no character is available)'
+    language_name = language or "the language of the narration"
+    example = {
+        "segments": [
+            {
+                "index": 1,
+                "expression": expressions[0] if expressions else "",
+                "beats": [
+                    {
+                        "type": "image",
+                        "at": "the fluid around your brain",
+                        "query": "cerebrospinal fluid diagram",
+                        "look": "diagram",
+                    },
+                    {"type": "text", "at": "one night without sleep", "text": "24 h awake"},
+                ],
+            }
+        ]
+    }
+    return f"""
+# Role: Video editor for an educational YouTube channel
+
+## Goal:
+Plan what appears on screen while each segment below is narrated, so the video
+feels hand-edited: a host character reacts, pictures of the things being
+mentioned pop in, and key facts appear as short text.
+
+## Constrains:
+1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index", "expression" and "beats"; no markdown, no code fences.
+2. {expression_rule}.
+3. "beats": about one beat per 35 words of narration (1 to {MAX_EDIT_BEATS_PER_SEGMENT} per item, 0 or 1 for intro and outro), spread across the segment, never two beats on the same words.
+4. every beat has "at": 2 to 6 consecutive words copied exactly from that segment's text; the beat appears when those words are spoken.
+5. image beat: {{"type": "image", "at": ..., "query": ..., "look": ...}} where "query" is an English search query of 2 to 5 words naming one concrete thing that can be photographed or shown in a diagram, and "look" is "diagram" for anatomy, science or maps and "photo" for real-life scenes.
+6. text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number, a key term or a surprising fact stated in the narration.
+7. prefer image beats; use at most one text beat per segment.
+8. never add facts that the narration does not state.
+
+## Output Example:
+{json.dumps(example, ensure_ascii=False)}
+
+## Segments:
+{json.dumps(segments, ensure_ascii=False)}
+""".strip()
+
+
+def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
+    """Validate a model edit plan; unknown or malformed parts are dropped."""
+    if isinstance(data, dict):
+        data = data.get("segments")
+    if not isinstance(data, list):
+        raise ValueError("edit plan has no segments list")
+    lookup = {expression.lower(): expression for expression in expressions}
+    by_index = {}
+    for position, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("index", position)
+        if not isinstance(index, int) or not 0 <= index < segment_count:
+            index = position
+        if index >= segment_count or index in by_index:
+            continue
+        expression = lookup.get(str(entry.get("expression") or "").strip().lower(), "")
+        beats = []
+        for beat in entry.get("beats") or []:
+            if not isinstance(beat, dict) or beat.get("type") not in EDIT_BEAT_TYPES:
+                continue
+            anchor = str(beat.get("at") or "").strip()
+            if not anchor:
+                continue
+            if beat["type"] == "image":
+                query = str(beat.get("query") or "").strip()[:100]
+                if not query:
+                    continue
+                look = beat.get("look") if beat.get("look") in EDIT_IMAGE_LOOKS else "diagram"
+                beats.append({"type": "image", "at": anchor, "query": query, "look": look})
+            else:
+                text = str(beat.get("text") or "").strip()[:MAX_EDIT_TEXT_LENGTH]
+                if text:
+                    beats.append({"type": "text", "at": anchor, "text": text})
+        by_index[index] = {
+            "index": index,
+            "expression": expression,
+            "beats": beats[:MAX_EDIT_BEATS_PER_SEGMENT],
+        }
+    return [
+        by_index.get(index, {"index": index, "expression": "", "beats": []})
+        for index in range(segment_count)
+    ]
+
+
+def generate_edit_plan(segments: list, expressions: list, language: str = "", app_config=None):
+    """Ask the model for a per-segment edit plan; None when it keeps failing.
+
+    ``segments`` is a list of {"index", "kind", "title", "text"} dicts.
+    """
+    prompt = build_edit_plan_prompt(segments, expressions, language)
+    for i in range(_max_retries):
+        try:
+            if app_config is None:
+                response = _generate_response(prompt)
+            else:
+                response = _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                logger.error(f"failed to generate edit plan: {response}")
+                return None
+            plan = normalize_edit_plan(
+                _parse_list_script_response(response), len(segments), expressions
+            )
+            logger.success(
+                f"edit plan generated: {sum(len(s['beats']) for s in plan)} beats"
+            )
+            return plan
+        except Exception as e:
+            logger.warning(f"failed to parse edit plan: {type(e).__name__}: {e}")
+        if i < _max_retries - 1:
+            logger.warning(f"failed to generate edit plan, trying again... {i + 1}")
     return None
 
 

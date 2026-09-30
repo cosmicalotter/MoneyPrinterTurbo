@@ -459,9 +459,22 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 
 每个条目包含 `name`、`text`、用于素材搜索或文生图的英文 `image_term`，以及可选
 的 `image_file`（相对于脚本文件，填写后不再在线获取素材）。支持的素材来源为
-`pexels`、`pixabay`、`coverr`、`openai_image` 和 `local`。默认输出 16:9，并支持
-`cli.py` 的配音、字幕、字体和配乐参数。完整参数见
+`pexels`、`pixabay`、`coverr`、`openai_image` 和 `local`。清单视频默认输出 16:9，
+不烧录字幕、不加背景音乐（可用 `--subtitle-enabled`、`--bgm-type random` 开启），
+并支持 `cli.py` 的配音、字体和配乐参数。完整参数见
 `uv run python list_video.py --help`。
+
+**自动剪辑**默认开启（`--no-edit` 关闭）。大模型会像剪辑师一样规划每个片段：主持
+角色的表情，以及在旁白说到对应词语时弹出的配图和关键信息（依据 TTS 逐词时间戳）。
+配图来自 Wikimedia Commons、Pexels 或 Pixabay（`--beats web`），也可由文生图模型
+生成（`--beats ai`）；示意图会被抠成贴纸，照片则显示为带边框的卡片。视频还会加入
+章节标签、订阅动画、音效、进度条、淡入淡出，并把音频响度统一到 -14 LUFS。
+`credits.txt` 汇总配图署名，`edit-plan.json` 可修改后通过 `--edit-plan` 重新渲染。
+使用 `--assets` 提供自己的角色（`personaje/<表情>.png`，`<表情>_habla.png` 为张嘴
+帧）、音效（`sfx/`）与订阅动画（`suscribete.gif` 等）；
+`uv run python list_video.py --create-demo-assets ./assets` 会生成示例角色。
+如需更自然的配音，可选用 Gemini 音色并通过 `--voice-style` 或 `config.toml` 中的
+`gemini_tts_style` 描述语气。
 
 ## 配音、字幕与配乐 🎙️
 

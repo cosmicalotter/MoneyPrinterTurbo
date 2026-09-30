@@ -475,8 +475,32 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 Each item has `name`, `text`, an English `image_term` used for stock search or image
 generation, and an optional `image_file` (relative to the script) that replaces the
 online lookup. Supported sources are `pexels`, `pixabay`, `coverr`, `openai_image`,
-and `local`. Videos default to 16:9, and the voice, subtitle, font, and music options
-of `cli.py` are accepted. Run `uv run python list_video.py --help` for all options.
+and `local`. List videos default to 16:9 without burned-in subtitles or background
+music (`--subtitle-enabled` and `--bgm-type random` add them), and the voice, font,
+and music options of `cli.py` are accepted. Run `uv run python list_video.py --help`
+for all options.
+
+**Automatic editing** is on by default (`--no-edit` turns it off). The LLM plans each
+segment like an editor: a host character's expression, plus pictures and key facts
+that pop in exactly when the narration mentions them (timed from TTS word boundaries).
+Pictures come from Wikimedia Commons, Pexels, or Pixabay (`--beats web`) or from the
+image model (`--beats ai`); diagrams are cut out as stickers and photos become framed
+cards. The video also gets chapter labels, a subscribe animation, sound effects, a
+progress bar, fades, and audio normalized to -14 LUFS. `credits.txt` lists picture
+attributions for the description, and `edit-plan.json` can be edited and passed back
+with `--edit-plan` to re-render. Bring your own character and sounds with `--assets`:
+
+```text
+assets/
+  personaje/feliz.png, feliz_habla.png, sorprendido.png, ...   (_habla = mouth open)
+  sfx/whoosh.wav, pop.wav, tick.wav, click.wav                 (optional overrides)
+  suscribete.gif (or .webm/.mov/.png) and suscribete.mp3       (optional)
+```
+
+`uv run python list_video.py --create-demo-assets ./assets` writes a sample character.
+For a more natural voice, use a Gemini voice (for example `gemini:Charon-Informative`)
+with `--voice-style "Narrate like an enthusiastic science YouTuber"`, or set
+`gemini_tts_model` / `gemini_tts_style` in `config.toml`.
 
 ## Voiceover, Subtitles, and Background Music 🎙️
 

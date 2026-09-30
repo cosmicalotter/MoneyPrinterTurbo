@@ -264,7 +264,7 @@ class TestGenerateListVideo(unittest.TestCase):
         )
         rendered = []
 
-        def fake_render(visual, frames, params, output_file, title="", font_path="", zoom=0):
+        def fake_render(visual, frames, params, output_file, title="", font_path="", zoom=0, **kwargs):
             rendered.append((visual.kind, frames, title))
             Path(output_file).write_bytes(b"segment")
             return output_file
@@ -302,8 +302,10 @@ class TestGenerateListVideo(unittest.TestCase):
         self.assertEqual(entries[1][2], "Sentence number 1")
         self.assertTrue(entries[1][1].startswith(list_video._format_srt_time(starts[1])))
 
+        # Burned-in subtitles go through generate_video with loudness-normalized audio.
         kwargs = generate_video.call_args.kwargs
-        self.assertEqual(kwargs["audio_path"], result["audio_file"])
+        self.assertTrue(kwargs["audio_path"].endswith("narration-mix.wav"))
+        self.assertTrue(os.path.isfile(kwargs["audio_path"]))
         self.assertEqual(result["warnings"], [])
         self.assertFalse(os.path.exists(os.path.join(utils.task_dir(self.task_id), "combined-1.mp4")))
 

@@ -77,6 +77,16 @@ def _zoom(value: str) -> float:
     return number
 
 
+def _accent(value: str) -> str:
+    from app.services.list_video_fx import parse_color
+
+    try:
+        parse_color(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return value
+
+
 def _gap(value: str) -> float:
     number = float(value)
     if not 0 <= number <= 5:
@@ -109,18 +119,35 @@ Script format (JSON):
   image_term is an English picture description for stock search or image
   generation; image_file (relative to the script file) overrides it.
 
+Automatic editing (on by default, --no-edit turns it off):
+  The LLM plans each segment: the host character's expression plus pictures
+  and key facts that pop in when the narration mentions them. The result has
+  chapter labels, sound effects, a subscribe animation, a progress bar and
+  audio normalized to -14 LUFS. The plan is saved as edit-plan.json; edit it
+  and pass it back with --edit-plan to re-render with your changes.
+
+  --assets points to a folder with your own material (all optional):
+    personaje/feliz.png, personaje/feliz_habla.png, ...  character expressions;
+        *_habla.png is the open-mouth frame used while the voice is speaking
+    sfx/whoosh.wav, pop.wav, tick.wav, click.wav  replace the built-in sounds
+    suscribete.gif (or .webm/.mov/.png) and suscribete.mp3  subscribe animation
+  Try it with a sample character:
+    uv run python list_video.py --create-demo-assets ./assets
+
 Supported --video-source values: pexels, pixabay, coverr, openai_image and
-local (local needs an image_file for every item). The aspect ratio defaults to
-16:9. All other video, voice, subtitle and music options of cli.py are accepted
-(see: uv run python cli.py --help). Files are written to
-storage/tasks/<task-id>/, including chapters.txt for the YouTube description.
+local (local needs an image_file for every item). List videos default to 16:9,
+no burned-in subtitles and no background music; pass --subtitle-enabled or
+--bgm-type random to add them. All other video, voice, subtitle and music
+options of cli.py are accepted (see: uv run python cli.py --help). Files are
+written to storage/tasks/<task-id>/: final-1.mp4, chapters.txt and credits.txt
+for the YouTube description, and edit-plan.json.
 """,
         formatter_class=cli._CliHelpFormatter,
         # Unknown options are forwarded to cli.py; abbreviations could make
         # this parser claim them instead.
         allow_abbrev=False,
     )
-    source = parser.add_mutually_exclusive_group(required=True)
+    source = parser.add_mutually_exclusive_group()
     source.add_argument("--subject", help="video topic used to write the script with the LLM")
     source.add_argument("--script", help="path to a reviewed list script JSON file")
     parser.add_argument(
@@ -168,6 +195,41 @@ storage/tasks/<task-id>/, including chapters.txt for the YouTube description.
         help="do not draw the item title on screen",
     )
     parser.add_argument("--task-id", type=cli._task_id, default=None, help="task id to reuse")
+
+    edit_group = parser.add_argument_group("automatic editing")
+    edit_group.add_argument(
+        "--no-edit",
+        action="store_true",
+        help="plain look: only the visual and an item title per segment",
+    )
+    edit_group.add_argument("--assets", default="", help="folder with character, sound and subscribe assets")
+    edit_group.add_argument(
+        "--beats",
+        choices=["web", "ai", "none"],
+        default="web",
+        help="pictures that pop in: searched on the web, AI-generated (openai_image), or none",
+    )
+    edit_group.add_argument(
+        "--subscribe",
+        choices=["both", "intro", "outro", "none"],
+        default="both",
+        help="when the subscribe animation appears",
+    )
+    edit_group.add_argument("--accent", type=_accent, default=None, help="accent colour, e.g. #FF4F5E")
+    edit_group.add_argument("--edit-plan", default="", help="reuse an edited edit-plan.json")
+    edit_group.add_argument("--no-progress-bar", action="store_true", help="hide the progress bar")
+    edit_group.add_argument("--no-sfx", action="store_true", help="no sound effects")
+    edit_group.add_argument(
+        "--voice-style",
+        default=None,
+        help='delivery instructions for Gemini voices, e.g. "Narra con entusiasmo y curiosidad"',
+    )
+    edit_group.add_argument(
+        "--create-demo-assets",
+        metavar="DIR",
+        default=None,
+        help="write a sample character (a red blood cell) into DIR and exit",
+    )
     return parser
 
 
@@ -227,15 +289,33 @@ def save_script_file(script, path: str) -> str:
 def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args, forwarded = parser.parse_known_args(argv)
+    if args.create_demo_assets:
+        from app.services.list_video_fx import create_demo_assets
+
+        written = create_demo_assets(args.create_demo_assets)
+        print(json.dumps({"assets": os.path.abspath(args.create_demo_assets), "files": written}, ensure_ascii=False))
+        return 0
+    if not args.subject and not args.script:
+        parser.error("one of --subject or --script is required")
     if args.script_only and not args.subject:
         parser.error("--script-only requires --subject")
     unsupported = _find_unsupported_options(forwarded)
     if unsupported:
         parser.error(f"not available for list videos: {', '.join(unsupported)}")
+    if args.assets and not os.path.isdir(args.assets):
+        parser.error(f"--assets folder not found: {args.assets}")
+    if args.edit_plan and not os.path.isfile(args.edit_plan):
+        parser.error(f"--edit-plan file not found: {args.edit_plan}")
 
     forwarded = list(forwarded)
     if not _has_option(forwarded, "--video-aspect"):
         forwarded += ["--video-aspect", "16:9"]
+    # Long-form list videos read best without burned-in subtitles or music;
+    # both stay available when asked for explicitly.
+    if not any(_has_option(forwarded, o) for o in ("--subtitle-enabled", "--no-subtitle-enabled")):
+        forwarded += ["--no-subtitle-enabled"]
+    if not any(_has_option(forwarded, o) for o in ("--bgm-type", "--bgm-file")):
+        forwarded += ["--bgm-type", "none"]
     # cli.py needs a subject to accept the options; stopping at "script" skips
     # checks that only apply to the single-script material stage.
     cli_args = cli.parse_args(
@@ -252,8 +332,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         logger.error(f"invalid list video input: {exc}")
         return 2
 
+    from app.config import config
     from app.services import list_video, llm
+    from app.services.list_video_editor import EditOptions
     from app.utils import utils
+
+    if args.voice_style is not None:
+        config.app["gemini_tts_style"] = args.voice_style
 
     task_id = args.task_id or utils.get_uuid()
     script_file = os.path.abspath(args.script) if args.script else ""
@@ -282,6 +367,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         options["gap_seconds"] = args.gap
     if args.zoom is not None:
         options["zoom"] = args.zoom
+    if not args.no_edit:
+        options["edit"] = EditOptions(
+            assets_dir=os.path.abspath(args.assets) if args.assets else "",
+            beats=args.beats,
+            subscribe=args.subscribe,
+            accent=args.accent or EditOptions.accent,
+            progress_bar=not args.no_progress_bar,
+            sound_effects=not args.no_sfx,
+            plan_file=os.path.abspath(args.edit_plan) if args.edit_plan else "",
+            language=params.video_language or "",
+        )
     try:
         result = list_video.generate_list_video(
             task_id,

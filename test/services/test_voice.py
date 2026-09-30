@@ -538,6 +538,25 @@ class TestVoiceService(unittest.TestCase):
             voice_config.prebuilt_voice_config.voice_name,
             "Zephyr",
         )
+
+        # A configured model and delivery style are sent with the text.
+        with patch("google.genai.Client", _FakeClient), patch.object(
+            vs.config,
+            "app",
+            dict(
+                vs.config.app,
+                gemini_api_key="test-key",
+                gemini_tts_model="gemini-2.5-pro-preview-tts",
+                gemini_tts_style="Narra con entusiasmo:",
+            ),
+        ):
+            self.assertIsNotNone(
+                vs.gemini_tts(
+                    text="Hola", voice_name="Charon", voice_rate=1.0, voice_file=voice_file
+                )
+            )
+        self.assertEqual(captured["model"], "gemini-2.5-pro-preview-tts")
+        self.assertEqual(captured["contents"], "Narra con entusiasmo:\nHola")
         self.assertTrue(captured["closed"])
 
         vs.create_subtitle(sub_maker=sub_maker, text=text, subtitle_file=subtitle_file)

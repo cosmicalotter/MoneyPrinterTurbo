@@ -8,15 +8,20 @@ narrated, item 3's picture and title must be on screen.
 
 This renderer therefore works segment by segment (intro, every item, outro):
 
-1. synthesize the segment narration on its own and measure it;
-2. render the segment's visual (generated image, stock clips or a local file)
-   with an optional "N. name" title for exactly that length;
-3. pad the narration with silence to the rendered frame count, so audio and
+1. synthesize every segment narration on its own and measure it;
+2. optionally let ``list_video_editor`` plan overlays for each segment
+   (chapter label, host character, pictures and key facts timed to words,
+   subscribe animation, progress bar) plus sound effects;
+3. render the segment's visual (generated image, stock clips or a local file)
+   and its overlays with ffmpeg for exactly that length;
+4. pad the narration with silence to the rendered frame count, so audio and
    video share one timeline with no accumulated drift;
-4. shift the segment subtitles and chapter marks by the running offset.
+5. shift the segment subtitles, chapter marks and sound effects by the running
+   offset.
 
-The concatenated result goes through ``video.generate_video`` like any other
-task, so subtitles, fonts and background music keep their usual settings.
+Without burned-in subtitles the segments are joined and muxed with ffmpeg only
+(background music ducked under the voice, loudness normalized to -14 LUFS).
+With subtitles the result goes through ``video.generate_video`` as usual.
 """
 
 from __future__ import annotations
@@ -28,8 +33,9 @@ import re
 import subprocess
 import wave
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
+import numpy as np
 from loguru import logger
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -42,6 +48,9 @@ from app.models.schema import (
     VideoFitMode,
     VideoParams,
 )
+from app.services import bgm as bgm_service
+from app.services import list_video_editor as editor_service
+from app.services import list_video_fx as fx
 from app.services import material, subtitle, task_artifacts, video, voice
 from app.utils import file_security, utils
 
@@ -75,6 +84,8 @@ class ListSegment:
     label: str
     image_term: str
     image_file: str
+    number: int = 0  # 1-based position of an item, 0 for intro/outro
+    name: str = ""
 
 
 @dataclass
@@ -118,6 +129,8 @@ def build_segments(
                 label,
                 item.image_term.strip() or name,
                 item.image_file.strip(),
+                number=index if number_items else 0,
+                name=name,
             )
         )
 
@@ -458,6 +471,42 @@ def _fit_filter(width: int, height: int, fit_mode: VideoFitMode) -> str:
     )
 
 
+def _still_filter() -> str:
+    # Decode a picture once and repeat it in memory: much cheaper than
+    # re-reading the file for every frame with "-loop 1".
+    return f"loop=loop=-1:size=1:start=0,setpts=N/{FPS}/TB"
+
+
+def _overlay_input(overlay: fx.Overlay) -> List[str]:
+    if overlay.mode == "frames":
+        return ["-framerate", str(FPS), "-i", overlay.source]
+    if overlay.mode == "concat":
+        return ["-f", "concat", "-safe", "0", "-i", overlay.source]
+    if overlay.mode == "media" and overlay.source.lower().endswith(".webm"):
+        # libvpx keeps the alpha channel of transparent WebM animations.
+        return ["-c:v", "libvpx-vp9", "-i", overlay.source]
+    return ["-i", overlay.source]
+
+
+def _overlay_prefilter(overlay: fx.Overlay, duration: float) -> str:
+    if overlay.mode == "still":
+        chain = [_still_filter()]
+    elif overlay.mode == "concat":
+        chain = [f"fps={FPS}"]
+    else:
+        chain = [f"fps={FPS}", f"setpts=PTS-STARTPTS+{overlay.start:.3f}/TB"]
+    chain.append("format=rgba")
+    end = overlay.end or duration
+    if overlay.fade_in > 0:
+        chain.append(f"fade=t=in:st={overlay.start:.3f}:d={overlay.fade_in:.3f}:alpha=1")
+    if overlay.fade_out > 0:
+        chain.append(
+            f"fade=t=out:st={max(overlay.start, end - overlay.fade_out):.3f}"
+            f":d={overlay.fade_out:.3f}:alpha=1"
+        )
+    return ",".join(chain)
+
+
 def render_segment_video(
     visual: _Visual,
     frames: int,
@@ -466,6 +515,9 @@ def render_segment_video(
     title: str = "",
     font_path: str = "",
     zoom: float = DEFAULT_ZOOM,
+    overlays: List[fx.Overlay] | None = None,
+    fade_in: float = 0.0,
+    fade_out: float = 0.0,
 ) -> str:
     """Render one silent segment of exactly ``frames`` frames with ffmpeg."""
     width, height = VideoAspect(params.video_aspect).to_resolution()
@@ -475,6 +527,7 @@ def render_segment_video(
     temp_files: List[str] = []
     inputs: List[str] = []
     filters: List[str] = []
+    overlays = list(overlays or [])
 
     if visual.kind == "videos":
         clip_durations = [(path, _probe_duration(path)) for path in visual.paths]
@@ -509,15 +562,15 @@ def render_segment_video(
             fit_mode,
         )
         temp_files.append(still)
-        inputs += ["-loop", "1", "-framerate", str(FPS), "-i", still]
+        inputs += ["-i", still]
         if zoom > 0:
             filters.append(
-                f"[0:v]zoompan=z='1+{zoom}*on/{frames}'"
+                f"[0:v]{_still_filter()},zoompan=z='1+{zoom}*on/{frames}'"
                 ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                 f":d=1:s={width}x{height}:fps={FPS},setsar=1[base]"
             )
         else:
-            filters.append("[0:v]setsar=1[base]")
+            filters.append(f"[0:v]{_still_filter()},setsar=1[base]")
     elif visual.kind == "none":
         red, green, blue = _FALLBACK_BACKGROUND
         inputs += [
@@ -532,14 +585,30 @@ def render_segment_video(
         banner = f"{stem}-title.png"
         render_title_image(title, width, height, font_path).save(banner)
         temp_files.append(banner)
-        banner_index = inputs.count("-i")
-        inputs += ["-loop", "1", "-framerate", str(FPS), "-i", banner]
-        filters.append(
-            f"[base][{banner_index}:v]overlay=x=(W-w)/2:y={int(height * 0.05)}"
-            ":format=auto,format=yuv420p[v]"
-        )
-    else:
-        filters.append("[base]format=yuv420p[v]")
+        overlays.insert(0, fx.Overlay(banner, x="(W-w)/2", y=str(int(height * 0.05))))
+
+    current = "base"
+    for number, overlay in enumerate(overlays):
+        input_index = inputs.count("-i")
+        inputs += _overlay_input(overlay)
+        filters.append(f"[{input_index}:v]{_overlay_prefilter(overlay, duration)}[o{number}]")
+        options = [f"x='{overlay.x}'", f"y='{overlay.y}'", "eval=frame"]
+        if overlay.start > 0 or overlay.end > 0:
+            options.append(
+                f"enable='between(t,{overlay.start:.3f},{(overlay.end or duration):.3f})'"
+            )
+        if overlay.mode in ("frames", "media"):
+            options.append("eof_action=pass")
+        filters.append(f"[{current}][o{number}]overlay={':'.join(options)}[m{number}]")
+        current = f"m{number}"
+
+    finish = []
+    if fade_in > 0:
+        finish.append(f"fade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0:
+        finish.append(f"fade=t=out:st={max(0.0, duration - fade_out):.3f}:d={fade_out:.3f}")
+    finish.append("format=yuv420p")
+    filters.append(f"[{current}]{','.join(finish)}[v]")
 
     command = [
         utils.get_ffmpeg_binary(),
@@ -556,8 +625,6 @@ def render_segment_video(
         "-r",
         str(FPS),
         "-an",
-        # Intermediate files are re-encoded by generate_video, so favour speed
-        # and keep quality high enough to survive the second pass.
         "-c:v",
         "libx264",
         "-preset",
@@ -626,6 +693,117 @@ def _resolve_font_path(params: VideoParams) -> str:
     return file_security.resolve_path_within_directory(utils.font_dir(), font_name)
 
 
+DESIGN_FONT = "BeVietnamPro-Bold.ttf"
+LOUDNESS_TARGET = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+
+def _design_font(params: VideoParams, texts: List[str]) -> str:
+    """Bold Latin font for labels, unless the texts need the subtitle font."""
+    candidate = os.path.join(utils.font_dir(), DESIGN_FONT)
+    sample = " ".join(texts)
+    if os.path.isfile(candidate) and video.subtitle_font_supports_text(candidate, sample):
+        return candidate
+    return _resolve_font_path(params)
+
+
+def mix_sound_effects(
+    narration_file: str, events: List[tuple], output_file: str
+) -> str:
+    """Add (time, file, gain) sound effects onto the narration."""
+    with wave.open(narration_file, "rb") as source:
+        voice_samples = np.frombuffer(source.readframes(source.getnframes()), dtype=np.int16)
+    mix = voice_samples.astype(np.float32) / 32768
+    cache = {}
+    for time, path, gain in events:
+        if path not in cache:
+            cache[path] = np.frombuffer(_decode_pcm(path), dtype=np.int16).astype(np.float32) / 32768
+        effect = cache[path]
+        begin = max(0, int(round(time * PCM_SAMPLE_RATE)))
+        if begin >= len(mix):
+            continue
+        piece = effect[: len(mix) - begin]
+        mix[begin : begin + len(piece)] += piece * gain
+    # Soft-limit the rare peaks where an effect lands on loud speech.
+    mix = np.tanh(mix * 1.1) / np.tanh(1.1)
+    with wave.open(output_file, "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(PCM_SAMPLE_RATE)
+        target.writeframes((np.clip(mix, -1, 1) * 32767).astype(np.int16).tobytes())
+    return output_file
+
+
+def _run_ffmpeg(command: List[str], what: str) -> None:
+    result = subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
+    )
+    if result.returncode != 0:
+        raise ListVideoError(f"failed to {what}: {(result.stderr or '').strip()[-2000:]}")
+
+
+def normalize_loudness(audio_file: str, output_file: str) -> str:
+    """Bring the narration to YouTube's loudness (-14 LUFS)."""
+    _run_ffmpeg(
+        [
+            utils.get_ffmpeg_binary(), "-v", "error", "-y", "-i", audio_file,
+            "-af", LOUDNESS_TARGET, "-ar", "48000", output_file,
+        ],
+        "normalize loudness",
+    )
+    return output_file
+
+
+def mux_final_video(
+    video_file: str,
+    audio_file: str,
+    output_file: str,
+    duration: float,
+    bgm_file: str = "",
+    bgm_volume: float = 0.2,
+) -> str:
+    """Attach the audio without re-encoding the picture.
+
+    Background music is looped, ducked under the voice with a sidechain
+    compressor and faded out; the mix is normalized to -14 LUFS.
+    """
+    inputs = ["-i", video_file, "-i", audio_file]
+    if bgm_file:
+        inputs += ["-stream_loop", "-1", "-i", bgm_file]
+        fade_start = max(0.0, duration - 3)
+        graph = (
+            "[1:a]aformat=channel_layouts=stereo,asplit=2[voice][key];"
+            f"[2:a]aformat=channel_layouts=stereo,volume={bgm_volume:.3f},"
+            f"atrim=0:{duration:.3f},afade=t=out:st={fade_start:.3f}:d=3[music];"
+            "[music][key]sidechaincompress=threshold=0.03:ratio=6:attack=15:release=350[ducked];"
+            f"[voice][ducked]amix=inputs=2:duration=first:normalize=0,{LOUDNESS_TARGET}[a]"
+        )
+    else:
+        graph = f"[1:a]{LOUDNESS_TARGET},aformat=channel_layouts=stereo[a]"
+    _run_ffmpeg(
+        [
+            utils.get_ffmpeg_binary(), "-v", "error", "-y", *inputs,
+            "-filter_complex", graph, "-map", "0:v", "-map", "[a]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-movflags", "+faststart", output_file,
+        ],
+        "write the final video",
+    )
+    return output_file
+
+
+def _list_bgm_file(params: VideoParams, warnings: List[str]) -> str:
+    if str(params.bgm_type or "").strip().lower() == "none":
+        return ""
+    if not bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume):
+        return ""
+    if params.bgm_type not in ("random", "custom"):
+        warnings.append(
+            f"background music type {params.bgm_type!r} is not supported for list videos"
+        )
+        return ""
+    return video.get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file) or ""
+
+
 def generate_list_video(
     task_id: str,
     script: ListVideoScript,
@@ -635,8 +813,14 @@ def generate_list_video(
     number_items: bool = True,
     show_item_titles: bool = True,
     zoom: float = DEFAULT_ZOOM,
+    edit: Optional[editor_service.EditOptions] = None,
 ) -> dict:
     """Render a list-format video and return its files and chapters.
+
+    With ``edit`` the video is edited automatically: chapter labels, a host
+    character, pictures and key facts timed to the narration, a subscribe
+    animation, sound effects and a progress bar. Without it each segment
+    shows its visual and an "N. name" title.
 
     ``image_file`` paths in the script are used as given; callers that accept
     scripts from untrusted clients must restrict them first.
@@ -660,15 +844,56 @@ def generate_list_video(
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
     word_level = getattr(params, "subtitle_display_mode", "sentence") == "word_by_word"
     voice_name = voice.parse_voice_name(params.voice_name)
+    warnings: List[str] = []
+
+    # Pass 1: narrate every segment, so the editor knows the whole timeline.
+    narrations: List[editor_service.Narration] = []
+    for index, segment in enumerate(segments):
+        step = f"[{index + 1}/{len(segments)}] {segment.chapter}"
+        logger.info(f"list video narration {step}")
+        audio_file = os.path.join(task_dir, f"segment-{index:02d}.mp3")
+        sub_maker = voice.tts(
+            text=segment.text,
+            voice_name=voice_name,
+            voice_rate=params.voice_rate,
+            voice_file=audio_file,
+        )
+        if sub_maker is None:
+            raise ListVideoError(f"failed to synthesize narration for {step}")
+        pcm = _decode_pcm(audio_file)
+        speech_seconds = len(pcm) / 2 / PCM_SAMPLE_RATE
+        if speech_seconds <= 0:
+            raise ListVideoError(f"narration for {step} is empty")
+        narrations.append(
+            editor_service.Narration(
+                pcm=pcm,
+                speech_seconds=speech_seconds,
+                frames=math.ceil((speech_seconds + max(0.0, gap_seconds)) * FPS),
+                sub_maker=sub_maker,
+            )
+        )
+
+    editor = None
+    if edit is not None:
+        width, height = VideoAspect(params.video_aspect).to_resolution()
+        theme = fx.Theme(
+            width,
+            height,
+            _design_font(params, [s.chapter for s in segments]),
+            fx.parse_color(edit.accent),
+        )
+        editor = editor_service.Editor(edit, theme, task_dir, segments, narrations)
+        editor.make_plan()
 
     narration_file = os.path.join(task_dir, "narration.wav")
     segment_videos: List[str] = []
     subtitle_entries: List[tuple[float, float, str]] = []
     chapters: List[tuple[float, str]] = []
     material_sources: list = []
-    warnings: List[str] = []
+    sound_events: List[tuple] = []
     offset = 0.0
 
+    # Pass 2: draw each segment and assemble one timeline.
     with wave.open(narration_file, "wb") as narration:
         narration.setnchannels(1)
         narration.setsampwidth(2)
@@ -677,22 +902,8 @@ def generate_list_video(
         for index, segment in enumerate(segments):
             step = f"[{index + 1}/{len(segments)}] {segment.chapter}"
             logger.info(f"list video segment {step}")
-
-            audio_file = os.path.join(task_dir, f"segment-{index:02d}.mp3")
-            sub_maker = voice.tts(
-                text=segment.text,
-                voice_name=voice_name,
-                voice_rate=params.voice_rate,
-                voice_file=audio_file,
-            )
-            if sub_maker is None:
-                raise ListVideoError(f"failed to synthesize narration for {step}")
-            pcm = _decode_pcm(audio_file)
-            speech_seconds = len(pcm) / 2 / PCM_SAMPLE_RATE
-            if speech_seconds <= 0:
-                raise ListVideoError(f"narration for {step} is empty")
-
-            target_frames = math.ceil((speech_seconds + max(0.0, gap_seconds)) * FPS)
+            measured = narrations[index]
+            target_frames = measured.frames
             visual = _prepare_visual(
                 task_id,
                 segment,
@@ -701,34 +912,40 @@ def generate_list_video(
                 material_sources,
                 warnings,
             )
+            overlays: List[fx.Overlay] = []
+            if editor is not None:
+                segment_edit = editor.segment_edit(index, offset, show_item_titles)
+                overlays = segment_edit.overlays
+                sound_events += [
+                    (offset + time, path, gain) for time, path, gain in segment_edit.sounds
+                ]
             segment_video = os.path.join(task_dir, f"segment-{index:02d}.mp4")
             render_segment_video(
                 visual,
                 target_frames,
                 params,
                 segment_video,
-                title=segment.label if show_item_titles else "",
+                title=segment.label if show_item_titles and editor is None else "",
                 font_path=font_path,
                 zoom=zoom,
+                overlays=overlays,
+                fade_in=0.5 if editor is not None and index == 0 else 0.0,
+                fade_out=0.6 if editor is not None and index == len(segments) - 1 else 0.0,
             )
             segment_videos.append(segment_video)
 
             # Pad the narration to the frames actually written, so an encoder
             # that rounds a frame differently cannot shift later segments.
             frames = count_video_frames(segment_video) or target_frames
-            pcm, trimmed = pad_pcm_to_frames(pcm, frames)
+            pcm, trimmed = pad_pcm_to_frames(measured.pcm, frames)
             if trimmed > gap_seconds + 1 / FPS:
                 warnings.append(f"narration for {step} was cut by {trimmed:.2f}s")
             narration.writeframes(pcm)
 
-            if (
-                params.subtitle_enabled
-                and subtitle_provider == "edge"
-                and sub_maker is not None
-            ):
+            if params.subtitle_enabled and subtitle_provider == "edge":
                 segment_srt = os.path.join(task_dir, f"segment-{index:02d}.srt")
                 voice.create_subtitle(
-                    sub_maker=sub_maker,
+                    sub_maker=measured.sub_maker,
                     text=segment.text,
                     subtitle_file=segment_srt,
                     word_level=word_level,
@@ -745,6 +962,12 @@ def generate_list_video(
     combined_video = concat_segments(
         segment_videos, os.path.join(task_dir, "combined-1.mp4")
     )
+
+    audio_file = narration_file
+    if sound_events:
+        audio_file = mix_sound_effects(
+            narration_file, sound_events, os.path.join(task_dir, "narration-sfx.wav")
+        )
 
     subtitle_path = ""
     if params.subtitle_enabled and subtitle_provider:
@@ -764,20 +987,38 @@ def generate_list_video(
             subtitle_path = ""
 
     final_video = os.path.join(task_dir, "final-1.mp4")
-    bgm_ok = video.generate_video(
-        video_path=combined_video,
-        audio_path=narration_file,
-        subtitle_path=subtitle_path,
-        output_file=final_video,
-        params=params,
-    )
-    if not bgm_ok:
-        warnings.append("background music could not be mixed")
+    if subtitle_path:
+        # Burned-in subtitles need the MoviePy compositor, which also mixes
+        # the background music; hand it narration already at -14 LUFS.
+        normalized = normalize_loudness(audio_file, os.path.join(task_dir, "narration-mix.wav"))
+        bgm_ok = video.generate_video(
+            video_path=combined_video,
+            audio_path=normalized,
+            subtitle_path=subtitle_path,
+            output_file=final_video,
+            params=params,
+        )
+        if not bgm_ok:
+            warnings.append("background music could not be mixed")
+    else:
+        mux_final_video(
+            combined_video,
+            audio_file,
+            final_video,
+            offset,
+            bgm_file=_list_bgm_file(params, warnings),
+            bgm_volume=params.bgm_volume if params.bgm_volume is not None else 0.2,
+        )
 
     chapters_text = format_chapters(chapters, offset)
     chapters_file = os.path.join(task_dir, "chapters.txt")
     with open(chapters_file, "w", encoding="utf-8") as fp:
         fp.write(f"{script.title}\n\n{chapters_text}\n")
+
+    credits_file = ""
+    if editor is not None:
+        warnings += editor.warnings
+        credits_file = editor.write_credits()
 
     task_artifacts.patch_script_data(
         task_id,
@@ -794,6 +1035,7 @@ def generate_list_video(
         "videos": [final_video],
         "chapters": chapters_text,
         "chapters_file": chapters_file,
+        "credits_file": credits_file,
         "audio_file": narration_file,
         "audio_duration": round(offset, 3),
         "subtitle_path": subtitle_path,
