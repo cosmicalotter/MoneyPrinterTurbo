@@ -165,18 +165,70 @@ def get_ffmpeg_binary() -> str:
 
     system_ffmpeg = shutil.which("ffmpeg")
     if system_ffmpeg:
+        # Some distributions ship FFmpeg without libx264 (Fedora's ffmpeg-free),
+        # but every encode in the project requests it. Prefer the bundled
+        # imageio-ffmpeg build in that case instead of failing mid-task.
+        if _ffmpeg_encoder_support(system_ffmpeg, _DEFAULT_FFMPEG_ENCODER) is False:
+            bundled_ffmpeg = _get_bundled_ffmpeg()
+            if bundled_ffmpeg and _ffmpeg_encoder_support(
+                bundled_ffmpeg, _DEFAULT_FFMPEG_ENCODER
+            ):
+                _log_bundled_ffmpeg_preference(system_ffmpeg, bundled_ffmpeg)
+                return bundled_ffmpeg
         return system_ffmpeg
 
+    bundled_ffmpeg = _get_bundled_ffmpeg()
+    if bundled_ffmpeg:
+        return bundled_ffmpeg
+
+    return "ffmpeg"
+
+
+_DEFAULT_FFMPEG_ENCODER = "libx264"
+
+
+def _get_bundled_ffmpeg() -> str:
     try:
         import imageio_ffmpeg
 
-        bundled_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        if bundled_ffmpeg:
-            return bundled_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe() or ""
     except Exception as exc:
         logger.warning(f"failed to resolve bundled ffmpeg binary: {str(exc)}")
+        return ""
 
-    return "ffmpeg"
+
+@lru_cache(maxsize=16)
+def _ffmpeg_encoder_support(ffmpeg_binary: str, encoder: str) -> bool | None:
+    """Whether ``ffmpeg_binary`` lists ``encoder``; None when it cannot tell."""
+    try:
+        result = subprocess.run(
+            [ffmpeg_binary, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    # Lines look like " V....D libx264   <description>"; compare the name column
+    # only, since descriptions of other encoders can mention the same name.
+    return any(
+        len(fields) > 1 and fields[1] == encoder
+        for fields in (line.split() for line in (result.stdout or "").splitlines())
+    )
+
+
+@lru_cache(maxsize=4)
+def _log_bundled_ffmpeg_preference(system_ffmpeg: str, bundled_ffmpeg: str) -> None:
+    # Cached so the notice appears once per process, not on every lookup.
+    logger.warning(
+        f"system ffmpeg {system_ffmpeg} has no {_DEFAULT_FFMPEG_ENCODER} encoder; "
+        f"using the bundled ffmpeg instead: {bundled_ffmpeg}"
+    )
 
 
 _FFMPEG_INSTALL_HINT = (

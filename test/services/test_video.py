@@ -559,6 +559,62 @@ class TestVideoService(unittest.TestCase):
         ), patch.dict(sys.modules, {"imageio_ffmpeg": fake_imageio_ffmpeg}):
             self.assertEqual(utils.get_ffmpeg_binary(), "/tmp/bundled-ffmpeg")
 
+    def test_get_ffmpeg_binary_skips_system_ffmpeg_without_libx264(self):
+        """
+        Fedora 的 ffmpeg-free 不含 libx264，而项目所有编码都依赖它。系统版本
+        明确缺少该编码器、内置版本具备时，应改用内置版本；无法判断时保持原样。
+        """
+        fake_imageio_ffmpeg = types.SimpleNamespace(
+            get_ffmpeg_exe=lambda: "/tmp/bundled-ffmpeg"
+        )
+        cases = [
+            ({"/usr/bin/ffmpeg": False, "/tmp/bundled-ffmpeg": True}, "/tmp/bundled-ffmpeg"),
+            ({"/usr/bin/ffmpeg": True}, "/usr/bin/ffmpeg"),
+            ({"/usr/bin/ffmpeg": None}, "/usr/bin/ffmpeg"),
+            ({"/usr/bin/ffmpeg": False, "/tmp/bundled-ffmpeg": False}, "/usr/bin/ffmpeg"),
+        ]
+        for support, expected in cases:
+            with self.subTest(support=support), patch.dict(
+                os.environ, {}, clear=True
+            ), patch.object(
+                utils.shutil, "which", return_value="/usr/bin/ffmpeg"
+            ), patch.dict(
+                sys.modules, {"imageio_ffmpeg": fake_imageio_ffmpeg}
+            ), patch.object(
+                utils,
+                "_ffmpeg_encoder_support",
+                side_effect=lambda binary, encoder: support[binary],
+            ):
+                self.assertEqual(utils.get_ffmpeg_binary(), expected)
+
+    def test_ffmpeg_encoder_support_reads_the_encoder_list(self):
+        listing = (
+            "Encoders:\n"
+            " V....D libx264rgb           libx264 H.264 RGB\n"
+            " V....D libopenh264          OpenH264 H.264\n"
+        )
+        results = [
+            (types.SimpleNamespace(returncode=0, stdout=listing), False),
+            (
+                types.SimpleNamespace(
+                    returncode=0, stdout=listing + " V....D libx264   H.264\n"
+                ),
+                True,
+            ),
+            (types.SimpleNamespace(returncode=1, stdout=""), None),
+            (FileNotFoundError("ffmpeg"), None),
+        ]
+        for outcome, expected in results:
+            utils._ffmpeg_encoder_support.cache_clear()
+            with self.subTest(expected=expected), patch.object(
+                utils.subprocess, "run", side_effect=[outcome]
+            ):
+                self.assertIs(
+                    utils._ffmpeg_encoder_support("/usr/bin/ffmpeg", "libx264"),
+                    expected,
+                )
+        utils._ffmpeg_encoder_support.cache_clear()
+
     def test_get_effective_video_codec_falls_back_when_encoder_missing(self):
         """
         用户选择的硬件编码器必须先经过 FFmpeg encoder 列表检测。检测不到
