@@ -90,6 +90,10 @@ pixabay_api_keys = []
 # Register at https://coverr.co/developers?ctx=header_navigation
 coverr_api_keys = []
 
+# YouTube Data API v3 key used by research.py to study similar channels.
+# Create one for free at https://console.cloud.google.com/apis/credentials
+youtube_api_key = ""
+
 # WaveSpeed AI generates clips from your script keywords with text-to-video
 # models. Create an API key at https://wavespeed.ai
 wavespeed_api_keys = []

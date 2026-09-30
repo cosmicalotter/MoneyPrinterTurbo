@@ -511,6 +511,24 @@ For a more natural voice, use a Gemini voice (for example `gemini:Charon-Informa
 with `--voice-style "Narrate like an enthusiastic science YouTuber"`, or set
 `gemini_tts_model` / `gemini_tts_style` in `config.toml`.
 
+#### ⑥ Research Similar Channels 🔎
+
+`research.py` collects the public statistics of every video of the channels you choose
+(YouTube Data API v3; set a free `youtube_api_key` in `config.toml`) and ranks them by
+**outlier score**: a video's views divided by the median of the same channel's videos
+of the same format, so a 10 means the topic beat that channel's normal level tenfold.
+The CSV also has views per day, engagement, comments per 1,000 views, and title
+features. With `--analyze`, the configured LLM reads the outliers and suggests topic
+and title patterns plus 20 video ideas for your channel.
+
+```shell
+uv run python research.py --channel @SomeChannel --channel @Another \
+  --search "every X explained" --analyze --brief "General topics explained for otters"
+uv run python research.py --from-csv storage/research/research-20260930-1200.csv --analyze
+```
+
+Retention and click-through rate are private to each channel, so they are not included.
+
 ## Voiceover, Subtitles, and Background Music 🎙️
 
 ### Voice Synthesis
