@@ -939,6 +939,159 @@ Please note that you must use English for generating video search terms; Chinese
 
 
 # =============================================================================
+# List-format scripts ("every X explained")
+#
+# 长视频清单格式：开场 + N 个条目 + 结尾。每个条目单独配一张画面，
+# 渲染层据此逐段合成配音并与画面精确对齐，因此这里要求模型返回结构化 JSON，
+# 而不是普通脚本的纯文本段落。
+# =============================================================================
+
+MIN_LIST_ITEM_COUNT = 3
+DEFAULT_LIST_WORDS_PER_ITEM = 110
+MIN_LIST_WORDS_PER_ITEM = 30
+MAX_LIST_WORDS_PER_ITEM = 400
+
+
+def build_list_script_prompt(
+    video_subject: str,
+    item_count: int,
+    language: str = "",
+    words_per_item: int = DEFAULT_LIST_WORDS_PER_ITEM,
+) -> str:
+    language_rule = (
+        f"write title, intro, names, texts and outro in {language}"
+        if language
+        else "write title, intro, names, texts and outro in the same language as the video subject"
+    )
+    example = {
+        "title": "Every Planet Explained",
+        "intro": "Hook sentence that makes the viewer stay.",
+        "intro_image_term": "solar system overview illustration",
+        "items": [
+            {
+                "name": "Mercury",
+                "text": "Mercury is ...",
+                "image_term": "small grey planet mercury close to the sun",
+            }
+        ],
+        "outro": "Closing sentence and a question for the comments.",
+        "outro_image_term": "planets lined up in space",
+    }
+    return f"""
+# Role: Script writer for long-form "every X explained" list videos
+
+## Goal:
+Write the narration for a video about the subject below. The video walks through
+exactly {item_count} items, one at a time, each shown with its own picture.
+
+## Constrains:
+1. return only a JSON object with the keys shown in the output example; no markdown, no code fences.
+2. {language_rule}; every image_term must be in English.
+3. "title": a catchy video title, at most 70 characters.
+4. "intro": a hook of at most 60 words; do not greet the viewer or say "welcome".
+5. "items": exactly {item_count} objects, ordered to keep curiosity high, with the most surprising item last.
+6. each item "name": at most 5 words.
+7. each item "text": about {words_per_item} words of plain spoken narration that starts by saying the item name, explains what it is, gives one surprising fact and why it matters; no lists, no markdown, no emojis.
+8. each "image_term" (including intro_image_term and outro_image_term): 3 to 8 English words describing one concrete, drawable picture, with no text in the picture.
+9. "outro": at most 40 words, closing the video with a question that invites comments.
+10. use only accurate, verifiable facts; for health topics never give treatment instructions or dosages.
+
+## Output Example:
+{json.dumps(example, ensure_ascii=False)}
+
+## Video Subject:
+{video_subject}
+""".strip()
+
+
+def _parse_list_script_response(response: str) -> dict:
+    text = _strip_code_fence(response)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # 部分模型会在 JSON 前后附带解释文字，退回提取最外层对象。
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise
+        data = json.loads(match.group())
+    if not isinstance(data, dict):
+        raise ValueError("list script response is not a JSON object")
+    return data
+
+
+def generate_list_script(
+    video_subject: str,
+    item_count: int,
+    language: str = "",
+    words_per_item: int = DEFAULT_LIST_WORDS_PER_ITEM,
+    app_config=None,
+):
+    """Generate an editable ListVideoScript for a list-format video.
+
+    Returns None when the provider fails or keeps returning invalid JSON, so the
+    caller can report the failure instead of rendering an empty video.
+    """
+    # 延迟导入，避免 schema 在 llm 模块导入阶段读取配置造成循环依赖。
+    from app.models.schema import MAX_LIST_VIDEO_ITEMS, ListVideoScript
+
+    video_subject = _limit_script_text(video_subject, 500, "video_subject")
+    if not video_subject:
+        raise ValueError("video_subject is required for a list script")
+    item_count = max(MIN_LIST_ITEM_COUNT, min(int(item_count), MAX_LIST_VIDEO_ITEMS))
+    words_per_item = max(
+        MIN_LIST_WORDS_PER_ITEM, min(int(words_per_item), MAX_LIST_WORDS_PER_ITEM)
+    )
+    prompt = build_list_script_prompt(
+        video_subject=video_subject,
+        item_count=item_count,
+        language=language,
+        words_per_item=words_per_item,
+    )
+    logger.info(
+        f"generating list script: subject={video_subject}, items={item_count}, "
+        f"words_per_item={words_per_item}"
+    )
+
+    for i in range(_max_retries):
+        try:
+            if app_config is None:
+                response = _generate_response(prompt)
+            else:
+                response = _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                logger.error(f"failed to generate list script: {response}")
+                return None
+            data = _parse_list_script_response(response)
+            # 模型偶尔会额外返回说明性字段，只保留脚本模型认识的键。
+            allowed_keys = set(ListVideoScript.model_fields)
+            data = {key: value for key, value in data.items() if key in allowed_keys}
+            if isinstance(data.get("items"), list):
+                allowed_item_keys = {"name", "text", "image_term"}
+                data["items"] = [
+                    {k: v for k, v in item.items() if k in allowed_item_keys}
+                    for item in data["items"]
+                    if isinstance(item, dict)
+                ]
+            script = ListVideoScript.model_validate(data)
+            if len(script.items) != item_count:
+                logger.warning(
+                    f"list script has {len(script.items)} items, "
+                    f"requested {item_count}"
+                )
+            logger.success(
+                f"list script generated: title={script.title!r}, "
+                f"items={len(script.items)}"
+            )
+            return script
+        except Exception as e:
+            logger.warning(f"failed to parse list script: {type(e).__name__}: {e}")
+        if i < _max_retries - 1:
+            logger.warning(f"failed to generate list script, trying again... {i + 1}")
+
+    return None
+
+
+# =============================================================================
 # Social publishing metadata
 #
 # 根据视频主题和脚本生成发布到短视频平台时常用的 title、caption 和 hashtags。

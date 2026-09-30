@@ -457,6 +457,27 @@ individual runtime failure, and the command prints one JSON summary when finishe
 The summary contains `total`, `succeeded`, `failed`, and `tasks`; each task entry has
 `index`, `task_id`, `status`, `result`, `failed_stage`, and `error`.
 
+#### ⑤ List Videos ("Every X Explained") 📚
+
+`list_video.py` produces long list-format videos: an intro, one segment per item and
+an outro. Each item is narrated on its own and shown with its own picture and an
+on-screen `N. name` title, so visuals never drift away from the narration. The task
+folder also contains `chapters.txt` with YouTube chapters for the description.
+
+Write an editable JSON script with the configured LLM, review it, then render it:
+
+```shell
+uv run python list_video.py --subject "Every hormone explained" --items 12 \
+  --video-language en-US --script-only --output hormones.json
+uv run python list_video.py --script hormones.json --video-source openai_image
+```
+
+Each item has `name`, `text`, an English `image_term` used for stock search or image
+generation, and an optional `image_file` (relative to the script) that replaces the
+online lookup. Supported sources are `pexels`, `pixabay`, `coverr`, `openai_image`,
+and `local`. Videos default to 16:9, and the voice, subtitle, font, and music options
+of `cli.py` are accepted. Run `uv run python list_video.py --help` for all options.
+
 ## Voiceover, Subtitles, and Background Music 🎙️
 
 ### Voice Synthesis

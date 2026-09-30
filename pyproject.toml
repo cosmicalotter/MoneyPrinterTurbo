@@ -61,7 +61,7 @@ dev = [
 # 因此与 app 服务层、服务启动入口和面向 Agent 用户发布的 Skill 脚本一起
 # 纳入统计，避免覆盖率只反映局部模块。
 branch = true
-source = ["app", "cli", "webui", "main", "docs/skill"]
+source = ["app", "cli", "list_video", "webui", "main", "docs/skill"]
 
 [tool.coverage.report]
 # Python 3.11 和 3.13 完整测试的实测分支覆盖率均超过 70.4%。以 70%

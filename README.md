@@ -443,6 +443,26 @@ uv run python cli.py --batch-file ./tasks.json --stop-at video
 参数与本地文件预检；单个任务运行失败不会阻止后续条目，结束后会输出统一的
 JSON 汇总。清单中的相对自定义音频与本地素材路径以清单目录为基准。
 
+#### ⑤ 清单类长视频（“逐个讲解”）📚
+
+`list_video.py` 用于生成清单格式的长视频：开场、每个条目一段、结尾。每个条目
+单独配音，并配有专属画面和 `序号. 名称` 标题，画面与旁白始终保持同步。任务目录
+还会生成 `chapters.txt`，可直接粘贴到 YouTube 简介作为章节。
+
+先用已配置的大模型生成可编辑的 JSON 脚本，审阅后再渲染：
+
+```shell
+uv run python list_video.py --subject "人体每种激素详解" --items 12 \
+  --video-language zh-CN --script-only --output hormones.json
+uv run python list_video.py --script hormones.json --video-source openai_image
+```
+
+每个条目包含 `name`、`text`、用于素材搜索或文生图的英文 `image_term`，以及可选
+的 `image_file`（相对于脚本文件，填写后不再在线获取素材）。支持的素材来源为
+`pexels`、`pixabay`、`coverr`、`openai_image` 和 `local`。默认输出 16:9，并支持
+`cli.py` 的配音、字幕、字体和配乐参数。完整参数见
+`uv run python list_video.py --help`。
+
 ## 配音、字幕与配乐 🎙️
 
 ### 语音合成

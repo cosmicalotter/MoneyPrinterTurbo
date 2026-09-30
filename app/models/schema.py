@@ -161,6 +161,39 @@ class VideoParams(BaseModel):
     custom_system_prompt: str = Field(default="", max_length=8000)
 
 
+MAX_LIST_VIDEO_ITEMS = 50
+
+
+class ListVideoItem(BaseModel):
+    """One entry of a list-format video ("every X explained")."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Shown on screen as "N. name" and used as the chapter title.
+    name: str = Field(min_length=1, max_length=120)
+    # Narration spoken while this item is on screen.
+    text: str = Field(min_length=1, max_length=4000)
+    # English visual description used for stock search or image generation.
+    image_term: str = Field(default="", max_length=200)
+    # Optional local image or video that replaces the online lookup.
+    image_file: str = Field(default="", max_length=1024)
+
+
+class ListVideoScript(BaseModel):
+    """Editable script for a list-format video, one visual per item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    intro: str = Field(default="", max_length=4000)
+    intro_image_term: str = Field(default="", max_length=200)
+    intro_image_file: str = Field(default="", max_length=1024)
+    items: List[ListVideoItem] = Field(min_length=1, max_length=MAX_LIST_VIDEO_ITEMS)
+    outro: str = Field(default="", max_length=4000)
+    outro_image_term: str = Field(default="", max_length=200)
+    outro_image_file: str = Field(default="", max_length=1024)
+
+
 class SubtitleRequest(BaseModel):
     video_script: str
     video_language: Optional[str] = ""
