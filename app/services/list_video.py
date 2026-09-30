@@ -56,6 +56,7 @@ from app.utils import file_security, utils
 
 LIST_VIDEO_SOURCES = ("pexels", "pixabay", "coverr", "openai_image", "local")
 STOCK_VIDEO_SOURCES = ("pexels", "pixabay", "coverr")
+STOCK_FOOTAGE_FACTOR = 1.6
 # Still pictures are fitted once with Pillow; everything else is read by ffmpeg.
 IMAGE_EXTENSIONS = frozenset({*const.FILE_TYPE_IMAGES, "webp"})
 
@@ -344,7 +345,9 @@ def _prepare_visual(
                 source=source,
                 video_aspect=VideoAspect(params.video_aspect),
                 video_concat_mode=VideoConcatMode.sequential,
-                audio_duration=duration,
+                # Ask for more footage than the segment needs, so the montage
+                # shows different clips instead of looping the same one.
+                audio_duration=duration * STOCK_FOOTAGE_FACTOR,
                 max_clip_duration=params.video_clip_duration,
             )
             material_sources.extend(_read_material_sources(task_id))

@@ -336,6 +336,7 @@ class TestGenerateListVideo(unittest.TestCase):
         def fake_download(**kwargs):
             path, source = next(downloads)
             self.assertEqual(len(kwargs["search_terms"]), 1)
+            self.assertEqual(kwargs["audio_duration"], 5.0 * list_video.STOCK_FOOTAGE_FACTOR)
             if source:
                 task_artifacts.patch_script_data(self.task_id, material_sources=[source])
             return [path]
