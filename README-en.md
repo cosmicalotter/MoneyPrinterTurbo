@@ -502,9 +502,11 @@ assets/
 **Two languages at once:** `--also-in en-US` renders a second video from the same
 script. The LLM adapts the text (title formulas and jokes included) while the pictures
 stay the same; the second version gets its own edit plan and voice (`--also-voice`,
-default: a free Edge voice for that language). With `--script-only` the translation is
-saved next to the script as `<name>.en-US.json` for review and can be passed back with
-`--also-script`.
+default: a free Edge voice for that language). Several languages work in one run
+(`--also-in en-US,pt-BR`), with per-language options written as `LANG=VALUE`, for
+example `--also-voice pt-BR=pt-BR-AntonioNeural-Male`. With `--script-only` each
+translation is saved next to the script as `<name>.<LANG>.json` for review and can be
+passed back with `--also-script`.
 For a more natural voice, use a Gemini voice (for example `gemini:Charon-Informative`)
 with `--voice-style "Narrate like an enthusiastic science YouTuber"`, or set
 `gemini_tts_model` / `gemini_tts_style` in `config.toml`.

@@ -694,8 +694,8 @@ class TestBilingual(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         summary = json.loads(stdout)
-        self.assertEqual(summary["also"]["script_file"], os.path.join(self.temp_dir, "new.en-US.json"))
-        saved = list_video_cli.load_script_file(summary["also"]["script_file"])
+        self.assertEqual(summary["also"][0]["script_file"], os.path.join(self.temp_dir, "new.en-US.json"))
+        saved = list_video_cli.load_script_file(summary["also"][0]["script_file"])
         self.assertEqual(saved.title, "Electricity Explained for Otters")
 
     def test_both_versions_are_rendered_with_their_own_voice_and_plan(self):
@@ -726,7 +726,7 @@ class TestBilingual(unittest.TestCase):
         self.assertTrue(edit_es.plan_file.endswith("plan.json"))
         self.assertEqual(edit_en.plan_file, "")
         summary = json.loads(stdout)
-        self.assertEqual(summary["also"]["language"], "en-US")
+        self.assertEqual(summary["also"][0]["language"], "en-US")
         self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "electricidad.en-US.json")))
 
     def test_reviewed_translation_and_failures(self):
@@ -746,7 +746,8 @@ class TestBilingual(unittest.TestCase):
         with patch.object(list_video, "generate_list_video", side_effect=[{"videos": ["a"]}, list_video.ListVideoError("x")]):
             code, stdout, _ = self._run(["--script", self.script_path, "--also-in", "en-US", "--also-script", reviewed])
         self.assertEqual(code, 1)
-        self.assertNotIn("also", json.loads(stdout))
+        # The summary still lists the versions that finished (none here).
+        self.assertEqual(json.loads(stdout)["also"], [])
 
         with patch.object(llm, "translate_list_script", return_value=None):
             self.assertEqual(self._run(["--script", self.script_path, "--also-in", "en-US"])[0], 1)
@@ -754,6 +755,47 @@ class TestBilingual(unittest.TestCase):
         code, _, stderr = self._run(["--script", self.script_path, "--also-voice", "x"])
         self.assertEqual(code, 2)
         self.assertIn("need --also-in", stderr)
+
+    def test_three_languages_with_per_language_options(self):
+        reviewed = os.path.join(self.temp_dir, "reviewed-en.json")
+        Path(reviewed).write_text(self._translation(), encoding="utf-8")
+        portuguese = self._translation(title="A eletricidade explicada para lontras")
+        calls = []
+
+        def fake_generate(task_id, script, params, **kwargs):
+            calls.append((script.title, params.voice_name, params.video_language, app_config.app.get("gemini_tts_style")))
+            return {"videos": [task_id]}
+
+        with patch.dict(app_config.app, {}), patch.object(
+            llm, "_generate_response", return_value=portuguese
+        ) as translate, patch.object(list_video, "generate_list_video", side_effect=fake_generate):
+            code, stdout, _ = self._run([
+                "--script", self.script_path, "--also-in", "en-US, pt-BR,en-US",
+                "--also-script", f"en-US={reviewed}",
+                "--also-voice", "en-US=gemini:Puck-Upbeat",
+                "--also-voice-style", "pt-BR=Narre com entusiasmo = energia",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(translate.call_count, 1)  # only Portuguese needed translating
+        self.assertEqual([c[2] for c in calls], ["", "en-US", "pt-BR"])
+        self.assertEqual(calls[1][:2], ("Electricity Explained for Otters", "gemini:Puck-Upbeat"))
+        self.assertEqual(calls[2], (
+            "A eletricidade explicada para lontras", "pt-BR-AntonioNeural-Male", "pt-BR", "Narre com entusiasmo = energia"))
+        summary = json.loads(stdout)
+        self.assertEqual([a["language"] for a in summary["also"]], ["en-US", "pt-BR"])
+        self.assertTrue(os.path.isfile(os.path.join(self.temp_dir, "electricidad.pt-BR.json")))
+
+    def test_per_language_option_parsing(self):
+        mapping = list_video_cli.per_language(["en-US=a", "pt-BR=b=c"], ["en-US", "pt-BR"], "--x")
+        self.assertEqual(mapping, {"en-US": "a", "pt-BR": "b=c"})
+        # One language: a bare value (even with "=") belongs to it.
+        self.assertEqual(list_video_cli.per_language(["x = y"], ["en-US"], "--x"), {"en-US": "x = y"})
+        with self.assertRaisesRegex(ValueError, "LANG=VALUE"):
+            list_video_cli.per_language(["voice"], ["en-US", "pt-BR"], "--x")
+        code, _, stderr = self._run(["--script", self.script_path, "--also-in", "en-US,pt-BR", "--also-voice", "v"])
+        self.assertEqual(code, 2)
+        self.assertIn("LANG=VALUE", stderr)
+        self.assertEqual(self._run(["--script", self.script_path, "--also-in", " , "])[0], 2)
 
 
 if __name__ == "__main__":

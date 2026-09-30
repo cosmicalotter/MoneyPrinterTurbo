@@ -87,6 +87,33 @@ def _accent(value: str) -> str:
     return value
 
 
+def _languages(value: str) -> list:
+    languages = []
+    for part in value.split(","):
+        language = part.strip()
+        if language and language not in languages:
+            languages.append(language)
+    if not languages:
+        raise argparse.ArgumentTypeError("give at least one language, e.g. en-US")
+    return languages
+
+
+def per_language(values: Sequence[str], languages: Sequence[str], option: str) -> dict:
+    """Map "LANG=VALUE" entries (or one bare VALUE for a single language)."""
+    mapping = {}
+    for value in values:
+        prefix, separator, rest = value.partition("=")
+        if separator and prefix.strip() in languages:
+            mapping[prefix.strip()] = rest.strip()
+        elif len(languages) == 1:
+            mapping[languages[0]] = value.strip()
+        else:
+            raise ValueError(
+                f"{option} needs LANG=VALUE with one of {', '.join(languages)}: {value!r}"
+            )
+    return mapping
+
+
 def _gap(value: str) -> float:
     number = float(value)
     if not 0 <= number <= 5:
@@ -137,9 +164,11 @@ Automatic editing (on by default, --no-edit turns it off):
 Two languages at once:
   --also-in en-US makes a second video in English from the same script: the
   LLM adapts the text (title formulas and jokes included), pictures stay the
-  same, and the English version gets its own edit plan and voice. Review the
-  translation first with --script-only; it is saved next to the script as
-  <name>.en-US.json and can be passed back with --also-script.
+  same, and the English version gets its own edit plan and voice. Several
+  languages work too (--also-in en-US,pt-BR); per-language options then use
+  LANG=VALUE, e.g. --also-voice pt-BR=pt-BR-AntonioNeural-Male. Review the
+  translations first with --script-only; each is saved next to the script as
+  <name>.<LANG>.json and can be passed back with --also-script.
     uv run python list_video.py --subject "La electricidad explicada para nutrias" \\
       --video-language es-CO --also-in en-US --script-only --output electricidad.json
     uv run python list_video.py --script electricidad.json --also-in en-US \\
@@ -237,24 +266,28 @@ for the YouTube description, and edit-plan.json.
     )
     edit_group.add_argument(
         "--also-in",
-        metavar="LANG",
-        default=None,
-        help="also make the video in this language (e.g. en-US): the script is adapted by the LLM",
+        metavar="LANGS",
+        type=_languages,
+        default=[],
+        help="also make the video in these languages, comma-separated (e.g. en-US,pt-BR)",
     )
     edit_group.add_argument(
         "--also-voice",
-        default=None,
-        help="voice for the --also-in version (default: a free Edge voice for that language)",
+        action="append",
+        default=[],
+        help="[LANG=]VOICE for an --also-in version (default: a free Edge voice); repeatable",
     )
     edit_group.add_argument(
         "--also-voice-style",
-        default=None,
-        help="Gemini delivery instructions for the --also-in version (default: none)",
+        action="append",
+        default=[],
+        help="[LANG=]Gemini delivery instructions for an --also-in version (default: none); repeatable",
     )
     edit_group.add_argument(
         "--also-script",
-        default=None,
-        help="reviewed translation to use instead of translating again",
+        action="append",
+        default=[],
+        help="[LANG=]reviewed translation to use instead of translating again; repeatable",
     )
     edit_group.add_argument(
         "--create-demo-assets",
@@ -340,6 +373,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         parser.error(f"--edit-plan file not found: {args.edit_plan}")
     if not args.also_in and (args.also_voice or args.also_voice_style or args.also_script):
         parser.error("--also-voice, --also-voice-style and --also-script need --also-in")
+    try:
+        also_voices = per_language(args.also_voice, args.also_in, "--also-voice")
+        also_styles = per_language(args.also_voice_style, args.also_in, "--also-voice-style")
+        also_script_paths = per_language(args.also_script, args.also_in, "--also-script")
+    except ValueError as exc:
+        parser.error(str(exc))
 
     forwarded = list(forwarded)
     if not _has_option(forwarded, "--video-aspect"):
@@ -362,7 +401,9 @@ def run(argv: Sequence[str] | None = None) -> int:
         params = cli.build_video_params(cli_args)
         cli.prepare_cli_files(params, stop_at="video")
         script = load_script_file(args.script) if args.script else None
-        also_script = load_script_file(args.also_script) if args.also_script else None
+        also_scripts = {
+            language: load_script_file(path) for language, path in also_script_paths.items()
+        }
     except (ValueError, OSError, ValidationError) as exc:
         logger.error(f"invalid list video input: {exc}")
         return 2
@@ -374,11 +415,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     from app.services.list_video_editor import EditOptions
     from app.utils import utils
 
-    also_voice = ""
-    if args.also_in:
-        also_voice = args.also_voice or voice.default_edge_voice(args.also_in)
-        if not also_voice:
-            logger.error(f"no default voice for {args.also_in}; pass --also-voice")
+    for language in args.also_in:
+        also_voices.setdefault(language, voice.default_edge_voice(language))
+        if not also_voices[language]:
+            logger.error(f"no default voice for {language}; pass --also-voice {language}=VOICE")
             return 2
 
     if args.voice_style is not None:
@@ -403,20 +443,30 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         logger.info(f"list script saved: {script_file}")
 
-    also_script_file = os.path.abspath(args.also_script) if args.also_script else ""
-    if args.also_in and also_script is None:
-        also_script = llm.translate_list_script(script, args.also_in)
-        if also_script is None:
-            logger.error(f"the LLM did not return a valid {args.also_in} script")
+    also_script_files = {
+        language: os.path.abspath(path) for language, path in also_script_paths.items()
+    }
+    for language in args.also_in:
+        if language in also_scripts:
+            continue
+        translated = llm.translate_list_script(script, language)
+        if translated is None:
+            logger.error(f"the LLM did not return a valid {language} script")
             return 1
         stem, extension = os.path.splitext(script_file)
-        also_script_file = save_script_file(also_script, f"{stem}.{args.also_in}{extension or '.json'}")
-        logger.info(f"{args.also_in} script saved: {also_script_file}")
+        also_scripts[language] = translated
+        also_script_files[language] = save_script_file(
+            translated, f"{stem}.{language}{extension or '.json'}"
+        )
+        logger.info(f"{language} script saved: {also_script_files[language]}")
 
     if args.script_only:
         summary = {"task_id": task_id, "script_file": script_file}
-        if also_script_file:
-            summary["also"] = {"language": args.also_in, "script_file": also_script_file}
+        if args.also_in:
+            summary["also"] = [
+                {"language": language, "script_file": also_script_files[language]}
+                for language in args.also_in
+            ]
         print(json.dumps(summary, ensure_ascii=False))
         return 0
 
@@ -461,28 +511,32 @@ def run(argv: Sequence[str] | None = None) -> int:
     summary = {"task_id": task_id, "script_file": script_file, "result": result}
 
     if args.also_in:
+        summary["also"] = []
+    for language in args.also_in:
         also_task_id = utils.get_uuid()
         also_params = params.model_copy(
-            update={"voice_name": also_voice, "video_language": args.also_in}
+            update={"voice_name": also_voices[language], "video_language": language}
         )
         also_options = dict(options)
         if "edit" in options:
-            # Edit plans anchor beats to words of one language, so the other
+            # Edit plans anchor beats to words of one language, so every
             # version gets its own plan.
-            also_options["edit"] = replace(options["edit"], language=args.also_in, plan_file="")
+            also_options["edit"] = replace(options["edit"], language=language, plan_file="")
         # A delivery style is written for one language; never reuse it.
-        config.app["gemini_tts_style"] = args.also_voice_style or ""
-        logger.info(f"rendering the {args.also_in} version with voice {also_voice}")
-        also_result = render(also_task_id, also_script, also_params, also_options)
+        config.app["gemini_tts_style"] = also_styles.get(language, "")
+        logger.info(f"rendering the {language} version with voice {also_voices[language]}")
+        also_result = render(also_task_id, also_scripts[language], also_params, also_options)
         if also_result is None:
             print(json.dumps(summary, ensure_ascii=False))
             return 1
-        summary["also"] = {
-            "language": args.also_in,
-            "task_id": also_task_id,
-            "script_file": also_script_file,
-            "result": also_result,
-        }
+        summary["also"].append(
+            {
+                "language": language,
+                "task_id": also_task_id,
+                "script_file": also_script_files[language],
+                "result": also_result,
+            }
+        )
 
     print(json.dumps(summary, ensure_ascii=False))
     return 0

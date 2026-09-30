@@ -475,8 +475,10 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 `uv run python list_video.py --create-demo-assets ./assets` 会生成示例角色。
 **双语同时制作：**`--also-in en-US` 会基于同一脚本再生成一个英文视频。大模型负责
 本地化改写（包括标题句式和笑点），配图保持不变，第二个版本使用独立的剪辑计划和
-配音（`--also-voice`，默认选用该语言的免费 Edge 音色）。配合 `--script-only` 时，
-译稿保存为 `<名称>.en-US.json` 供审阅，之后可通过 `--also-script` 传回。
+配音（`--also-voice`，默认选用该语言的免费 Edge 音色）。一次可指定多种语言
+（`--also-in en-US,pt-BR`），按语言设置的参数写作 `LANG=VALUE`，例如
+`--also-voice pt-BR=pt-BR-AntonioNeural-Male`。配合 `--script-only` 时，各译稿保存为
+`<名称>.<LANG>.json` 供审阅，之后可通过 `--also-script` 传回。
 如需更自然的配音，可选用 Gemini 音色并通过 `--voice-style` 或 `config.toml` 中的
 `gemini_tts_style` 描述语气。
 
