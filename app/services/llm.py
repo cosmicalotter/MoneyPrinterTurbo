@@ -15,6 +15,7 @@ from openai.types.chat import ChatCompletion
 
 from app.config import config
 from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, get_llm_provider
+from app.services import gemini_auth
 from app.utils import utils
 
 _max_retries = 5
@@ -310,7 +311,8 @@ def _generate_response(prompt: str, app_config=None) -> str:
             for field in provider.extra_fields
         }
 
-        if provider.requires_api_key and not api_key:
+        vertex_gemini = adapter == "gemini" and gemini_auth.use_vertexai(runtime_app_config)
+        if provider.requires_api_key and not api_key and not vertex_gemini:
             raise ValueError(
                 f"{llm_provider}: api_key is not set, please set it in the config.toml file."
             )
@@ -363,7 +365,9 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 temperature=0.5,
                 top_p=1,
                 top_k=1,
-                max_output_tokens=2048,
+                # List scripts and edit plans are long JSON documents, and
+                # thinking models spend part of this budget before answering.
+                max_output_tokens=8192,
                 safety_settings=[
                     types.SafetySetting(
                         category="HARM_CATEGORY_HARASSMENT",
@@ -384,11 +388,14 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 ],
             )
 
+            # Resolved before the request so a missing key or Vertex project is
+            # reported as such, not as an invalid model response.
+            client_kwargs = gemini_auth.client_kwargs(runtime_app_config, api_key)
             try:
                 # 新版 google-genai 通过统一 Client 暴露模型服务。上下文管理器
                 # 会在请求结束后关闭底层 HTTP 连接，避免频繁生成时积累连接资源。
                 with genai.Client(
-                    api_key=api_key,
+                    **client_kwargs,
                     http_options=http_options,
                 ) as client:
                     response = client.models.generate_content(

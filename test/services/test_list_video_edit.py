@@ -588,6 +588,21 @@ class TestEditingCli(unittest.TestCase):
             self._run(["--script", self.script, "--voice-style", "Con entusiasmo"])
             self.assertEqual(app_config.app["gemini_tts_style"], "Con entusiasmo")
 
+    def test_demo_keyword_uses_the_built_in_host(self):
+        demo_dir = os.path.join(self.temp_dir, "demo-assets")
+        with patch.object(list_video_cli, "demo_assets_dir", wraps=list_video_cli.demo_assets_dir), patch(
+            "app.utils.utils.storage_dir", return_value=demo_dir
+        ), patch.object(list_video, "generate_list_video", return_value={}) as generate:
+            os.makedirs(demo_dir)
+            code, _, _ = self._run(["--script", self.script, "--assets", "demo"])
+            self.assertEqual(code, 0)
+            self.assertEqual(generate.call_args.kwargs["edit"].assets_dir, os.path.abspath(demo_dir))
+            self.assertTrue(os.path.isfile(os.path.join(demo_dir, "personaje", "feliz_habla.png")))
+            # A second run reuses the drawn files.
+            with patch("app.services.list_video_fx.create_demo_assets") as create:
+                self._run(["--script", self.script, "--assets", "demo"])
+            create.assert_not_called()
+
     def test_demo_assets_and_input_errors(self):
         code, stdout, _ = self._run(["--create-demo-assets", os.path.join(self.temp_dir, "a")])
         self.assertEqual(code, 0)

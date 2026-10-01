@@ -855,8 +855,47 @@ class TestLiteLLMProvider(unittest.TestCase):
         )
         self.assertEqual(captured["model"], "gemini-test-model")
         self.assertEqual(captured["contents"], "Say hello")
-        self.assertEqual(captured["config"].max_output_tokens, 2048)
+        self.assertEqual(captured["config"].max_output_tokens, 8192)
         self.assertTrue(captured["closed"])
+
+    def test_gemini_on_vertex_ai_uses_application_default_credentials(self):
+        """Vertex AI 模式不需要 API Key，Client 使用项目和区域并依赖 ADC 鉴权。"""
+        config.app.update(
+            {
+                "llm_provider": "gemini",
+                "gemini_api_key": "",
+                "gemini_base_url": "",
+                "gemini_model_name": "gemini-2.5-flash",
+                "gemini_use_vertexai": True,
+                "gemini_vertex_project": "my-project",
+                "gemini_vertex_location": "",
+            }
+        )
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured["client_kwargs"] = kwargs
+                self.models = types.SimpleNamespace(
+                    generate_content=lambda **kw: types.SimpleNamespace(text="vertex")
+                )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch("google.genai.Client", FakeClient):
+            self.assertEqual(llm._generate_response("hi"), "vertex")
+        self.assertEqual(
+            captured["client_kwargs"],
+            {"vertexai": True, "project": "my-project", "location": "us-central1", "http_options": None},
+        )
+
+        config.app["gemini_vertex_project"] = ""
+        with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": ""}), patch("google.genai.Client", FakeClient):
+            self.assertIn("gemini_vertex_project", llm._generate_response("hi"))
 
     def test_cloudflare_requires_account_id_before_request(self):
         """Cloudflare 缺少 Account ID 时应在本地失败，不发送无效请求。"""

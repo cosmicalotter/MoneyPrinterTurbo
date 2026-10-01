@@ -1648,9 +1648,12 @@ def gemini_tts(
     _configure_pydub_ffmpeg(AudioSegment)
     
     try:
-        api_key = config.app.get("gemini_api_key", "")
-        if not api_key:
-            logger.error("Gemini API key is not set")
+        from app.services import gemini_auth
+
+        try:
+            client_kwargs = gemini_auth.client_kwargs(config.app, config.app.get("gemini_api_key", ""))
+        except ValueError as exc:
+            logger.error(f"Gemini TTS is not configured: {exc}")
             return None
 
         logger.info(f"start, voice name: {voice_name}, try: 1")
@@ -1675,7 +1678,7 @@ def gemini_tts(
 
         # google-genai 使用统一 Client 调用文本和 TTS 模型。上下文管理器确保
         # 请求结束后释放 HTTP 连接，同时保留原有 PCM 转码和字幕时间轴逻辑。
-        with genai.Client(api_key=api_key) as client:
+        with genai.Client(**client_kwargs) as client:
             response = client.models.generate_content(
                 model=model,
                 contents=contents,

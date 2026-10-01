@@ -292,6 +292,13 @@ anthropic_model_name = ""
 # API key: https://aistudio.google.com/app/apikey
 gemini_api_key = ""
 gemini_model_name = ""
+# Use Vertex AI with Application Default Credentials instead of gemini_api_key
+# (run `gcloud auth application-default login` once). Applies to the Gemini
+# LLM and Gemini TTS voices. Model names follow Vertex AI, e.g. gemini-2.5-flash.
+gemini_use_vertexai = false
+gemini_vertex_project = ""
+# Region such as "us-central1" (default) or "global".
+gemini_vertex_location = ""
 # Gemini TTS voices ("gemini:*") reuse gemini_api_key. The model defaults to
 # gemini-2.5-flash-preview-tts; gemini-2.5-pro-preview-tts sounds richer.
 gemini_tts_model = ""

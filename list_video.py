@@ -44,6 +44,18 @@ _UNSUPPORTED_CLI_OPTIONS = (
 )
 _IMAGE_FILE_FIELDS = ("intro_image_file", "outro_image_file")
 _DEFAULT_ITEM_COUNT = 12
+DEMO_ASSETS = "demo"
+
+
+def demo_assets_dir() -> str:
+    """The built-in red blood cell host, drawn on first use."""
+    from app.services.list_video_fx import create_demo_assets
+    from app.utils import utils
+
+    folder = utils.storage_dir("demo-assets", create=True)
+    if not os.path.isdir(os.path.join(folder, "personaje")):
+        create_demo_assets(folder)
+    return folder
 _MAX_SCRIPT_BYTES = 1024 * 1024
 
 
@@ -158,8 +170,7 @@ Automatic editing (on by default, --no-edit turns it off):
         *_habla.png is the open-mouth frame used while the voice is speaking
     sfx/whoosh.wav, pop.wav, tick.wav, click.wav  replace the built-in sounds
     suscribete.gif (or .webm/.mov/.png) and suscribete.mp3  subscribe animation
-  Try it with a sample character:
-    uv run python list_video.py --create-demo-assets ./assets
+  Try it with the built-in sample character (a red blood cell): --assets demo
 
 Two languages at once:
   --also-in en-US makes a second video in English from the same script: the
@@ -242,7 +253,11 @@ for the YouTube description, and edit-plan.json.
         action="store_true",
         help="plain look: only the visual and an item title per segment",
     )
-    edit_group.add_argument("--assets", default="", help="folder with character, sound and subscribe assets")
+    edit_group.add_argument(
+        "--assets",
+        default="",
+        help='folder with character, sound and subscribe assets, or "demo" for the built-in host',
+    )
     edit_group.add_argument(
         "--beats",
         choices=["web", "ai", "none"],
@@ -367,6 +382,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     unsupported = _find_unsupported_options(forwarded)
     if unsupported:
         parser.error(f"not available for list videos: {', '.join(unsupported)}")
+    if args.assets == DEMO_ASSETS:
+        args.assets = demo_assets_dir()
     if args.assets and not os.path.isdir(args.assets):
         parser.error(f"--assets folder not found: {args.assets}")
     if args.edit_plan and not os.path.isfile(args.edit_plan):

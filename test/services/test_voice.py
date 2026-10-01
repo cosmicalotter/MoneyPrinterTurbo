@@ -557,6 +557,26 @@ class TestVoiceService(unittest.TestCase):
             )
         self.assertEqual(captured["model"], "gemini-2.5-pro-preview-tts")
         self.assertEqual(captured["contents"], "Narra con entusiasmo:\nHola")
+
+        # Vertex AI credentials replace the API key.
+        with patch("google.genai.Client", _FakeClient), patch.object(
+            vs.config,
+            "app",
+            dict(vs.config.app, gemini_api_key="", gemini_use_vertexai=True, gemini_vertex_project="p"),
+        ):
+            self.assertIsNotNone(
+                vs.gemini_tts(text="Hola", voice_name="Charon", voice_rate=1.0, voice_file=voice_file)
+            )
+        self.assertEqual(captured["client_kwargs"], {"vertexai": True, "project": "p", "location": "us-central1"})
+
+        # Neither a key nor Vertex AI: fail before any request.
+        with patch("google.genai.Client") as client, patch.object(
+            vs.config, "app", dict(vs.config.app, gemini_api_key="", gemini_use_vertexai=False)
+        ):
+            self.assertIsNone(
+                vs.gemini_tts(text="Hola", voice_name="Charon", voice_rate=1.0, voice_file=voice_file)
+            )
+        client.assert_not_called()
         self.assertTrue(captured["closed"])
 
         vs.create_subtitle(sub_maker=sub_maker, text=text, subtitle_file=subtitle_file)
