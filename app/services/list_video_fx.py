@@ -12,7 +12,7 @@ Asset folder layout (all optional):
     assets/
       personaje/            character expressions, e.g. feliz.png, pensando.png
                             plus optional talking frames: feliz_habla.png
-      sfx/                  whoosh / pop / tick / click (.wav, .mp3 or .ogg)
+      sfx/                  whoosh / pop / tick / click / bloop (.wav, .mp3 or .ogg)
       suscribete.gif        subscribe animation (.gif, .webm, .mov or .png)
       suscribete.mp3        sound played with the subscribe animation
 """
@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-SFX_NAMES = ("whoosh", "pop", "tick", "click")
+SFX_NAMES = ("whoosh", "pop", "tick", "click", "bloop")
 SFX_SAMPLE_RATE = 24000
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".ogg", ".m4a", ".flac")
 IMAGE_EXTENSIONS = (".png", ".webp", ".jpg", ".jpeg")
@@ -253,7 +253,7 @@ def remove_flat_background(image: Image.Image, tolerance: int = 26) -> Optional[
     return cutout
 
 
-def _has_transparency(image: Image.Image) -> bool:
+def has_transparency(image: Image.Image) -> bool:
     return image.mode == "RGBA" and image.getchannel("A").getextrema()[0] < 245
 
 
@@ -274,12 +274,12 @@ def make_sticker(
         image = ImageOps.exif_transpose(source).convert("RGBA")
     rng = random.Random(seed)
 
-    if not _has_transparency(image):
+    if not has_transparency(image):
         cutout = remove_flat_background(image)
         if cutout is not None:
             image = cutout
 
-    if _has_transparency(image):
+    if has_transparency(image):
         bbox = image.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
         if bbox:
             image = image.crop(bbox)
@@ -455,7 +455,7 @@ def load_character(assets_dir: str) -> Dict[str, CharacterPose]:
 def prepare_character_image(source: str, output: str, target_height: int, mirror: bool = False) -> str:
     with Image.open(source) as image:
         image = ImageOps.exif_transpose(image).convert("RGBA")
-    if not _has_transparency(image):
+    if not has_transparency(image):
         # Characters drawn by image generators usually come on a plain
         # background; cut it out so no box shows around the host.
         image = remove_flat_background(image) or image
@@ -532,6 +532,15 @@ def synthesize_sfx(name: str, sample_rate: int = SFX_SAMPLE_RATE) -> np.ndarray:
         phase = 2 * np.pi * np.cumsum(freq) / sample_rate
         sound = np.sin(phase) * np.exp(-t * 32)
         sound[: int(0.004 * sample_rate)] *= np.linspace(0, 1, int(0.004 * sample_rate))
+        return (0.5 * sound).astype(np.float32)
+    if name == "bloop":
+        # A water-drop "bloop" for the otter popping into frame.
+        duration = 0.18
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        freq = 240 * (1 + 3.4 * (t / duration) ** 1.4)
+        phase = 2 * np.pi * np.cumsum(freq) / sample_rate
+        attack = np.clip(t / 0.008, 0, 1)
+        sound = np.sin(phase) * attack * np.exp(-t * 20)
         return (0.5 * sound).astype(np.float32)
     if name == "tick":
         duration = 0.09

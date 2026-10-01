@@ -47,6 +47,16 @@ _DEFAULT_ITEM_COUNT = 12
 DEMO_ASSETS = "demo"
 
 
+def built_in_assets_dir(name: str) -> str:
+    """A host bundled in resource/characters (e.g. "nutria"), or ""."""
+    from app.utils import utils
+
+    if not name or os.sep in name or "/" in name or name.startswith("."):
+        return ""
+    folder = utils.resource_dir(os.path.join("characters", name))
+    return folder if os.path.isdir(os.path.join(folder, "personaje")) else ""
+
+
 def demo_assets_dir() -> str:
     """The built-in red blood cell host, drawn on first use."""
     from app.services.list_video_fx import create_demo_assets
@@ -165,12 +175,26 @@ Automatic editing (on by default, --no-edit turns it off):
   audio normalized to -14 LUFS. The plan is saved as edit-plan.json; edit it
   and pass it back with --edit-plan to re-render with your changes.
 
-  --assets points to a folder with your own material (all optional):
+  Background footage follows the narration: the plan picks a new stock scene
+  every 6-8 seconds and each scene is cut into shots of --video-clip-duration
+  seconds (default 5), so the picture changes every 4-6 seconds.
+
+  The host is not on screen all the time (--host auto): it pops up from the
+  bottom to introduce some items, drops in to react to a surprising line,
+  points at pictures as they appear and leaves the stage to the footage the
+  rest of the time; expression changes land with a small bounce. Use
+  --host always to keep it on screen, or --host none to hide it.
+
+  --assets nutria uses the bundled otter host (resource/characters/nutria).
+  --assets also takes a folder with your own material (all optional):
     personaje/feliz.png, personaje/feliz_habla.png, ...  character expressions;
-        *_habla.png is the open-mouth frame used while the voice is speaking
-    sfx/whoosh.wav, pop.wav, tick.wav, click.wav  replace the built-in sounds
+        *_habla.png is the open-mouth frame used while the voice is speaking;
+        saludando.png waves in the intro and outro, senalando.png points at
+        the pictures that pop in
+    sfx/whoosh.wav, pop.wav, tick.wav, click.wav, bloop.wav  replace the
+        built-in sounds (bloop plays when the host pops up)
     suscribete.gif (or .webm/.mov/.png) and suscribete.mp3  subscribe animation
-  Try it with the built-in sample character (a red blood cell): --assets demo
+  --assets demo is a simpler sample character (a red blood cell).
 
 Two languages at once:
   --also-in en-US makes a second video in English from the same script: the
@@ -256,7 +280,14 @@ for the YouTube description, and edit-plan.json.
     edit_group.add_argument(
         "--assets",
         default="",
-        help='folder with character, sound and subscribe assets, or "demo" for the built-in host',
+        help='folder with character, sound and subscribe assets, "nutria" for the bundled otter host '
+        'or "demo" for the sample character',
+    )
+    edit_group.add_argument(
+        "--host",
+        choices=["auto", "always", "none"],
+        default="auto",
+        help="when the character is on screen: comes and goes (auto), the whole video, or never",
     )
     edit_group.add_argument(
         "--beats",
@@ -384,6 +415,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         parser.error(f"not available for list videos: {', '.join(unsupported)}")
     if args.assets == DEMO_ASSETS:
         args.assets = demo_assets_dir()
+    elif args.assets and not os.path.isdir(args.assets) and built_in_assets_dir(args.assets):
+        args.assets = built_in_assets_dir(args.assets)
     if args.assets and not os.path.isdir(args.assets):
         parser.error(f"--assets folder not found: {args.assets}")
     if args.edit_plan and not os.path.isfile(args.edit_plan):
@@ -502,6 +535,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             sound_effects=not args.no_sfx,
             plan_file=os.path.abspath(args.edit_plan) if args.edit_plan else "",
             language=params.video_language or "",
+            host=args.host,
         )
 
     def render(render_task_id, render_script, render_params, render_options):

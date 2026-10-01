@@ -93,6 +93,9 @@ class ListSegment:
 class _Visual:
     kind: str  # "image", "videos" or "none"
     paths: List[str] = field(default_factory=list)
+    # (clip, seconds) in screen order when the editor planned the scenes;
+    # otherwise the renderer builds a montage from ``paths``.
+    pieces: List[tuple] = field(default_factory=list)
 
 
 def build_segments(
@@ -309,6 +312,99 @@ def _read_material_sources(task_id: str) -> list:
     return sources if isinstance(sources, list) else []
 
 
+def _download_stock(
+    task_id: str, term: str, params: VideoParams, seconds: float, material_sources: list
+) -> List[str]:
+    # download_videos replaces the task's source list on every call. Clear it
+    # first so a failed call cannot repeat the previous records, then keep
+    # this call's attribution.
+    task_artifacts.patch_script_data(task_id, material_sources=[])
+    paths = material.download_videos(
+        task_id=task_id,
+        search_terms=[term],
+        source=params.video_source,
+        video_aspect=VideoAspect(params.video_aspect),
+        video_concat_mode=VideoConcatMode.sequential,
+        audio_duration=seconds,
+        max_clip_duration=params.video_clip_duration,
+    )
+    material_sources.extend(_read_material_sources(task_id))
+    return list(paths or [])
+
+
+def plan_scenes(
+    scenes: List[tuple], duration: float, shot_seconds: float
+) -> List[tuple[str, float]]:
+    """(clip, seconds) pieces that follow the narration scene by scene.
+
+    ``scenes`` holds (start second, [(clip, clip seconds), ...]) in order.
+    Each scene is cut into shots of about ``shot_seconds`` (evenly, so a 12 s
+    scene becomes three 4 s shots), using clips not shown yet first, and the
+    pieces of a scene add up to its length exactly so later scenes stay on
+    their words.
+    """
+    pieces: List[tuple[str, float]] = []
+    shown: set = set()
+    for index, (start, clips) in enumerate(scenes):
+        end = scenes[index + 1][0] if index + 1 < len(scenes) else duration
+        remaining = end - start
+        usable = [(path, length) for path, length in clips if length > 1 / FPS]
+        turn = 0
+        while usable and remaining > 1 / FPS and turn < 60:
+            if remaining <= shot_seconds * 1.25:
+                want = remaining
+            else:
+                want = remaining / math.ceil(remaining / shot_seconds)
+            ordered = [c for c in usable if c[0] not in shown] + [c for c in usable if c[0] in shown]
+            path, length = next((c for c in ordered if c[1] >= want - 0.05), max(ordered, key=lambda c: c[1]))
+            take = min(want, length)
+            pieces.append((path, take))
+            shown.add(path)
+            remaining -= take
+            turn += 1
+    return pieces
+
+
+def _prepare_scenes(
+    task_id: str,
+    segment: ListSegment,
+    params: VideoParams,
+    duration: float,
+    shots: List[tuple],
+    material_sources: list,
+) -> Optional[_Visual]:
+    """Stock footage for each planned scene, or None to use the single term."""
+    scenes = []
+    fallback: List[tuple] = []
+    for index, (start, query) in enumerate(shots):
+        end = shots[index + 1][0] if index + 1 < len(shots) else duration
+        paths = _download_stock(task_id, query, params, max(1.0, end - start), material_sources)
+        clips = [(path, _probe_duration(path)) for path in paths]
+        if not clips and scenes and scenes[-1][1]:
+            logger.warning(f"no footage for scene {query!r}; the previous scene continues")
+            clips = scenes[-1][1]
+        elif not clips:
+            logger.warning(f"no footage for scene {query!r}; using the item's own term")
+            if not fallback:
+                paths = _download_stock(
+                    task_id, segment.image_term, params, duration * STOCK_FOOTAGE_FACTOR, material_sources
+                )
+                fallback = [(path, _probe_duration(path)) for path in paths]
+            clips = fallback
+        scenes.append((start, clips))
+    if not any(clips for _, clips in scenes):
+        return None
+    # A scene with nothing to show takes the footage of the next one.
+    for index in range(len(scenes) - 1, -1, -1):
+        if not scenes[index][1]:
+            following = scenes[index + 1][1] if index + 1 < len(scenes) else []
+            scenes[index] = (scenes[index][0], following or next(c for _, c in scenes if c))
+    pieces = plan_scenes(scenes, duration, max(1, int(params.video_clip_duration or 5)))
+    if not pieces:
+        return None
+    return _Visual("videos", list(dict.fromkeys(path for path, _ in pieces)), pieces)
+
+
 def _prepare_visual(
     task_id: str,
     segment: ListSegment,
@@ -316,6 +412,7 @@ def _prepare_visual(
     duration: float,
     material_sources: list,
     warnings: List[str],
+    shots: Optional[List[tuple]] = None,
 ) -> _Visual:
     if segment.image_file:
         if utils.parse_extension(segment.image_file) in IMAGE_EXTENSIONS:
@@ -335,22 +432,15 @@ def _prepare_visual(
             if items:
                 return _Visual("image", [items[0].url])
         elif source in STOCK_VIDEO_SOURCES:
-            # download_videos replaces the task's source list on every call.
-            # Clear it first so a failed call cannot repeat the previous
-            # segment's records, then keep this segment's attribution.
-            task_artifacts.patch_script_data(task_id, material_sources=[])
-            paths = material.download_videos(
-                task_id=task_id,
-                search_terms=[term],
-                source=source,
-                video_aspect=VideoAspect(params.video_aspect),
-                video_concat_mode=VideoConcatMode.sequential,
-                # Ask for more footage than the segment needs, so the montage
-                # shows different clips instead of looping the same one.
-                audio_duration=duration * STOCK_FOOTAGE_FACTOR,
-                max_clip_duration=params.video_clip_duration,
+            if shots:
+                planned = _prepare_scenes(task_id, segment, params, duration, shots, material_sources)
+                if planned is not None:
+                    return planned
+            # Ask for more footage than the segment needs, so the montage
+            # shows different clips instead of looping the same one.
+            paths = _download_stock(
+                task_id, term, params, duration * STOCK_FOOTAGE_FACTOR, material_sources
             )
-            material_sources.extend(_read_material_sources(task_id))
             if paths:
                 return _Visual("videos", paths)
     except Exception as exc:
@@ -533,10 +623,12 @@ def render_segment_video(
     overlays = list(overlays or [])
 
     if visual.kind == "videos":
-        clip_durations = [(path, _probe_duration(path)) for path in visual.paths]
-        pieces = plan_montage(
-            clip_durations, duration, max(1, int(params.video_clip_duration or 5))
-        )
+        pieces = list(visual.pieces)
+        if not pieces:
+            clip_durations = [(path, _probe_duration(path)) for path in visual.paths]
+            pieces = plan_montage(
+                clip_durations, duration, max(1, int(params.video_clip_duration or 5))
+            )
         if not pieces:
             logger.warning(f"no readable clips for {output_file}; using a plain background")
             visual = _Visual("none")
@@ -914,6 +1006,7 @@ def generate_list_video(
                 target_frames / FPS,
                 material_sources,
                 warnings,
+                shots=editor.background_shots(index) if editor is not None else None,
             )
             overlays: List[fx.Overlay] = []
             if editor is not None:

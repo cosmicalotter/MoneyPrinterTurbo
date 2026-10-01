@@ -289,11 +289,14 @@ class TestEditor(_TempDirCase):
         self.assertEqual(sounds[0], "sfx-whoosh.wav")
         self.assertIn("sfx-pop.wav", sounds)
         self.assertIn("sfx-tick.wav", sounds)
-        mouth = Path(ed.work_dir, "mouth-01.txt").read_text()
-        self.assertTrue(mouth.startswith("ffconcat version 1.0"))
+        track = Path(ed.work_dir, "host", "host-01.txt").read_text()
+        self.assertTrue(track.startswith("ffconcat version 1.0"))
+        self.assertTrue(any("-talk-" in name for name in os.listdir(os.path.join(ed.work_dir, "host"))))
         self.assertEqual(ed.write_credits(), os.path.join(self.temp_dir, "credits.txt"))
         saved = json.loads(Path(self.temp_dir, "edit-plan.json").read_text("utf-8"))
         self.assertEqual(saved["segments"][0]["expression"], "sorprendido")
+        # The host plan is saved so it can be tweaked and passed back.
+        self.assertEqual([s["host"] for s in saved["segments"]][:2], ["full", "lead"])
 
     def test_subscribe_placement_and_fallback_plan(self):
         ed = self._editor(editor.EditOptions(subscribe="both", beats="none", sound_effects=False))

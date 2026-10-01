@@ -464,15 +464,25 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 并支持 `cli.py` 的配音、字体和配乐参数。完整参数见
 `uv run python list_video.py --help`。
 
-**自动剪辑**默认开启（`--no-edit` 关闭）。大模型会像剪辑师一样规划每个片段：主持
-角色的表情，以及在旁白说到对应词语时弹出的配图和关键信息（依据 TTS 逐词时间戳）。
+**自动剪辑**默认开启（`--no-edit` 关闭）。大模型会像剪辑师一样规划每个片段：跟随
+旁白变化的背景素材（每 6–8 秒换一个场景，再按 `--video-clip-duration` 秒切成镜头）、
+主持角色的表情与反应，以及在旁白说到对应词语时弹出的配图和关键信息（依据 TTS
+逐词时间戳）。
 配图来自 Wikimedia Commons、Pexels 或 Pixabay（`--beats web`），也可由文生图模型
 生成（`--beats ai`）；示意图会被抠成贴纸，照片则显示为带边框的卡片。视频还会加入
 章节标签、订阅动画、音效、进度条、淡入淡出，并把音频响度统一到 -14 LUFS。
 `credits.txt` 汇总配图署名，`edit-plan.json` 可修改后通过 `--edit-plan` 重新渲染。
-使用 `--assets` 提供自己的角色（`personaje/<表情>.png`，`<表情>_habla.png` 为张嘴
-帧）、音效（`sfx/`）与订阅动画（`suscribete.gif` 等）；
-`uv run python list_video.py --create-demo-assets ./assets` 会生成示例角色。
+主持角色不会全程停留在画面上（`--host auto`）：它会从画面底部探出来介绍部分条目、
+在惊人的句子处跳出来做反应、指向弹出的配图、在开场和结尾挥手，其余时间把画面
+留给素材；切换表情时带有轻微的挤压回弹。`--host always` 让角色全程出现，
+`--host none` 则隐藏角色；也可以手动修改 `edit-plan.json` 中各片段的 `"host"`
+（`full`、`lead`、`react`、`lead+react`、`off`）。
+`--assets nutria` 使用内置的水獭主持人（圆框眼镜、青绿色毛衣、耳后夹着铅笔，共 12
+种表情并带说话帧），SVG 源文件和绘制脚本位于 `resource/characters/nutria`。
+使用 `--assets <目录>` 提供自己的角色（`personaje/<表情>.png`，`<表情>_habla.png`
+为张嘴帧，`saludando.png` 挥手、`senalando.png` 指向配图）、音效（`sfx/`，含主持
+人出现时的 `bloop`）与订阅动画（`suscribete.gif` 等）；
+`uv run python list_video.py --create-demo-assets ./assets` 会生成一个简单的示例角色。
 **双语同时制作：**`--also-in en-US` 会基于同一脚本再生成一个英文视频。大模型负责
 本地化改写（包括标题句式和笑点），配图保持不变，第二个版本使用独立的剪辑计划和
 配音（`--also-voice`，默认选用该语言的免费 Edge 音色）。一次可指定多种语言

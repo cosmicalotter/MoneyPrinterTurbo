@@ -1,11 +1,13 @@
 """
 Automatic editing for list videos.
 
-An LLM "director" decides, per segment, the host character's expression and a
-few beats anchored to exact words of the narration: a picture of what is being
-mentioned, or a short key fact. The editor turns that plan into timed ffmpeg
-overlays (chapter label, character with lip-flap, stickers, callouts,
-subscribe animation, progress bar) and a list of sound effects.
+An LLM "director" decides, per segment, the host character's expression, the
+background footage that follows the narration and a few beats anchored to
+exact words: a picture of what is being mentioned, a short key fact, or a
+reaction of the host. The editor turns that plan into timed ffmpeg overlays
+(chapter label, the host popping in and out with lip-flap and bouncy
+expression changes, stickers, callouts, subscribe animation, progress bar) and
+a list of sound effects.
 
 Every decision is saved to ``edit-plan.json``; editing that file and passing it
 back with ``--edit-plan`` re-renders the video with the changes.
@@ -23,19 +25,25 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 
 from app.services import list_video_fx as fx
+from app.services import list_video_host as host
 from app.services import llm, material, web_images
 from app.utils import utils
 
 BEAT_MODES = ("web", "ai", "none")
 SUBSCRIBE_MODES = ("both", "intro", "outro", "none")
-_NEUTRAL_EXPRESSIONS = ("neutral", "normal", "feliz", "happy", "sonriente")
+_NEUTRAL_EXPRESSIONS = ("explicando", "explaining", "neutral", "normal", "feliz", "happy", "sonriente")
 _INTRO_EXPRESSIONS = ("sorprendido", "surprised", "asombrado", "feliz", "happy")
 _OUTRO_EXPRESSIONS = ("feliz", "happy", "sonriente", "neutral")
-_SFX_GAIN = {"whoosh": 0.55, "pop": 0.7, "tick": 0.8, "click": 0.9, "subscribe": 0.75}
+_SFX_GAIN = {"whoosh": 0.55, "pop": 0.7, "tick": 0.8, "click": 0.9, "subscribe": 0.75, "bloop": 0.45}
 SUBSCRIBE_SECONDS = 3.6
 IMAGE_BEAT_MAX = 5.5
 IMAGE_BEAT_MIN = 1.6
 TEXT_BEAT_SECONDS = 2.6
+MIN_BACKGROUND_SECONDS = 3.0
+# Host size as a share of the frame height; the bottom of the sweater stays
+# below the frame edge, like a presenter standing behind the screen border.
+HOST_HEIGHT = {False: 0.5, True: 0.27}  # by portrait
+HOST_SINK = 0.12
 
 
 @dataclass
@@ -48,6 +56,7 @@ class EditOptions:
     sound_effects: bool = True
     plan_file: str = ""
     language: str = ""
+    host: str = "auto"  # auto (comes and goes), always, none
 
 
 @dataclass
@@ -140,6 +149,8 @@ def schedule_beats(beats: List[dict], text: str, narration: Narration, duration:
     """Give plan beats start/end times that never overlap the same zone."""
     timed = []
     for beat in beats:
+        if beat.get("type") not in ("image", "text"):
+            continue
         start = anchor_time(text, beat.get("at", ""), narration.sub_maker, narration.speech_seconds)
         if start is None:
             logger.debug(f"beat anchor not found in narration: {beat.get('at')!r}")
@@ -199,7 +210,9 @@ def default_plan(segments, poses) -> List[dict]:
             "intro": _INTRO_EXPRESSIONS,
             "outro": _OUTRO_EXPRESSIONS,
         }.get(segment.kind, _NEUTRAL_EXPRESSIONS)
-        plan.append({"index": index, "expression": _pick(poses, preferred), "beats": []})
+        plan.append(
+            {"index": index, "expression": _pick(poses, preferred), "backgrounds": [], "beats": []}
+        )
     return plan
 
 
@@ -231,13 +244,15 @@ class Editor:
         self.work_dir = os.path.join(task_dir, "edit")
         os.makedirs(self.work_dir, exist_ok=True)
         self.total = sum(n.frames for n in narrations) / 30.0 or 1.0
-        self.poses = fx.load_character(options.assets_dir)
+        self.poses = fx.load_character(options.assets_dir) if options.host != "none" else {}
         self.sfx = fx.resolve_sfx(options.assets_dir, self.work_dir) if options.sound_effects else {}
         self.credits: List[str] = []
         self.warnings: List[str] = []
         self._used_urls: set = set()
-        self._character_cache: Dict[Tuple[str, bool], str] = {}
         self._subscribe = self._prepare_subscribe()
+        self._renderer: Optional[host.HostRenderer] = None
+        self._beats: Dict[int, List[Tuple[_Beat, str]]] = {}
+        self.host_plan: List[host.HostSegment] = []
         self.plan: List[dict] = []
 
     # -- plan ---------------------------------------------------------------
@@ -264,13 +279,87 @@ class Editor:
         for entry, default in zip(plan, fallback):
             if not entry.get("expression"):
                 entry["expression"] = default["expression"]
+            entry.setdefault("backgrounds", [])
             if self.options.beats == "none":
-                entry["beats"] = []
+                entry["beats"] = [b for b in entry.get("beats") or [] if b.get("type") == "react"]
         self.plan = plan
-        with open(os.path.join(self.task_dir, "edit-plan.json"), "w", encoding="utf-8") as fp:
-            json.dump({"segments": plan}, fp, ensure_ascii=False, indent=2)
-            fp.write("\n")
+        self._save_plan()
         return plan
+
+    def _save_plan(self) -> None:
+        with open(os.path.join(self.task_dir, "edit-plan.json"), "w", encoding="utf-8") as fp:
+            json.dump({"segments": self.plan}, fp, ensure_ascii=False, indent=2)
+            fp.write("\n")
+
+    def _entry(self, index: int) -> dict:
+        if index < len(self.plan):
+            return self.plan[index]
+        return {"expression": "", "backgrounds": [], "beats": []}
+
+    def background_shots(self, index: int) -> List[Tuple[float, str]]:
+        """(start second, stock footage query) scenes for a segment, in order."""
+        segment = self.segments[index]
+        narration = self.narrations[index]
+        duration = narration.frames / 30.0
+        timed = []
+        for position, background in enumerate(self._entry(index).get("backgrounds") or []):
+            start = anchor_time(segment.text, background.get("at", ""), narration.sub_maker, narration.speech_seconds)
+            if start is None:
+                if position > 0:
+                    continue
+                start = 0.0
+            timed.append((0.0 if position == 0 else max(0.0, start - 0.15), background["query"]))
+        shots: List[Tuple[float, str]] = []
+        for start, query in sorted(timed, key=lambda shot: shot[0]):
+            if not shots:
+                shots.append((0.0, query))
+            elif start - shots[-1][0] >= MIN_BACKGROUND_SECONDS and duration - start >= MIN_BACKGROUND_SECONDS:
+                shots.append((start, query))
+        return shots
+
+    def _prepare(self) -> None:
+        """Fetch every picture and plan the host over the whole video."""
+        if self.host_plan:
+            return
+        infos = []
+        for index, segment in enumerate(self.segments):
+            narration = self.narrations[index]
+            duration = narration.frames / 30.0
+            entry = self._entry(index)
+            beats = schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
+            prepared = []
+            for beat in beats:
+                picture = self._beat_picture(beat) if beat.kind == "image" else ""
+                if beat.kind == "image" and not picture:
+                    continue
+                prepared.append((beat, picture))
+            self._beats[index] = prepared
+            reactions = []
+            for beat in entry.get("beats") or []:
+                if beat.get("type") != "react":
+                    continue
+                time = anchor_time(segment.text, beat.get("at", ""), narration.sub_maker, narration.speech_seconds)
+                if time is not None and time < duration - 1.5:
+                    reactions.append((max(0.4, time), beat["expression"]))
+            infos.append(
+                host.SegmentInfo(
+                    kind=segment.kind,
+                    duration=duration,
+                    expression=entry.get("expression", ""),
+                    reactions=reactions,
+                    pictures=[b.start for b, _ in prepared if b.kind == "image"],
+                    pauses=host.find_pauses(narration.pcm),
+                    mode=entry.get("host", ""),
+                )
+            )
+        names = sorted(self.poses)
+        mode = self.options.host if self.options.host in host.HOST_MODES else "auto"
+        seed = fx.safe_seed("".join(s.chapter for s in self.segments)) % len(host.ITEM_PATTERN)
+        self.host_plan = host.plan_host(infos, names, mode, seed)
+        if self.plan and names:
+            for entry, planned in zip(self.plan, self.host_plan):
+                entry["host"] = planned.mode
+            self._save_plan()
 
     # -- assets -------------------------------------------------------------
 
@@ -290,17 +379,11 @@ class Editor:
         )
         return {"mode": "frames", "source": pattern, "click": click, "sound": sound}
 
-    def _character_png(self, expression: str, talking: bool) -> str:
-        key = (expression, talking)
-        if key not in self._character_cache:
-            pose = self.poses[expression]
-            source = pose.talk if talking and pose.talk else pose.idle
-            height = int(self.theme.height * (0.2 if self.theme.portrait else 0.34))
-            name = f"character-{fx.safe_seed(expression)}-{'talk' if talking else 'idle'}.png"
-            self._character_cache[key] = fx.prepare_character_image(
-                source, os.path.join(self.work_dir, name), height
-            )
-        return self._character_cache[key]
+    def renderer(self) -> host.HostRenderer:
+        if self._renderer is None:
+            height = int(self.theme.height * HOST_HEIGHT[self.theme.portrait])
+            self._renderer = host.HostRenderer(self.poses, height, self.work_dir)
+        return self._renderer
 
     def _beat_picture(self, beat: _Beat) -> str:
         save_dir = os.path.join(self.work_dir, "pictures")
@@ -330,15 +413,16 @@ class Editor:
             edit.sounds.append((time, self.sfx[name], _SFX_GAIN.get(name, 0.8)))
 
     def segment_edit(self, index: int, offset: float, show_titles: bool) -> SegmentEdit:
+        self._prepare()
         segment = self.segments[index]
         narration = self.narrations[index]
         duration = narration.frames / 30.0
-        entry = self.plan[index] if index < len(self.plan) else {"expression": "", "beats": []}
         theme = self.theme
         width, height = theme.width, theme.height
         margin = theme.px(44)
         edit = SegmentEdit()
-        has_character = bool(self.poses and entry.get("expression") in self.poses)
+        planned = self.host_plan[index] if index < len(self.host_plan) else host.HostSegment("off")
+        has_character = bool(self.poses)
 
         if index > 0:
             # Centred on the cut, so the whoosh carries the transition.
@@ -357,14 +441,12 @@ class Editor:
             )
 
         subscribe_window = self._subscribe_window(index, duration)
-        beats = schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
         # Callouts stay right of the host in landscape; in portrait they sit above it.
-        character_right = int(width * 0.24) if has_character and not theme.portrait else 0
-        for number, beat in enumerate(beats):
+        character_right = 0
+        if has_character and not theme.portrait:
+            character_right = int(width * 0.02) + self.renderer().canvas[0]
+        for number, (beat, picture) in enumerate(self._beats.get(index, [])):
             if beat.kind == "image":
-                picture = self._beat_picture(beat)
-                if not picture:
-                    continue
                 if theme.portrait:
                     box_w, box_h, cx, cy = int(width * 0.84), int(height * 0.36), width * 0.5, height * 0.4
                 else:
@@ -401,8 +483,11 @@ class Editor:
                 )
                 self._sound(edit, beat.start, "tick")
 
-        if has_character:
-            edit.overlays.append(self._character_overlay(index, entry["expression"], narration, segment.kind))
+        if planned.windows:
+            edit.overlays.append(self._host_overlay(index, planned))
+            for window in planned.windows:
+                if window.enter:
+                    self._sound(edit, window.start + 0.05, "bloop")
 
         if subscribe_window:
             edit.overlays.append(self._subscribe_overlay(subscribe_window[0], has_character))
@@ -420,34 +505,20 @@ class Editor:
             )
         return edit
 
-    def _character_overlay(self, index, expression, narration: Narration, kind: str) -> fx.Overlay:
+    def _host_overlay(self, index: int, planned: host.HostSegment) -> fx.Overlay:
         theme = self.theme
-        idle = self._character_png(expression, False)
-        pose = self.poses[expression]
-        source, mode = idle, "still"
-        if pose.talk:
-            talk = self._character_png(expression, True)
-            runs = fx.mouth_schedule(narration.pcm, 24000, 30)
-            spoken = sum(count for _, count in runs)
-            if narration.frames > spoken:
-                runs.append((False, narration.frames - spoken))
-            lines = ["ffconcat version 1.0"]
-            for is_open, count in runs:
-                lines.append(f"file '{os.path.basename(talk if is_open else idle)}'")
-                lines.append(f"duration {count / 30:.4f}")
-            lines.append(f"file '{os.path.basename(idle)}'")
-            source = os.path.join(self.work_dir, f"mouth-{index:02d}.txt")
-            with open(source, "w", encoding="utf-8") as fp:
-                fp.write("\n".join(lines) + "\n")
-            mode = "concat"
-        x = str(int(theme.width * 0.025))
-        bob = f"{theme.px(5)}*sin(2*PI*t/2.6)"
-        y = f"H-h*0.97+{bob}"
-        if index == 0:
-            y += f"+h*(1-{fx.ease_expression(0.6, 0.15)})"
-        elif kind == "item":
-            y += f"-{theme.px(18)}*sin(PI*clip(t/0.32,0,1))"
-        return fx.Overlay(source, x=x, y=y, mode=mode)
+        renderer = self.renderer()
+        narration = self.narrations[index]
+        mouth = fx.mouth_schedule(narration.pcm, 24000, 30)
+        frames = host.segment_frames(planned, renderer, narration.frames, mouth)
+        track = host.write_concat(frames, os.path.join(renderer.work_dir, f"host-{index:02d}.txt"))
+        canvas_w, canvas_h = renderer.canvas
+        char_h = renderer.char_size[1]
+        x = int(theme.width * 0.02)
+        base_y = theme.height - canvas_h + int(char_h * HOST_SINK)
+        bob = f"{theme.px(4)}*sin(2*PI*t/2.6)"
+        drop = f"{canvas_h}*({host.position_offset(planned.windows)})"
+        return fx.Overlay(track, x=str(x), y=f"{base_y}+{bob}+{drop}", mode="concat")
 
     def _subscribe_window(self, index: int, duration: float) -> Optional[Tuple[float, float]]:
         if not self._subscribe:

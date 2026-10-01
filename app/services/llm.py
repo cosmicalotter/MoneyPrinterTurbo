@@ -367,7 +367,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
                 top_k=1,
                 # List scripts and edit plans are long JSON documents, and
                 # thinking models spend part of this budget before answering.
-                max_output_tokens=8192,
+                max_output_tokens=32768,
                 safety_settings=[
                     types.SafetySetting(
                         category="HARM_CATEGORY_HARASSMENT",
@@ -1187,9 +1187,12 @@ def translate_list_script(script, language: str, app_config=None):
 # 出精确的出现时间。
 # =============================================================================
 
-EDIT_BEAT_TYPES = ("image", "text")
+EDIT_BEAT_TYPES = ("image", "text", "react")
 EDIT_IMAGE_LOOKS = ("diagram", "photo")
+EDIT_HOST_MODES = ("full", "lead", "react", "lead+react", "off")
 MAX_EDIT_BEATS_PER_SEGMENT = 4
+MAX_EDIT_REACTIONS_PER_SEGMENT = 2
+MAX_EDIT_BACKGROUNDS_PER_SEGMENT = 8
 MAX_EDIT_TEXT_LENGTH = 40
 
 
@@ -1200,14 +1203,25 @@ def build_edit_plan_prompt(segments: list, expressions: list, language: str = ""
             + json.dumps(expressions, ensure_ascii=False)
             + " that matches the emotion of what is being said"
         )
+        react_rule = (
+            '7. react beat: {"type": "react", "at": ..., "expression": ...} with an "expression" from the same list, '
+            "only for a line with real emotional punch (a shocking number, something gross, funny or sad); "
+            f"at most one per segment ({MAX_EDIT_REACTIONS_PER_SEGMENT} for very long ones), none for calm explanations."
+        )
     else:
         expression_rule = '"expression": always "" (no character is available)'
+        react_rule = "7. never use react beats (no character is available)."
     language_name = language or "the language of the narration"
     example = {
         "segments": [
             {
                 "index": 1,
                 "expression": expressions[0] if expressions else "",
+                "backgrounds": [
+                    {"at": "while you sleep", "query": "person sleeping in bed"},
+                    {"at": "the fluid around your brain", "query": "water flowing slow motion"},
+                    {"at": "one night without sleep", "query": "tired man at desk night"},
+                ],
                 "beats": [
                     {
                         "type": "image",
@@ -1216,7 +1230,12 @@ def build_edit_plan_prompt(segments: list, expressions: list, language: str = ""
                         "look": "diagram",
                     },
                     {"type": "text", "at": "one night without sleep", "text": "24 h awake"},
-                ],
+                ]
+                + (
+                    [{"type": "react", "at": "it starts to fail", "expression": expressions[-1]}]
+                    if expressions
+                    else []
+                ),
             }
         ]
     }
@@ -1225,17 +1244,18 @@ def build_edit_plan_prompt(segments: list, expressions: list, language: str = ""
 
 ## Goal:
 Plan what appears on screen while each segment below is narrated, so the video
-feels hand-edited: a host character reacts, pictures of the things being
-mentioned pop in, and key facts appear as short text.
+feels hand-edited: background footage that follows the narration, a host
+character that reacts, pictures of the things being mentioned that pop in, and
+key facts as short text.
 
 ## Constrains:
-1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index", "expression" and "beats"; no markdown, no code fences.
+1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index", "expression", "backgrounds" and "beats"; no markdown, no code fences.
 2. {expression_rule}.
-3. "beats": about one beat per 35 words of narration (1 to {MAX_EDIT_BEATS_PER_SEGMENT} per item, 0 or 1 for intro and outro), spread across the segment, never two beats on the same words.
-4. every beat has "at": 2 to 6 consecutive words copied exactly from that segment's text; the beat appears when those words are spoken.
-5. image beat: {{"type": "image", "at": ..., "query": ..., "look": ...}} where "query" is an English search query of 2 to 5 words naming one concrete thing that can be photographed or shown in a diagram, and "look" is "diagram" for anatomy, science or maps and "photo" for real-life scenes.
-6. text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number, a key term or a surprising fact stated in the narration.
-7. prefer image beats; use at most one text beat per segment.
+3. "backgrounds": the stock footage shown behind the narration, one entry about every 15 to 20 words (a new scene every 6 to 8 seconds), the first one on the segment's first words; each is {{"at": ..., "query": ...}} where "query" is an English stock video search of 2 to 4 words describing a concrete scene a camera can film (people, places, objects, animals, nature, close-ups), never text, logos, charts or abstract ideas, and different from the other queries of the video.
+4. "beats": about one beat per 35 words of narration (1 to {MAX_EDIT_BEATS_PER_SEGMENT} per item, 0 or 1 for intro and outro), spread across the segment, never two beats on the same words.
+5. every background and beat has "at": 2 to 6 consecutive words copied exactly from that segment's text; it appears when those words are spoken.
+6. image beat: {{"type": "image", "at": ..., "query": ..., "look": ...}} where "query" is an English search query of 2 to 5 words naming one concrete thing that can be photographed or shown in a diagram, and "look" is "diagram" for anatomy, science or maps and "photo" for real-life scenes; text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number, a key term or a surprising fact stated in the narration; prefer image beats and use at most one text beat per segment.
+{react_rule}
 8. never add facts that the narration does not state.
 
 ## Output Example:
@@ -1244,6 +1264,18 @@ mentioned pop in, and key facts appear as short text.
 ## Segments:
 {json.dumps(segments, ensure_ascii=False)}
 """.strip()
+
+
+def _normalize_backgrounds(entries) -> list:
+    backgrounds = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        anchor = str(entry.get("at") or "").strip()
+        query = str(entry.get("query") or "").strip()[:100]
+        if anchor and query:
+            backgrounds.append({"at": anchor, "query": query})
+    return backgrounds[:MAX_EDIT_BACKGROUNDS_PER_SEGMENT]
 
 
 def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
@@ -1264,6 +1296,7 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
             continue
         expression = lookup.get(str(entry.get("expression") or "").strip().lower(), "")
         beats = []
+        reactions = []
         for beat in entry.get("beats") or []:
             if not isinstance(beat, dict) or beat.get("type") not in EDIT_BEAT_TYPES:
                 continue
@@ -1276,17 +1309,26 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
                     continue
                 look = beat.get("look") if beat.get("look") in EDIT_IMAGE_LOOKS else "diagram"
                 beats.append({"type": "image", "at": anchor, "query": query, "look": look})
-            else:
+            elif beat["type"] == "text":
                 text = str(beat.get("text") or "").strip()[:MAX_EDIT_TEXT_LENGTH]
                 if text:
                     beats.append({"type": "text", "at": anchor, "text": text})
-        by_index[index] = {
+            else:
+                reaction = lookup.get(str(beat.get("expression") or "").strip().lower(), "")
+                if reaction:
+                    reactions.append({"type": "react", "at": anchor, "expression": reaction})
+        normalized = {
             "index": index,
             "expression": expression,
-            "beats": beats[:MAX_EDIT_BEATS_PER_SEGMENT],
+            "backgrounds": _normalize_backgrounds(entry.get("backgrounds")),
+            "beats": beats[:MAX_EDIT_BEATS_PER_SEGMENT] + reactions[:MAX_EDIT_REACTIONS_PER_SEGMENT],
         }
+        host = str(entry.get("host") or "").strip().lower()
+        if host in EDIT_HOST_MODES:
+            normalized["host"] = host
+        by_index[index] = normalized
     return [
-        by_index.get(index, {"index": index, "expression": "", "beats": []})
+        by_index.get(index, {"index": index, "expression": "", "backgrounds": [], "beats": []})
         for index in range(segment_count)
     ]
 
@@ -1310,7 +1352,8 @@ def generate_edit_plan(segments: list, expressions: list, language: str = "", ap
                 _parse_list_script_response(response), len(segments), expressions
             )
             logger.success(
-                f"edit plan generated: {sum(len(s['beats']) for s in plan)} beats"
+                f"edit plan generated: {sum(len(s['beats']) for s in plan)} beats, "
+                f"{sum(len(s['backgrounds']) for s in plan)} background shots"
             )
             return plan
         except Exception as e:

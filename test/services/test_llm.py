@@ -855,7 +855,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         )
         self.assertEqual(captured["model"], "gemini-test-model")
         self.assertEqual(captured["contents"], "Say hello")
-        self.assertEqual(captured["config"].max_output_tokens, 8192)
+        self.assertEqual(captured["config"].max_output_tokens, 32768)
         self.assertTrue(captured["closed"])
 
     def test_gemini_on_vertex_ai_uses_application_default_credentials(self):

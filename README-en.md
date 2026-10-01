@@ -481,23 +481,40 @@ and music options of `cli.py` are accepted. Run `uv run python list_video.py --h
 for all options.
 
 **Automatic editing** is on by default (`--no-edit` turns it off). The LLM plans each
-segment like an editor: a host character's expression, plus pictures and key facts
-that pop in exactly when the narration mentions them (timed from TTS word boundaries).
+segment like an editor: background footage that follows the narration (a new stock
+scene every 6-8 seconds, cut into shots of `--video-clip-duration` seconds), a host
+character's expression and reactions, plus pictures and key facts that pop in exactly
+when the narration mentions them (timed from TTS word boundaries).
 Pictures come from Wikimedia Commons, Pexels, or Pixabay (`--beats web`) or from the
 image model (`--beats ai`); diagrams are cut out as stickers and photos become framed
 cards. The video also gets chapter labels, a subscribe animation, sound effects, a
 progress bar, fades, and audio normalized to -14 LUFS. `credits.txt` lists picture
 attributions for the description, and `edit-plan.json` can be edited and passed back
-with `--edit-plan` to re-render. Bring your own character and sounds with `--assets`:
+with `--edit-plan` to re-render.
+
+The host is not on screen all the time (`--host auto`): it pops up from the bottom
+edge to introduce some items, drops in to react to a surprising line, points at the
+pictures as they appear, waves in the intro and outro, and leaves the stage to the
+footage the rest of the time. Expression changes land with a small squash-and-stretch
+bounce. `--host always` keeps it on screen and `--host none` hides it; the `"host"`
+field of each segment in `edit-plan.json` (`full`, `lead`, `react`, `lead+react`,
+`off`) can be changed by hand.
+
+`--assets nutria` uses the bundled otter host (round glasses, teal sweater and a pencil
+behind the ear, 12 expressions with talking frames). Its SVG sources and the script
+that draws them live in `resource/characters/nutria`. Bring your own character and
+sounds with `--assets <folder>`:
 
 ```text
 assets/
   personaje/feliz.png, feliz_habla.png, sorprendido.png, ...   (_habla = mouth open)
-  sfx/whoosh.wav, pop.wav, tick.wav, click.wav                 (optional overrides)
+            saludando.png (waves), senalando.png (points at pictures)  (optional)
+  sfx/whoosh.wav, pop.wav, tick.wav, click.wav, bloop.wav      (optional overrides)
   suscribete.gif (or .webm/.mov/.png) and suscribete.mp3       (optional)
 ```
 
-`uv run python list_video.py --create-demo-assets ./assets` writes a sample character.
+`uv run python list_video.py --create-demo-assets ./assets` writes a simpler sample
+character.
 
 **Two languages at once:** `--also-in en-US` renders a second video from the same
 script. The LLM adapts the text (title formulas and jokes included) while the pictures
