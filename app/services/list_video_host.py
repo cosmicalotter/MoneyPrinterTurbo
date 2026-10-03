@@ -35,8 +35,9 @@ POINT_NAMES = ("senalando", "señalando", "pointing", "point", "apuntando")
 ITEM_PATTERN = ("lead", "react", "lead+react", "off", "react", "full")
 
 ENTER_SECONDS = 0.5
-EXIT_SECONDS = 0.42
+EXIT_SECONDS = 0.4
 BOUNCE_FRAMES = 10
+CROSSFADE_FRAMES = 6  # the old face melts into the new one while bouncing
 MIN_WINDOW = 2.2  # shorter visits feel like a glitch
 MIN_GAP = 1.8  # shorter absences are merged into one visit
 CUE_SPACING = 0.6
@@ -274,7 +275,18 @@ def plan_host(
             for cue in segment.cues:
                 if cue.time == 0.0:
                     cue.time = first.start
+    # Whole frames everywhere, so the picture track and the position
+    # expression switch on exactly the same frame.
+    for segment in planned:
+        for window in segment.windows:
+            window.start, window.end = _on_frame(window.start), _on_frame(window.end)
+        for cue in segment.cues:
+            cue.time = _on_frame(cue.time)
     return planned
+
+
+def _on_frame(seconds: float) -> float:
+    return round(seconds * FPS) / FPS
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +297,9 @@ def plan_host(
 def bounce_shape(frame: int, frames: int = BOUNCE_FRAMES) -> Tuple[float, float, float]:
     """(scale x, scale y, lift as a fraction of the height) for a bounce frame."""
     p = frame / frames
-    scale_y = 1 - 0.09 * math.exp(-3.2 * p) * math.cos(3 * math.pi * p)
+    scale_y = 1 - 0.06 * math.exp(-3.2 * p) * math.cos(3 * math.pi * p)
     scale_x = 1 + 0.6 * (1 - scale_y)
-    lift = 0.04 * math.sin(math.pi * min(1.0, max(0.0, (p - 0.1) / 0.6)))
+    lift = 0.03 * math.sin(math.pi * min(1.0, max(0.0, (p - 0.1) / 0.6)))
     return scale_x, scale_y, lift
 
 
@@ -305,29 +317,39 @@ def _bottom_anchor(image: Image.Image) -> float:
 
 
 class HostRenderer:
-    """Frames of the host on one shared canvas, written on demand."""
+    """Frames of the host on one shared canvas, written on demand.
 
-    def __init__(self, poses: Dict[str, fx.CharacterPose], target_height: int, work_dir: str):
+    The poses are still pictures; only ``talking=True`` loads the open-mouth
+    frames for lip-flap.
+    """
+
+    def __init__(
+        self, poses: Dict[str, fx.CharacterPose], target_height: int, work_dir: str, talking: bool = False
+    ):
         self.work_dir = os.path.join(work_dir, "host")
         os.makedirs(self.work_dir, exist_ok=True)
         sources: Dict[Tuple[str, bool], Image.Image] = {}
         for name, pose in poses.items():
-            for talking, path in ((False, pose.idle), (True, pose.talk)):
+            for is_talk, path in ((False, pose.idle), (True, pose.talk if talking else "")):
                 if not path:
                     continue
                 with Image.open(path) as image:
                     image = ImageOps.exif_transpose(image).convert("RGBA")
                 if not fx.has_transparency(image):
                     image = fx.remove_flat_background(image) or image
-                sources[(name, talking)] = image
-        self.images = self._align(sources, target_height)
-        width, height = next(iter(self.images.values())).size
-        self.char_size = (width, height)
-        self.canvas = (int(width * 1.1) // 2 * 2 + 2, int(height * 1.1) // 2 * 2 + 2)
+                sources[(name, is_talk)] = image
+        self.full = self._align(sources, target_height)
+        sample = next(iter(self.full.values()))
+        scale = target_height / sample.height
+        size = (max(1, int(sample.width * scale)), target_height)
+        self.images = {key: image.resize(size, Image.LANCZOS) for key, image in self.full.items()}
+        self.char_size = size
+        self.canvas = (int(size[0] * 1.1) // 2 * 2 + 2, int(size[1] * 1.1) // 2 * 2 + 2)
         self._files: Dict[Tuple, str] = {}
 
     @staticmethod
     def _align(sources: Dict[Tuple[str, bool], Image.Image], target_height: int) -> Dict:
+        """Same-size pictures with the body in the same place, at full resolution."""
         sizes = {image.size for image in sources.values()}
         if len(sizes) == 1:
             # Drawn on one canvas (like the bundled otter): crop them all to
@@ -339,34 +361,34 @@ class HostRenderer:
                     box = bbox if box is None else (
                         min(box[0], bbox[0]), min(box[1], bbox[1]), max(box[2], bbox[2]), max(box[3], bbox[3])
                     )
-            cropped = {key: image.crop(box) if box else image for key, image in sources.items()}
-        else:
-            # Separate drawings: line them up on the bottom of the body.
-            trimmed = {}
-            for key, image in sources.items():
-                bbox = image.getchannel("A").getbbox()
-                image = image.crop(bbox) if bbox else image
-                scale = target_height / image.height
-                trimmed[key] = image.resize(
-                    (max(1, int(image.width * scale)), target_height), Image.LANCZOS
-                )
-            anchors = {key: _bottom_anchor(image) for key, image in trimmed.items()}
-            left = max(anchors.values())
-            right = max(image.width - anchors[key] for key, image in trimmed.items())
-            width = int(left + right) + 1
-            cropped = {}
-            for key, image in trimmed.items():
-                canvas = Image.new("RGBA", (width, target_height), (0, 0, 0, 0))
-                canvas.alpha_composite(image, (int(left - anchors[key]), 0))
-                cropped[key] = canvas
-            return cropped
-        sample = next(iter(cropped.values()))
-        scale = target_height / sample.height
-        size = (max(1, int(sample.width * scale)), target_height)
-        return {key: image.resize(size, Image.LANCZOS) for key, image in cropped.items()}
+            return {key: image.crop(box) if box else image for key, image in sources.items()}
+        # Separate drawings: line them up on the bottom of the body.
+        height = max(target_height, max(image.height for image in sources.values()))
+        trimmed = {}
+        for key, image in sources.items():
+            bbox = image.getchannel("A").getbbox()
+            image = image.crop(bbox) if bbox else image
+            scale = height / image.height
+            trimmed[key] = image.resize((max(1, int(image.width * scale)), height), Image.LANCZOS)
+        anchors = {key: _bottom_anchor(image) for key, image in trimmed.items()}
+        left = max(anchors.values())
+        right = max(image.width - anchors[key] for key, image in trimmed.items())
+        width = int(left + right) + 1
+        aligned = {}
+        for key, image in trimmed.items():
+            canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            canvas.alpha_composite(image, (int(left - anchors[key]), 0))
+            aligned[key] = canvas
+        return aligned
 
     def _image(self, expression: str, talking: bool) -> Image.Image:
         return self.images.get((expression, talking)) or self.images[(expression, False)]
+
+    def still(self, expression: str, height: int) -> Image.Image:
+        """The pose at any height, for scenes that show the host up close."""
+        image = self.full.get((expression, False)) or next(iter(self.full.values()))
+        scale = height / image.height
+        return image.resize((max(1, int(image.width * scale)), height), Image.LANCZOS)
 
     def hidden(self) -> str:
         key = ("hidden",)
@@ -376,12 +398,7 @@ class HostRenderer:
             self._files[key] = path
         return self._files[key]
 
-    def frame(self, expression: str, talking: bool, bounce: Optional[int] = None) -> str:
-        talking = talking and (expression, True) in self.images
-        key = (expression, talking, bounce)
-        if key in self._files:
-            return self._files[key]
-        image = self._image(expression, talking)
+    def _place(self, image: Image.Image, bounce: Optional[int]) -> Image.Image:
         scale_x, scale_y, lift = bounce_shape(bounce) if bounce is not None else (1.0, 1.0, 0.0)
         width, height = image.size
         if bounce is not None:
@@ -390,7 +407,24 @@ class HostRenderer:
         x = (self.canvas[0] - image.width) // 2
         y = self.canvas[1] - image.height - int(lift * height)
         canvas.alpha_composite(image, (x, max(0, y)))
+        return canvas
+
+    def frame(
+        self, expression: str, talking: bool = False, bounce: Optional[int] = None, previous: str = ""
+    ) -> str:
+        talking = talking and (expression, True) in self.images
+        fading = bool(previous) and previous != expression and bounce is not None and bounce < CROSSFADE_FRAMES
+        key = (expression, talking, bounce, previous if fading else "")
+        if key in self._files:
+            return self._files[key]
+        canvas = self._place(self._image(expression, talking), bounce)
+        if fading:
+            old = self._place(self._image(previous, False), bounce)
+            amount = (bounce + 1) / (CROSSFADE_FRAMES + 1)
+            canvas = Image.blend(old, canvas, 1 - (1 - amount) ** 2)
         step = f"b{bounce:02d}" if bounce is not None else "still"
+        if fading:
+            step += f"-from-{_file_stem(previous)}"
         name = f"{_file_stem(expression)}-{'talk' if talking else 'idle'}-{step}.png"
         path = os.path.join(self.work_dir, name)
         canvas.save(path, compress_level=1)
@@ -407,53 +441,62 @@ def _ease_out_back(x: str) -> str:
     return f"(1+2.70158*pow({x}-1,3)+1.70158*pow({x}-1,2))"
 
 
-def _ease_in_back(x: str) -> str:
-    return f"(2.70158*pow({x},3)-1.70158*pow({x},2))"
+def _ease_in(x: str) -> str:
+    return f"pow({x},2.2)"
 
 
 def position_offset(windows: Sequence[HostWindow]) -> str:
-    """ffmpeg expression in [~-0.1, 1]: how far below its spot the host is."""
-    terms = []
-    for window in windows:
+    """ffmpeg expression in [~-0.1, 1]: how far below its spot the host is.
+
+    Outside every visit it is 1 (out of frame), so a picture-track frame that
+    lands a frame early or late can never flash the host at its spot. The exit
+    finishes two frames before the visit ends for the same reason.
+    """
+    expression = "1"
+    for window in reversed(windows):
+        terms = []
         if window.enter:
-            x = f"clip((t-{window.start:.3f})/{ENTER_SECONDS},0,1)"
+            x = f"clip((t-{window.start:.4f})/{ENTER_SECONDS},0,1)"
             terms.append(
-                f"between(t,{window.start:.3f},{window.start + ENTER_SECONDS:.3f})*(1-{_ease_out_back(x)})"
+                f"between(t,{window.start:.4f},{window.start + ENTER_SECONDS:.4f})*(1-{_ease_out_back(x)})"
             )
         if window.exit:
-            begin = window.end - EXIT_SECONDS
-            x = f"clip((t-{begin:.3f})/{EXIT_SECONDS},0,1)"
-            terms.append(f"between(t,{begin:.3f},{window.end:.3f})*{_ease_in_back(x)}")
-    return "+".join(terms) or "0"
+            done = window.end - 2 / FPS
+            begin = done - EXIT_SECONDS
+            x = f"clip((t-{begin:.4f})/{EXIT_SECONDS},0,1)"
+            terms.append(f"gte(t,{begin:.4f})*{_ease_in(x)}")
+        inside = "+".join(terms) or "0"
+        expression = f"if(between(t,{window.start:.4f},{window.end:.4f}),{inside},{expression})"
+    return expression
 
 
 def segment_frames(
-    host: HostSegment, renderer: HostRenderer, frames: int, mouth: List[Tuple[bool, int]]
+    host: HostSegment, renderer: HostRenderer, frames: int, mouth: Optional[List[Tuple[bool, int]]] = None
 ) -> List[str]:
     """The PNG to show on every frame of a segment."""
     talking = []
-    for is_open, count in mouth:
+    for is_open, count in mouth or []:
         talking += [is_open] * count
     talking += [False] * max(0, frames - len(talking))
+    spans = [(round(w.start * FPS), round(w.end * FPS)) for w in host.windows]
+    starts = [round(c.time * FPS) for c in host.cues]
     out = []
     cue_index = -1
     for frame in range(frames):
-        t = frame / FPS
-        if host.visible(t) is None:
+        if not any(a <= frame < b for a, b in spans):
             out.append(renderer.hidden())
             continue
-        while cue_index + 1 < len(host.cues) and host.cues[cue_index + 1].time <= t + 1e-6:
+        while cue_index + 1 < len(host.cues) and starts[cue_index + 1] <= frame:
             cue_index += 1
         if cue_index < 0:
             out.append(renderer.hidden())
             continue
         cue = host.cues[cue_index]
         bounce = None
-        if cue.bounce:
-            since = frame - round(cue.time * FPS)
-            if 0 <= since < BOUNCE_FRAMES:
-                bounce = since
-        out.append(renderer.frame(cue.expression, talking[frame], bounce))
+        if cue.bounce and 0 <= frame - starts[cue_index] < BOUNCE_FRAMES:
+            bounce = frame - starts[cue_index]
+        previous = host.cues[cue_index - 1].expression if cue_index > 0 else ""
+        out.append(renderer.frame(cue.expression, talking[frame], bounce, previous))
     return out
 
 

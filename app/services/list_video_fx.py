@@ -12,7 +12,8 @@ Asset folder layout (all optional):
     assets/
       personaje/            character expressions, e.g. feliz.png, pensando.png
                             plus optional talking frames: feliz_habla.png
-      sfx/                  whoosh / pop / tick / click / bloop (.wav, .mp3 or .ogg)
+      sfx/                  whoosh / pop / tick / click / bloop / stamp / scribble
+                            (.wav, .mp3 or .ogg)
       suscribete.gif        subscribe animation (.gif, .webm, .mov or .png)
       suscribete.mp3        sound played with the subscribe animation
 """
@@ -30,7 +31,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-SFX_NAMES = ("whoosh", "pop", "tick", "click", "bloop")
+SFX_NAMES = ("whoosh", "pop", "tick", "click", "bloop", "stamp", "scribble")
 SFX_SAMPLE_RATE = 24000
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".ogg", ".m4a", ".flac")
 IMAGE_EXTENSIONS = (".png", ".webp", ".jpg", ".jpeg")
@@ -61,6 +62,7 @@ class Overlay:
     mode: str = "still"
     fade_in: float = 0.0
     fade_out: float = 0.0
+    hold: bool = False  # "frames": keep the last frame until ``end``
 
 
 def media_duration(ffmpeg_binary: str, media_file: str) -> float:
@@ -542,6 +544,25 @@ def synthesize_sfx(name: str, sample_rate: int = SFX_SAMPLE_RATE) -> np.ndarray:
         attack = np.clip(t / 0.008, 0, 1)
         sound = np.sin(phase) * attack * np.exp(-t * 20)
         return (0.5 * sound).astype(np.float32)
+    if name == "stamp":
+        # A rubber stamp landing: a short low thump with a papery slap.
+        duration = 0.2
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        thump = np.sin(2 * np.pi * (95 + 60 * np.exp(-t * 40)) * t) * np.exp(-t * 28)
+        slap = rng.standard_normal(t.size) * np.exp(-t * 90)
+        sound = 0.8 * thump + 0.35 * slap
+        return (0.6 * sound / (np.abs(sound).max() or 1)).astype(np.float32)
+    if name == "scribble":
+        # A marker drawing a line: band-limited noise with a stroke rhythm.
+        duration = 0.36
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        noise = rng.standard_normal(t.size)
+        smooth = np.convolve(noise, np.ones(6) / 6, mode="same")
+        bright = noise - smooth
+        rhythm = 0.55 + 0.45 * np.sin(2 * np.pi * 11 * t) ** 2
+        envelope = np.sin(np.pi * t / duration) ** 0.7
+        sound = bright * rhythm * envelope
+        return (0.3 * sound / (np.abs(sound).max() or 1)).astype(np.float32)
     if name == "tick":
         duration = 0.09
         t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)

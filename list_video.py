@@ -182,8 +182,9 @@ Automatic editing (on by default, --no-edit turns it off):
   The host is not on screen all the time (--host auto): it pops up from the
   bottom to introduce some items, drops in to react to a surprising line,
   points at pictures as they appear and leaves the stage to the footage the
-  rest of the time; expression changes land with a small bounce. Use
-  --host always to keep it on screen, or --host none to hide it.
+  rest of the time; expression changes cross-fade with a small bounce. Use
+  --host always to keep it on screen, or --host none to hide it. The poses
+  are still pictures; --lip-sync swaps in the *_habla frames while it talks.
 
   --assets nutria uses the bundled otter host (resource/characters/nutria).
   --assets also takes a folder with your own material (all optional):
@@ -288,6 +289,11 @@ for the YouTube description, and edit-plan.json.
         choices=["auto", "always", "none"],
         default="auto",
         help="when the character is on screen: comes and goes (auto), the whole video, or never",
+    )
+    edit_group.add_argument(
+        "--lip-sync",
+        action="store_true",
+        help="animate the mouth with the *_habla frames (default: still poses)",
     )
     edit_group.add_argument(
         "--beats",
@@ -536,6 +542,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             plan_file=os.path.abspath(args.edit_plan) if args.edit_plan else "",
             language=params.video_language or "",
             host=args.host,
+            lip_sync=args.lip_sync,
         )
 
     def render(render_task_id, render_script, render_params, render_options):

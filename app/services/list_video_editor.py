@@ -57,6 +57,7 @@ class EditOptions:
     plan_file: str = ""
     language: str = ""
     host: str = "auto"  # auto (comes and goes), always, none
+    lip_sync: bool = False  # swap in the *_habla frames while the voice speaks
 
 
 @dataclass
@@ -382,7 +383,9 @@ class Editor:
     def renderer(self) -> host.HostRenderer:
         if self._renderer is None:
             height = int(self.theme.height * HOST_HEIGHT[self.theme.portrait])
-            self._renderer = host.HostRenderer(self.poses, height, self.work_dir)
+            self._renderer = host.HostRenderer(
+                self.poses, height, self.work_dir, talking=self.options.lip_sync
+            )
         return self._renderer
 
     def _beat_picture(self, beat: _Beat) -> str:
@@ -509,7 +512,7 @@ class Editor:
         theme = self.theme
         renderer = self.renderer()
         narration = self.narrations[index]
-        mouth = fx.mouth_schedule(narration.pcm, 24000, 30)
+        mouth = fx.mouth_schedule(narration.pcm, 24000, 30) if self.options.lip_sync else None
         frames = host.segment_frames(planned, renderer, narration.frames, mouth)
         track = host.write_concat(frames, os.path.join(renderer.work_dir, f"host-{index:02d}.txt"))
         canvas_w, canvas_h = renderer.canvas

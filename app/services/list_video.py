@@ -693,7 +693,7 @@ def render_segment_video(
                 f"enable='between(t,{overlay.start:.3f},{(overlay.end or duration):.3f})'"
             )
         if overlay.mode in ("frames", "media"):
-            options.append("eof_action=pass")
+            options.append("eof_action=repeat" if overlay.hold else "eof_action=pass")
         filters.append(f"[{current}][o{number}]overlay={':'.join(options)}[m{number}]")
         current = f"m{number}"
 

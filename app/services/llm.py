@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from time import perf_counter
-from typing import List
+from typing import List, Optional
 
 from loguru import logger
 from openai import AzureOpenAI, OpenAI
@@ -1190,13 +1190,53 @@ def translate_list_script(script, language: str, app_config=None):
 EDIT_BEAT_TYPES = ("image", "text", "react")
 EDIT_IMAGE_LOOKS = ("diagram", "photo")
 EDIT_HOST_MODES = ("full", "lead", "react", "lead+react", "off")
+EDIT_SCENE_TYPES = ("statement", "stat", "sequence", "compare", "diagram")
+EDIT_SCENE_MARKS = ("cross", "check")
 MAX_EDIT_BEATS_PER_SEGMENT = 4
 MAX_EDIT_REACTIONS_PER_SEGMENT = 2
 MAX_EDIT_BACKGROUNDS_PER_SEGMENT = 8
+MAX_EDIT_SCENES_PER_SEGMENT = 3
 MAX_EDIT_TEXT_LENGTH = 40
+MAX_SCENE_LABEL_LENGTH = 32
+MAX_STATEMENT_LENGTH = 48
 
 
-def build_edit_plan_prompt(segments: list, expressions: list, language: str = "") -> str:
+def _edit_plan_example(expressions: list) -> dict:
+    expression = expressions[0] if expressions else ""
+    return {
+        "segments": [
+            {
+                "index": 1,
+                "expression": expression,
+                "backgrounds": [
+                    {"at": "while you sleep", "query": "person sleeping in bed"},
+                    {"at": "the fluid around your brain", "query": "water flowing slow motion"},
+                    {"at": "one night without sleep", "query": "tired man at desk night"},
+                ],
+                "scenes": [
+                    {
+                        "type": "sequence",
+                        "items": [
+                            {"at": "not a muscle", "label": "a muscle", "icon": "💪", "draw": "a flexed arm muscle", "mark": "cross"},
+                            {"at": "but a cleaning crew", "label": "a cleaning crew", "icon": "🧹", "draw": "a tiny broom sweeping", "mark": "check"},
+                        ],
+                    },
+                    {"type": "stat", "at": "about 70 percent", "value": 70, "unit": "%", "label": "happens at night", "chart": "pie", "icon": "🌙"},
+                ],
+                "beats": [
+                    {"type": "image", "at": "you wake up tired", "query": "tired man yawning in bed", "look": "photo", "icon": "🥱"},
+                    {"type": "text", "at": "one night without sleep", "text": "24 h awake"},
+                ]
+                + ([{"type": "react", "at": "it starts to fail", "expression": expressions[-1]}] if expressions else []),
+            }
+        ]
+    }
+
+
+def build_edit_plan_prompt(
+    segments: list, expressions: list, language: str = "", reference: Optional[list] = None
+) -> str:
+    language_name = language or "the language of the narration"
     if expressions:
         expression_rule = (
             '"expression": one of '
@@ -1204,62 +1244,62 @@ def build_edit_plan_prompt(segments: list, expressions: list, language: str = ""
             + " that matches the emotion of what is being said"
         )
         react_rule = (
-            '7. react beat: {"type": "react", "at": ..., "expression": ...} with an "expression" from the same list, '
+            '- react beat: {"type": "react", "at": ..., "expression": ...} with an "expression" from the same list, '
             "only for a line with real emotional punch (a shocking number, something gross, funny or sad); "
-            f"at most one per segment ({MAX_EDIT_REACTIONS_PER_SEGMENT} for very long ones), none for calm explanations."
+            f"at most one per segment ({MAX_EDIT_REACTIONS_PER_SEGMENT} for very long ones)."
+        )
+        statement_rule = (
+            '- {"type": "statement", "at": ..., "text": ..., "expression": ...}: the host alone on the channel colour '
+            f"with a punchline of at most 6 words in {language_name}; for the single most important or surprising line, "
+            "at most one per item and not in every item."
         )
     else:
         expression_rule = '"expression": always "" (no character is available)'
-        react_rule = "7. never use react beats (no character is available)."
-    language_name = language or "the language of the narration"
-    example = {
-        "segments": [
-            {
-                "index": 1,
-                "expression": expressions[0] if expressions else "",
-                "backgrounds": [
-                    {"at": "while you sleep", "query": "person sleeping in bed"},
-                    {"at": "the fluid around your brain", "query": "water flowing slow motion"},
-                    {"at": "one night without sleep", "query": "tired man at desk night"},
-                ],
-                "beats": [
-                    {
-                        "type": "image",
-                        "at": "the fluid around your brain",
-                        "query": "cerebrospinal fluid diagram",
-                        "look": "diagram",
-                    },
-                    {"type": "text", "at": "one night without sleep", "text": "24 h awake"},
-                ]
-                + (
-                    [{"type": "react", "at": "it starts to fail", "expression": expressions[-1]}]
-                    if expressions
-                    else []
-                ),
-            }
-        ]
-    }
+        react_rule = "- never use react beats (no character is available)."
+        statement_rule = (
+            '- {"type": "statement", "at": ..., "text": ...}: a punchline of at most 6 words in '
+            f"{language_name} on the channel colour; at most one per item."
+        )
+    reference_rule = ""
+    if reference:
+        reference_rule = f"""
+## Reference plan:
+The same video was already edited in another language. Reuse its visual plan so both versions
+look the same: keep, segment by segment and in the same order, the same backgrounds queries,
+scene types, icons, "draw" descriptions, values, units, marks, picture queries and expressions.
+Only translate the labels and texts into {language_name} and choose new "at" anchors copied
+from this version's text. Drop an element only when its idea is missing from this version.
+{json.dumps(reference, ensure_ascii=False)}
+"""
     return f"""
 # Role: Video editor for an educational YouTube channel
 
 ## Goal:
-Plan what appears on screen while each segment below is narrated, so the video
-feels hand-edited: background footage that follows the narration, a host
-character that reacts, pictures of the things being mentioned that pop in, and
-key facts as short text.
+Plan what appears on screen while each segment below is narrated, so the video feels
+hand-edited, clear and never monotonous: footage that follows the narration, minimalist
+explainer scenes that make an idea obvious at a glance, a host character that reacts,
+simple pictures of the things being mentioned and key facts as short text.
 
 ## Constrains:
-1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index", "expression", "backgrounds" and "beats"; no markdown, no code fences.
+1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index", "expression", "backgrounds", "scenes" and "beats"; no markdown, no code fences.
 2. {expression_rule}.
-3. "backgrounds": the stock footage shown behind the narration, one entry about every 15 to 20 words (a new scene every 6 to 8 seconds), the first one on the segment's first words; each is {{"at": ..., "query": ...}} where "query" is an English stock video search of 2 to 4 words describing a concrete scene a camera can film (people, places, objects, animals, nature, close-ups), never text, logos, charts or abstract ideas, and different from the other queries of the video.
-4. "beats": about one beat per 35 words of narration (1 to {MAX_EDIT_BEATS_PER_SEGMENT} per item, 0 or 1 for intro and outro), spread across the segment, never two beats on the same words.
-5. every background and beat has "at": 2 to 6 consecutive words copied exactly from that segment's text; it appears when those words are spoken.
-6. image beat: {{"type": "image", "at": ..., "query": ..., "look": ...}} where "query" is an English search query of 2 to 5 words naming one concrete thing that can be photographed or shown in a diagram, and "look" is "diagram" for anatomy, science or maps and "photo" for real-life scenes; text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number, a key term or a surprising fact stated in the narration; prefer image beats and use at most one text beat per segment.
+3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text; the element appears when those words are spoken.
+4. "backgrounds": stock footage behind the narration, one entry about every 15 to 20 words (a new shot every 6 to 8 seconds), the first one on the segment's first words; each is {{"at": ..., "query": ...}} where "query" is an English stock video search of 2 to 4 words describing a concrete scene a camera can film (people, places, objects, animals, nature, close-ups), never text, logos, charts or abstract ideas, and different from the other queries of the video.
+5. "scenes": full-screen minimalist explainer graphics drawn on a plain canvas that interrupt the footage to make one idea crystal clear; 1 or 2 per item (0 or 1 for intro and outro), each covering one idea of 3 to 10 seconds, never two in a row on consecutive sentences. Types:
+{statement_rule}
+- {{"type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "pie" or "number", "icon": ...}}: a number stated in the narration; "pie" only for a percentage of a whole.
+- {{"type": "sequence", "items": [{{"at": ..., "label": ..., "icon": ..., "draw": ..., "mark": ""}}, ...]}}: 2 to 4 things the narration lists, popping in left to right as each one is named; "mark" is "cross" for something the narration denies ("it is not X, nor Y"), "check" for the right answer, otherwise "".
+- {{"type": "compare", "items": [left, right]}}: two contrasting situations side by side (before/after, with/without, see it/lose it), same item format.
+- {{"type": "diagram", "center": {{"label": ..., "icon": ..., "draw": ...}}, "items": [3 to 5 items]}}: several factors or parts that lead to one central idea; an arrow is drawn from each item to the centre as it is named.
+   In every scene "label" has at most 3 words in {language_name}; "icon" is ONE emoji that depicts the thing literally (when no emoji fits, 1 or 2 English words such as "kidney" or "stomach"); "draw" is an English description of 5 to 12 words of a simple illustration of that thing.
+6. "beats": 1 to 2 per item (0 or 1 for intro and outro), never during a scene:
+- image beat: {{"type": "image", "at": ..., "query": ..., "look": ..., "icon": ...}}: a picture that pops in next to the host. "query" is an English search of 2 to 5 words for the SIMPLEST picture that literally shows those words to a 12-year-old (e.g. "tired man after workout", never "muscle fiber microscopy"); never a labelled scientific diagram unless the narration explains that exact structure; "look" is "photo" for real-life scenes and "diagram" for drawings, anatomy or maps; "icon" is an emoji used if no good picture exists.
+- text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number, a key term or a surprising fact stated in the narration; at most one per segment.
 {react_rule}
-8. never add facts that the narration does not state.
-
+7. never add facts that the narration does not state.
+{reference_rule}
 ## Output Example:
-{json.dumps(example, ensure_ascii=False)}
+{json.dumps(_edit_plan_example(expressions), ensure_ascii=False)}
 
 ## Segments:
 {json.dumps(segments, ensure_ascii=False)}
@@ -1276,6 +1316,61 @@ def _normalize_backgrounds(entries) -> list:
         if anchor and query:
             backgrounds.append({"at": anchor, "query": query})
     return backgrounds[:MAX_EDIT_BACKGROUNDS_PER_SEGMENT]
+
+
+def _scene_item(data, needs_anchor: bool = True) -> Optional[dict]:
+    if not isinstance(data, dict):
+        return None
+    item = {
+        "at": str(data.get("at") or "").strip(),
+        "label": str(data.get("label") or "").strip()[:MAX_SCENE_LABEL_LENGTH],
+        "icon": str(data.get("icon") or data.get("emoji") or "").strip()[:40],
+        "draw": str(data.get("draw") or "").strip()[:160],
+    }
+    if (needs_anchor and not item["at"]) or not (item["label"] or item["icon"] or item["draw"]):
+        return None
+    if data.get("mark") in EDIT_SCENE_MARKS:
+        item["mark"] = data["mark"]
+    return item
+
+
+def _normalize_scenes(entries, lookup: dict) -> list:
+    scenes = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or entry.get("type") not in EDIT_SCENE_TYPES:
+            continue
+        kind = entry["type"]
+        anchor = str(entry.get("at") or "").strip()
+        if kind == "statement":
+            text = str(entry.get("text") or "").strip()[:MAX_STATEMENT_LENGTH]
+            if anchor and text:
+                expression = lookup.get(str(entry.get("expression") or "").strip().lower(), "")
+                scenes.append({"type": kind, "at": anchor, "text": text, "expression": expression})
+        elif kind == "stat":
+            try:
+                value = float(entry.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if not anchor or not math.isfinite(value):
+                continue
+            unit = str(entry.get("unit") or "").strip()[:6]
+            chart = "pie" if entry.get("chart") == "pie" and unit == "%" and 0 < value <= 100 else "number"
+            scenes.append({
+                "type": kind, "at": anchor, "value": int(value) if value.is_integer() else round(value, 1),
+                "unit": unit, "label": str(entry.get("label") or "").strip()[:MAX_SCENE_LABEL_LENGTH],
+                "chart": chart, "icon": str(entry.get("icon") or "").strip()[:40],
+            })
+        else:
+            items = [item for item in map(_scene_item, entry.get("items") or []) if item]
+            limits = {"sequence": (2, 4), "compare": (2, 2), "diagram": (2, 5)}[kind]
+            if len(items) < limits[0]:
+                continue
+            scene = {"type": kind, "items": items[: limits[1]]}
+            if kind == "diagram":
+                center = _scene_item(entry.get("center"), needs_anchor=False)
+                scene["center"] = center or {"at": "", "label": "", "icon": "", "draw": ""}
+            scenes.append(scene)
+    return scenes[:MAX_EDIT_SCENES_PER_SEGMENT]
 
 
 def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
@@ -1308,7 +1403,11 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
                 if not query:
                     continue
                 look = beat.get("look") if beat.get("look") in EDIT_IMAGE_LOOKS else "diagram"
-                beats.append({"type": "image", "at": anchor, "query": query, "look": look})
+                image = {"type": "image", "at": anchor, "query": query, "look": look}
+                icon = str(beat.get("icon") or "").strip()[:40]
+                if icon:
+                    image["icon"] = icon
+                beats.append(image)
             elif beat["type"] == "text":
                 text = str(beat.get("text") or "").strip()[:MAX_EDIT_TEXT_LENGTH]
                 if text:
@@ -1321,6 +1420,7 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
             "index": index,
             "expression": expression,
             "backgrounds": _normalize_backgrounds(entry.get("backgrounds")),
+            "scenes": _normalize_scenes(entry.get("scenes"), lookup),
             "beats": beats[:MAX_EDIT_BEATS_PER_SEGMENT] + reactions[:MAX_EDIT_REACTIONS_PER_SEGMENT],
         }
         host = str(entry.get("host") or "").strip().lower()
@@ -1328,17 +1428,21 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
             normalized["host"] = host
         by_index[index] = normalized
     return [
-        by_index.get(index, {"index": index, "expression": "", "backgrounds": [], "beats": []})
+        by_index.get(index, {"index": index, "expression": "", "backgrounds": [], "scenes": [], "beats": []})
         for index in range(segment_count)
     ]
 
 
-def generate_edit_plan(segments: list, expressions: list, language: str = "", app_config=None):
+def generate_edit_plan(
+    segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None
+):
     """Ask the model for a per-segment edit plan; None when it keeps failing.
 
     ``segments`` is a list of {"index", "kind", "title", "text"} dicts.
+    ``reference`` is the plan of the same video in another language, whose
+    visuals the new plan reuses.
     """
-    prompt = build_edit_plan_prompt(segments, expressions, language)
+    prompt = build_edit_plan_prompt(segments, expressions, language, reference)
     for i in range(_max_retries):
         try:
             if app_config is None:
@@ -1352,7 +1456,8 @@ def generate_edit_plan(segments: list, expressions: list, language: str = "", ap
                 _parse_list_script_response(response), len(segments), expressions
             )
             logger.success(
-                f"edit plan generated: {sum(len(s['beats']) for s in plan)} beats, "
+                f"edit plan generated: {sum(len(s['scenes']) for s in plan)} scenes, "
+                f"{sum(len(s['beats']) for s in plan)} beats, "
                 f"{sum(len(s['backgrounds']) for s in plan)} background shots"
             )
             return plan

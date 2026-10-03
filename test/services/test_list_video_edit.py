@@ -291,7 +291,8 @@ class TestEditor(_TempDirCase):
         self.assertIn("sfx-tick.wav", sounds)
         track = Path(ed.work_dir, "host", "host-01.txt").read_text()
         self.assertTrue(track.startswith("ffconcat version 1.0"))
-        self.assertTrue(any("-talk-" in name for name in os.listdir(os.path.join(ed.work_dir, "host"))))
+        # Still poses: no open-mouth frames unless lip_sync is asked for.
+        self.assertFalse(any("-talk-" in name for name in os.listdir(os.path.join(ed.work_dir, "host"))))
         self.assertEqual(ed.write_credits(), os.path.join(self.temp_dir, "credits.txt"))
         saved = json.loads(Path(self.temp_dir, "edit-plan.json").read_text("utf-8"))
         self.assertEqual(saved["segments"][0]["expression"], "sorprendido")

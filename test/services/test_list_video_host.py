@@ -37,12 +37,14 @@ def _info(kind="item", duration=20.0, **kwargs):
 
 def _eval_offset(expression: str, t: float) -> float:
     """Evaluate the ffmpeg position expression in Python."""
-    code = re.sub(r"\bt\b", repr(t), expression)
+    code = re.sub(r"\bt\b", repr(t), expression).replace("if(", "iff(")
     return eval(  # noqa: S307 - expression built by the code under test
         code,
         {
             "between": lambda x, a, b: 1.0 if a <= x <= b else 0.0,
             "clip": lambda x, a, b: min(b, max(a, x)),
+            "gte": lambda a, b: 1.0 if a >= b else 0.0,
+            "iff": lambda c, a, b: a if c else b,
             "pow": math.pow,
         },
     )
@@ -67,7 +69,7 @@ class TestHostPlan(unittest.TestCase):
         self.assertFalse(first.windows[0].enter)
         self.assertTrue(first.cues[0].bounce)  # a hop for the new item
         # ...and leaves on a pause instead of mid-word.
-        self.assertAlmostEqual(first.windows[0].end, 8.45)
+        self.assertAlmostEqual(first.windows[0].end, 8.45, delta=1 / 30)  # on a whole frame
         self.assertTrue(first.windows[0].exit)
         self.assertEqual(plan[4].windows, [])
         # The outro ends with a goodbye wave and no exit (the video fades out).
@@ -83,13 +85,13 @@ class TestHostPlan(unittest.TestCase):
         self.assertEqual(plan.mode, "lead")
         lead, visit = plan.windows
         self.assertEqual(lead.start, 0.3)  # the video's first segment
-        self.assertAlmostEqual(visit.start, 14.65)
+        self.assertAlmostEqual(visit.start, 14.65, delta=1 / 30)
         self.assertTrue(visit.enter and visit.exit)
         faces = [(round(c.time, 2), c.expression, c.bounce) for c in plan.cues]
         self.assertIn((2.0, "senalando", True), faces)
         self.assertIn((4.0, "explicando", True), faces)
         # The visit opens with the reaction face; entering already moves it.
-        self.assertIn((14.65, "sorprendido", False), faces)
+        self.assertIn((round(visit.start, 2), "sorprendido", False), faces)
 
         # A reaction inside a visit is a bouncy change and returns to the base face.
         info = _info(duration=12.0, reactions=[(5.0, "riendo")], mode="full")
@@ -136,10 +138,14 @@ class TestHostPlan(unittest.TestCase):
         self.assertAlmostEqual(_eval_offset(expression, 1.0), 1.0)
         self.assertLess(_eval_offset(expression, 1.3), 0.0)  # overshoot above its spot
         self.assertAlmostEqual(_eval_offset(expression, 2.0), 0.0)
-        self.assertLess(_eval_offset(expression, 4.65), 0.0)  # anticipation before diving
-        self.assertAlmostEqual(_eval_offset(expression, 5.0), 1.0)
+        self.assertAlmostEqual(_eval_offset(expression, 4.6), 0.0, places=1)
+        # Out of frame two frames before the visit ends ...
+        self.assertAlmostEqual(_eval_offset(expression, 5.0 - 2 / 30), 1.0)
+        # ... and outside every visit, so a frame off by one never flashes it.
+        for t in (0.5, 5.0, 5.04, 6.0, 12.04):
+            self.assertEqual(_eval_offset(expression, t), 1.0, t)
         self.assertAlmostEqual(_eval_offset(expression, 9.0), 0.0)
-        self.assertEqual(host.position_offset([host.HostWindow(0, 2, False, False)]), "0")
+        self.assertEqual(_eval_offset(host.position_offset([host.HostWindow(0, 2, False, False)]), 1.0), 0)
 
 
 class TestHostRenderer(unittest.TestCase):
@@ -162,7 +168,7 @@ class TestHostRenderer(unittest.TestCase):
                 self._pose("b_habla.png", (400, 400), (100, 50, 300, 399), (0, 0, 255, 255)),
             ),
         }
-        renderer = host.HostRenderer(poses, 175, self.temp_dir)
+        renderer = host.HostRenderer(poses, 175, self.temp_dir, talking=True)
         self.assertEqual(renderer.char_size, (100, 175))  # union box 201x350 scaled to 175
         with Image.open(renderer.frame("a", True)) as frame:  # no talking pose: idle
             self.assertEqual(frame.size, renderer.canvas)
@@ -195,7 +201,7 @@ class TestHostRenderer(unittest.TestCase):
             )
             for name in ("explicando", "riendo")
         }
-        renderer = host.HostRenderer(poses, 60, self.temp_dir)
+        renderer = host.HostRenderer(poses, 60, self.temp_dir, talking=True)
         segment = host.HostSegment(
             "lead",
             [host.HostWindow(0.5, 2.0)],
@@ -207,7 +213,9 @@ class TestHostRenderer(unittest.TestCase):
         self.assertTrue(all(n == "hidden.png" for n in names[:15] + names[60:]))
         self.assertIn("talk-still", names[15])
         self.assertIn("idle-still", names[25])
-        self.assertTrue(names[30].startswith("riendo") and names[30].endswith("idle-b00.png"))
+        # The new face bounces in while the old one fades out.
+        self.assertTrue(names[30].startswith("riendo") and "idle-b00-from-explicando" in names[30])
+        self.assertTrue(names[37].endswith("idle-b07.png"))
         self.assertTrue(names[40].endswith("talk-still.png"))
         track = host.write_concat(frames, os.path.join(renderer.work_dir, "t.txt"))
         lines = Path(track).read_text().splitlines()

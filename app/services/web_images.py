@@ -37,6 +37,9 @@ MAX_DOWNLOAD_BYTES = 15 * 1024 * 1024
 MIN_IMAGE_SIDE = 320
 MAX_ASPECT_RATIO = 3.5
 _WIKIMEDIA_MIMES = {"image/jpeg", "image/png", "image/svg+xml", "image/webp", "image/tiff"}
+# Letters outside the Latin script in a title usually mean labels in that
+# script too (a Cyrillic diagram, a Greek map); the viewer could not read them.
+_FOREIGN_SCRIPT = re.compile("[\u0370-\u03ff\u0400-\u052f\u0590-\u06ff\u0900-\u0dff\u0e00-\u0eff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 
 
 @dataclass
@@ -47,6 +50,7 @@ class WebImage:
     author: str
     license: str
     page_url: str
+    url: str = ""
 
     def credit(self) -> str:
         parts = [self.title or "Image", self.author, self.license, self.page_url]
@@ -224,6 +228,54 @@ def download_image(url: str, save_dir: str) -> str:
     return path
 
 
+def has_foreign_script(text: str) -> bool:
+    return bool(_FOREIGN_SCRIPT.search(text or ""))
+
+
+def find_candidates(
+    query: str,
+    save_dir: str,
+    kind: str = "diagram",
+    exclude_urls: Optional[set] = None,
+    limit: int = 4,
+) -> List[WebImage]:
+    """Download up to ``limit`` usable pictures for ``query``, best sources first."""
+    exclude_urls = exclude_urls if exclude_urls is not None else set()
+    found: List[WebImage] = []
+    for source in source_order(kind):
+        if len(found) >= limit:
+            break
+        try:
+            candidates = SEARCHERS[source](query)
+        except Exception as exc:
+            logger.warning(f"image search failed: source={source}, query={query!r}, error={exc}")
+            continue
+        for candidate in candidates[:6]:
+            if len(found) >= limit:
+                break
+            if candidate.url in exclude_urls or has_foreign_script(candidate.title):
+                continue
+            try:
+                path = download_image(candidate.url, save_dir)
+            except Exception as exc:
+                logger.debug(f"skip image {candidate.url}: {exc}")
+                continue
+            found.append(
+                WebImage(
+                    path=path,
+                    source=candidate.source,
+                    title=candidate.title,
+                    author=candidate.author,
+                    license=candidate.license,
+                    page_url=candidate.page_url,
+                    url=candidate.url,
+                )
+            )
+    if not found:
+        logger.warning(f"no usable image found for {query!r}")
+    return found
+
+
 def find_image(
     query: str,
     save_dir: str,
@@ -232,29 +284,9 @@ def find_image(
 ) -> Optional[WebImage]:
     """Return the first usable picture for ``query``, or None."""
     exclude_urls = exclude_urls if exclude_urls is not None else set()
-    for source in source_order(kind):
-        try:
-            candidates = SEARCHERS[source](query)
-        except Exception as exc:
-            logger.warning(f"image search failed: source={source}, query={query!r}, error={exc}")
-            continue
-        for candidate in candidates[:5]:
-            if candidate.url in exclude_urls:
-                continue
-            try:
-                path = download_image(candidate.url, save_dir)
-            except Exception as exc:
-                logger.debug(f"skip image {candidate.url}: {exc}")
-                continue
-            exclude_urls.add(candidate.url)
-            logger.info(f"image found: source={source}, query={query!r}")
-            return WebImage(
-                path=path,
-                source=candidate.source,
-                title=candidate.title,
-                author=candidate.author,
-                license=candidate.license,
-                page_url=candidate.page_url,
-            )
-    logger.warning(f"no usable image found for {query!r}")
-    return None
+    found = find_candidates(query, save_dir, kind, exclude_urls, limit=1)
+    if not found:
+        return None
+    exclude_urls.add(found[0].url)
+    logger.info(f"image found: source={found[0].source}, query={query!r}")
+    return found[0]
