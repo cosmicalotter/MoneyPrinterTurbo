@@ -109,6 +109,12 @@ def _accent(value: str) -> str:
     return value
 
 
+def _scene_color(value: str) -> str:
+    if value.strip().lower() in ("accent", "white"):
+        return value.strip().lower()
+    return _accent(value)
+
+
 def _languages(value: str) -> list:
     languages = []
     for part in value.split(","):
@@ -174,6 +180,16 @@ Automatic editing (on by default, --no-edit turns it off):
   chapter labels, sound effects, a subscribe animation, a progress bar and
   audio normalized to -14 LUFS. The plan is saved as edit-plan.json; edit it
   and pass it back with --edit-plan to re-render with your changes.
+
+  Explainer scenes interrupt the footage to make one idea obvious: the host
+  alone with a punchline, a number as a filling pie or a count-up, things
+  listed (stamped with a red cross when the narration denies them), two
+  situations side by side, or a diagram whose arrows are drawn as each factor
+  is named. They use OpenMoji icons, or doodles drawn by Imagen with
+  --illustrations ai, on a paper canvas in the channel colour (--scene-color).
+  Pictures that pop in are checked by Gemini (simple, on topic, no foreign
+  text) when Gemini credentials are configured; an icon replaces a picture
+  that fails.
 
   Background footage follows the narration: the plan picks a new stock scene
   every 6-8 seconds and each scene is cut into shots of --video-clip-duration
@@ -289,6 +305,29 @@ for the YouTube description, and edit-plan.json.
         choices=["auto", "always", "none"],
         default="auto",
         help="when the character is on screen: comes and goes (auto), the whole video, or never",
+    )
+    edit_group.add_argument(
+        "--no-scenes",
+        action="store_true",
+        help="no full-screen explainer scenes (statements, numbers, lists, comparisons, diagrams)",
+    )
+    edit_group.add_argument(
+        "--illustrations",
+        choices=["icons", "ai"],
+        default="icons",
+        help="pictures in scenes: OpenMoji icons (free) or doodle illustrations drawn by Imagen "
+        "(about US$0.02 each, needs Gemini credentials)",
+    )
+    edit_group.add_argument(
+        "--scene-color",
+        type=_scene_color,
+        default=None,
+        help='scene canvas colour: a hex colour, "accent" or "white" (default: a light tint of --accent)',
+    )
+    edit_group.add_argument(
+        "--no-picture-check",
+        action="store_true",
+        help="use the first picture found instead of letting Gemini choose a simple, relevant one",
     )
     edit_group.add_argument(
         "--lip-sync",
@@ -543,6 +582,10 @@ def run(argv: Sequence[str] | None = None) -> int:
             language=params.video_language or "",
             host=args.host,
             lip_sync=args.lip_sync,
+            scenes=not args.no_scenes,
+            illustrations=args.illustrations,
+            scene_color=args.scene_color or "",
+            picture_check=not args.no_picture_check,
         )
 
     def render(render_task_id, render_script, render_params, render_options):
@@ -578,8 +621,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         also_options = dict(options)
         if "edit" in options:
             # Edit plans anchor beats to words of one language, so every
-            # version gets its own plan.
-            also_options["edit"] = replace(options["edit"], language=language, plan_file="")
+            # version gets its own plan, built on the first version's visuals
+            # (same scenes, icons and pictures, and cached illustrations).
+            reference = os.path.join(utils.task_dir(task_id), "edit-plan.json")
+            also_options["edit"] = replace(
+                options["edit"], language=language, plan_file="", reference_plan=reference
+            )
         # A delivery style is written for one language; never reuse it.
         config.app["gemini_tts_style"] = also_styles.get(language, "")
         logger.info(f"rendering the {language} version with voice {also_voices[language]}")

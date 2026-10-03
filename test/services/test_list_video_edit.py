@@ -254,6 +254,12 @@ def _segments():
 
 
 class TestEditor(_TempDirCase):
+    def setUp(self):
+        super().setUp()
+        gemini = patch.object(editor.gemini_media, "enabled", return_value=False)
+        gemini.start()
+        self.addCleanup(gemini.stop)
+
     def _editor(self, options, narrations=None):
         segments = _segments()
         narrations = narrations or [
@@ -273,7 +279,7 @@ class TestEditor(_TempDirCase):
         Path(plan_file).write_text(json.dumps(plan), encoding="utf-8")
         found = web_images.WebImage(str(RESOURCES / "1.png"), "wikimedia", "Brain", "Ana", "CC BY 4.0", "https://x")
         ed = self._editor(editor.EditOptions(assets_dir=assets, plan_file=plan_file, language="es-CO"))
-        with patch.object(editor.web_images, "find_image", return_value=found) as find:
+        with patch.object(editor.web_images, "find_candidates", return_value=[found]) as find:
             ed.make_plan()
             edit = ed.segment_edit(1, 6.3, show_titles=True)
         self.assertEqual(find.call_args.args[0], "brain")
@@ -330,7 +336,7 @@ class TestEditor(_TempDirCase):
             {"index": i, "expression": "", "beats": [{"type": "image", "at": "cerebro limpia", "query": "q"}]}
             for i in range(4)
         ]
-        with patch.object(editor.web_images, "find_image", return_value=None):
+        with patch.object(editor.web_images, "find_candidates", return_value=[]):
             edit = ed.segment_edit(3, 19.0, show_titles=False)
             ed.segment_edit(1, 6.3, show_titles=False)
         self.assertEqual(edit.overlays[0].mode, "still")

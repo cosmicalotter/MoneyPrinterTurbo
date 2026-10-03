@@ -24,9 +24,10 @@ from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from app.services import gemini_media, icons, llm, material, web_images
 from app.services import list_video_fx as fx
 from app.services import list_video_host as host
-from app.services import llm, material, web_images
+from app.services import list_video_scenes as scenes
 from app.utils import utils
 
 BEAT_MODES = ("web", "ai", "none")
@@ -58,6 +59,11 @@ class EditOptions:
     language: str = ""
     host: str = "auto"  # auto (comes and goes), always, none
     lip_sync: bool = False  # swap in the *_habla frames while the voice speaks
+    scenes: bool = True  # full-screen explainer scenes between the footage
+    illustrations: str = "icons"  # scene pictures: OpenMoji icons, or "ai" (Imagen)
+    scene_color: str = ""  # canvas colour; "" is a light tint of the accent
+    picture_check: bool = True  # let Gemini vision pick pictures (when configured)
+    reference_plan: str = ""  # edit-plan.json of the same video in another language
 
 
 @dataclass
@@ -85,6 +91,8 @@ class _Beat:
     query: str = ""
     look: str = "diagram"
     text: str = ""
+    icon: str = ""
+    at: str = ""
 
 
 @dataclass
@@ -167,6 +175,8 @@ def schedule_beats(beats: List[dict], text: str, narration: Narration, duration:
                 query=beat.get("query", ""),
                 look=beat.get("look", "diagram"),
                 text=beat.get("text", ""),
+                icon=beat.get("icon", ""),
+                at=beat.get("at", ""),
             )
         )
     timed.sort(key=lambda b: b.start)
@@ -192,6 +202,41 @@ def schedule_beats(beats: List[dict], text: str, narration: Narration, duration:
     return sorted(scheduled, key=lambda b: b.start)
 
 
+def sentence_at(text: str, anchor: str) -> str:
+    """The sentence of ``text`` that contains ``anchor`` (for picture checks)."""
+    sentences = [s for s in re.split(r"(?<=[.!?…])\s+", text or "") if s.strip()]
+    target = normalize_words(anchor)
+    for sentence in sentences:
+        words = normalize_words(sentence)
+        if target and _find_words(words, target[: min(2, len(target))]) >= 0:
+            return sentence.strip()
+    return (text or "").strip()[:300]
+
+
+def scene_canvas_color(option: str, accent: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """"" is a light tint of the accent (soft brand paper); also "accent", "white" or a hex colour."""
+    value = (option or "").strip().lower()
+    if value == "accent":
+        return accent
+    if value == "white":
+        return (250, 247, 242)
+    if value:
+        return fx.parse_color(value)
+    return tuple(int(c + (255 - c) * 0.84) for c in accent)
+
+
+def _avoid_cover(windows: List[host.HostWindow], cover: List[Tuple[float, float]]) -> List[host.HostWindow]:
+    """Host visits never begin under a scene: the bloop would sound over nothing."""
+    kept = []
+    for window in windows:
+        for start, end in cover:
+            if window.enter and start - 0.4 <= window.start < end:
+                window.start = end + 0.1
+        if window.end - window.start >= host.MIN_WINDOW or not window.enter:
+            kept.append(window)
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Plan
 # ---------------------------------------------------------------------------
@@ -212,7 +257,7 @@ def default_plan(segments, poses) -> List[dict]:
             "outro": _OUTRO_EXPRESSIONS,
         }.get(segment.kind, _NEUTRAL_EXPRESSIONS)
         plan.append(
-            {"index": index, "expression": _pick(poses, preferred), "backgrounds": [], "beats": []}
+            {"index": index, "expression": _pick(poses, preferred), "backgrounds": [], "scenes": [], "beats": []}
         )
     return plan
 
@@ -252,7 +297,11 @@ class Editor:
         self._used_urls: set = set()
         self._subscribe = self._prepare_subscribe()
         self._renderer: Optional[host.HostRenderer] = None
+        self._scene_renderer: Optional[scenes.SceneRenderer] = None
         self._beats: Dict[int, List[Tuple[_Beat, str]]] = {}
+        self._scenes: Dict[int, List[scenes.Scene]] = {}
+        self._scene_pictures: Dict[Tuple[str, str], Optional[object]] = {}
+        self._gemini = gemini_media.enabled()
         self.host_plan: List[host.HostSegment] = []
         self.plan: List[dict] = []
 
@@ -270,7 +319,11 @@ class Editor:
                 {"index": i, "kind": s.kind, "title": s.chapter, "text": s.text}
                 for i, s in enumerate(self.segments)
             ]
-            plan = llm.generate_edit_plan(payload, expressions, self.options.language)
+            reference = self._reference_plan()
+            if reference:
+                plan = llm.generate_edit_plan(payload, expressions, self.options.language, reference=reference)
+            else:
+                plan = llm.generate_edit_plan(payload, expressions, self.options.language)
             if plan is None:
                 self.warnings.append(
                     "the LLM did not return an edit plan; only the base visuals were used"
@@ -281,11 +334,28 @@ class Editor:
             if not entry.get("expression"):
                 entry["expression"] = default["expression"]
             entry.setdefault("backgrounds", [])
+            entry.setdefault("scenes", [])
+            if not self.options.scenes:
+                entry["scenes"] = []
             if self.options.beats == "none":
                 entry["beats"] = [b for b in entry.get("beats") or [] if b.get("type") == "react"]
         self.plan = plan
         self._save_plan()
         return plan
+
+    def _reference_plan(self) -> Optional[list]:
+        path = self.options.reference_plan
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                segments = json.load(fp).get("segments")
+        except (OSError, ValueError, AttributeError):
+            return None
+        if not isinstance(segments, list):
+            return None
+        # Anchors belong to the other language; the new plan picks its own.
+        return [{k: v for k, v in entry.items() if k != "host"} for entry in segments if isinstance(entry, dict)]
 
     def _save_plan(self) -> None:
         with open(os.path.join(self.task_dir, "edit-plan.json"), "w", encoding="utf-8") as fp:
@@ -295,7 +365,7 @@ class Editor:
     def _entry(self, index: int) -> dict:
         if index < len(self.plan):
             return self.plan[index]
-        return {"expression": "", "backgrounds": [], "beats": []}
+        return {"expression": "", "backgrounds": [], "scenes": [], "beats": []}
 
     def background_shots(self, index: int) -> List[Tuple[float, str]]:
         """(start second, stock footage query) scenes for a segment, in order."""
@@ -319,18 +389,37 @@ class Editor:
         return shots
 
     def _prepare(self) -> None:
-        """Fetch every picture and plan the host over the whole video."""
+        """Time the scenes, fetch every picture and plan the host over the whole video."""
         if self.host_plan:
             return
         infos = []
+        covers: List[List[Tuple[float, float]]] = []
         for index, segment in enumerate(self.segments):
             narration = self.narrations[index]
             duration = narration.frames / 30.0
             entry = self._entry(index)
+            pauses = host.find_pauses(narration.pcm)
+
+            def locate(anchor, segment=segment, narration=narration):
+                return anchor_time(segment.text, anchor, narration.sub_maker, narration.speech_seconds)
+
+            blocked = [self._subscribe_window(index, duration)] if self._subscribe_window(index, duration) else []
+            timed_scenes = scenes.time_scenes(entry.get("scenes") or [], locate, pauses, duration, blocked)
+            for scene in timed_scenes:
+                # Alternate sideways and vertical entrances across the video.
+                scene.vertical = sum(len(v) for v in self._scenes.values()) % 2 == 1
+                self._scenes.setdefault(index, []).append(scene)
+            self._scenes.setdefault(index, [])
+            cover = [(scene.start, scene.end) for scene in timed_scenes]
+            covers.append(cover)
+
             beats = schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
             prepared = []
             for beat in beats:
-                picture = self._beat_picture(beat) if beat.kind == "image" else ""
+                # Pictures and facts would only be hidden (and heard) under a scene.
+                if any(beat.start < end + 0.2 and beat.end > start - 0.2 for start, end in cover):
+                    continue
+                picture = self._beat_picture(beat, sentence_at(segment.text, beat.at)) if beat.kind == "image" else ""
                 if beat.kind == "image" and not picture:
                     continue
                 prepared.append((beat, picture))
@@ -339,9 +428,12 @@ class Editor:
             for beat in entry.get("beats") or []:
                 if beat.get("type") != "react":
                     continue
-                time = anchor_time(segment.text, beat.get("at", ""), narration.sub_maker, narration.speech_seconds)
-                if time is not None and time < duration - 1.5:
-                    reactions.append((max(0.4, time), beat["expression"]))
+                time = locate(beat.get("at", ""))
+                if time is None or time >= duration - 1.5:
+                    continue
+                if any(start - 0.3 <= time <= end for start, end in cover):
+                    continue
+                reactions.append((max(0.4, time), beat["expression"]))
             infos.append(
                 host.SegmentInfo(
                     kind=segment.kind,
@@ -349,7 +441,7 @@ class Editor:
                     expression=entry.get("expression", ""),
                     reactions=reactions,
                     pictures=[b.start for b, _ in prepared if b.kind == "image"],
-                    pauses=host.find_pauses(narration.pcm),
+                    pauses=pauses,
                     mode=entry.get("host", ""),
                 )
             )
@@ -357,6 +449,8 @@ class Editor:
         mode = self.options.host if self.options.host in host.HOST_MODES else "auto"
         seed = fx.safe_seed("".join(s.chapter for s in self.segments)) % len(host.ITEM_PATTERN)
         self.host_plan = host.plan_host(infos, names, mode, seed)
+        for planned, cover in zip(self.host_plan, covers):
+            planned.windows = _avoid_cover(planned.windows, cover)
         if self.plan and names:
             for entry, planned in zip(self.plan, self.host_plan):
                 entry["host"] = planned.mode
@@ -388,21 +482,89 @@ class Editor:
             )
         return self._renderer
 
-    def _beat_picture(self, beat: _Beat) -> str:
+    def _beat_picture(self, beat: _Beat, line: str = "") -> str:
+        """A picture for an image beat: AI, or web pictures checked by Gemini, or the icon."""
         save_dir = os.path.join(self.work_dir, "pictures")
-        if self.options.beats == "ai" and material.is_openai_image_enabled():
-            items = material.generate_images_openai(
-                search_term=beat.query, minimum_duration=1, save_dir=save_dir
-            )
-            if items:
-                self.credits.append(f"{beat.query} — AI-generated illustration")
-                return items[0].url
-        found = web_images.find_image(beat.query, save_dir, kind=beat.look, exclude_urls=self._used_urls)
-        if found:
-            self.credits.append(found.credit())
-            return found.path
+        if self.options.beats == "ai":
+            if self._gemini:
+                path = gemini_media.illustrate(beat.query)
+                if path:
+                    self.credits.append("Illustrations: generated with Google Imagen")
+                    return path
+            elif material.is_openai_image_enabled():
+                items = material.generate_images_openai(
+                    search_term=beat.query, minimum_duration=1, save_dir=save_dir
+                )
+                if items:
+                    self.credits.append(f"{beat.query} — AI-generated illustration")
+                    return items[0].url
+        check = self.options.picture_check and self._gemini
+        candidates = web_images.find_candidates(
+            beat.query, save_dir, kind=beat.look, exclude_urls=self._used_urls, limit=4 if check else 1
+        )
+        if candidates:
+            choice = 0
+            if check:
+                verdict = gemini_media.choose_picture(
+                    [c.path for c in candidates], line or beat.query, beat.query, self.options.language
+                )
+                choice = 0 if verdict is None else verdict
+            if choice >= 0:
+                found = candidates[choice]
+                self._used_urls.add(found.url)
+                self.credits.append(found.credit())
+                return found.path
+            logger.info(f"pictures for {beat.query!r} did not pass the check")
+        if beat.icon:
+            path = icons.fetch(beat.icon)
+            if path:
+                self.credits.append(icons.CREDIT)
+                return path
         self.warnings.append(f"no picture found for {beat.query!r}")
         return ""
+
+    def _scene_picture(self, item: scenes.SceneItem):
+        """Picture for a scene element: an AI doodle or an OpenMoji icon (cached)."""
+        key = (item.icon, item.draw)
+        if key in self._scene_pictures:
+            return self._scene_pictures[key]
+        image = None
+        if self.options.illustrations == "ai" and self._gemini and item.draw:
+            path = gemini_media.illustrate(item.draw)
+            if path:
+                image = scenes.prepare_picture(path)
+                self.credits.append("Illustrations: generated with Google Imagen")
+        if image is None:
+            for query in (item.icon, item.draw):
+                path = icons.fetch(query) if query else ""
+                if path:
+                    image = scenes.prepare_picture(path)
+                    self.credits.append(icons.CREDIT)
+                    break
+        self._scene_pictures[key] = image
+        return image
+
+    def scene_renderer(self) -> scenes.SceneRenderer:
+        if self._scene_renderer is None:
+            texts = [i.label for ss in self._scenes.values() for sc in ss for i in sc.items] + [
+                sc.text for ss in self._scenes.values() for sc in ss
+            ]
+            self._scene_renderer = scenes.SceneRenderer(
+                self.theme,
+                self.work_dir,
+                scene_canvas_color(self.options.scene_color, self.theme.accent),
+                self._scene_picture,
+                self._host_still if self.poses else None,
+                self.sfx,
+                font_path=scenes.hand_font_path(texts),
+            )
+        return self._scene_renderer
+
+    def _host_still(self, expression: str, height: int):
+        names = list(self.poses)
+        if expression not in self.poses:
+            expression = _pick(self.poses, ("explicando", "feliz", "neutral"))
+        return self.renderer().still(expression or names[0], height)
 
     # -- layout -------------------------------------------------------------
 
@@ -431,7 +593,8 @@ class Editor:
             # Centred on the cut, so the whoosh carries the transition.
             self._sound(edit, -0.2, "whoosh")
 
-        # Chapter label slides in from the left.
+        # Chapter label slides in from the left (and stays above the scenes).
+        chip_overlay = None
         if show_titles and segment.kind == "item":
             chip = fx.render_chapter_chip(theme, segment.number or None, segment.name or segment.chapter)
             path, chip_w, _ = self._save(chip, f"chip-{index:02d}.png")
@@ -439,9 +602,7 @@ class Editor:
             # The PNG carries its drop-shadow padding; offset it so the chip
             # itself lands on the margin.
             left = margin - fx.shadow_padding(theme)
-            edit.overlays.append(
-                fx.Overlay(path, x=f"{left}-({chip_w}+{margin})*(1-{ease})", y=str(left))
-            )
+            chip_overlay = fx.Overlay(path, x=f"{left}-({chip_w}+{margin})*(1-{ease})", y=str(left))
 
         subscribe_window = self._subscribe_window(index, duration)
         # Callouts stay right of the host in landscape; in portrait they sit above it.
@@ -491,6 +652,20 @@ class Editor:
             for window in planned.windows:
                 if window.enter:
                     self._sound(edit, window.start + 0.05, "bloop")
+
+        # Scenes slide over the footage, the stickers and the host.
+        for number, scene in enumerate(self._scenes.get(index, [])):
+            try:
+                overlays, sounds = self.scene_renderer().build(scene, f"{index:02d}-{number}")
+            except Exception as exc:
+                logger.exception(f"scene {scene.type!r} could not be drawn")
+                self.warnings.append(f"a {scene.type} scene could not be drawn: {exc}")
+                continue
+            edit.overlays += overlays
+            edit.sounds += sounds
+
+        if chip_overlay is not None:
+            edit.overlays.append(chip_overlay)
 
         if subscribe_window:
             edit.overlays.append(self._subscribe_overlay(subscribe_window[0], has_character))

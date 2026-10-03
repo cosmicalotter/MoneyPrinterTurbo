@@ -492,13 +492,32 @@ progress bar, fades, and audio normalized to -14 LUFS. `credits.txt` lists pictu
 attributions for the description, and `edit-plan.json` can be edited and passed back
 with `--edit-plan` to re-render.
 
+**Explainer scenes** interrupt the footage once or twice per item to make one idea
+obvious, in a minimalist hand-drawn style on a paper canvas in the channel colour:
+the host alone with a punchline (`statement`), a number as a filling pie or a
+count-up (`stat`), things listed left to right as they are named, stamped with a red
+cross when the narration denies them (`sequence`), two situations side by side
+(`compare`), or a central idea with arrows drawn from each factor as it is named
+(`diagram`). Pictures are OpenMoji icons (free, CC BY-SA) or, with
+`--illustrations ai`, doodles drawn by Imagen with Gemini credentials (about US$0.02
+each, cached). `--scene-color` picks the canvas (default: a light tint of `--accent`;
+statements use the accent itself) and `--no-scenes` turns them off.
+
+Pictures that pop in are **checked by Gemini** when Gemini credentials are configured:
+it sees four candidates with the narrated sentence and keeps the one a viewer gets at a
+glance (no dense diagrams, collages, watermarks or text in another language); when none
+passes, the beat's emoji icon is used. `--no-picture-check` keeps the first result.
+
 The host is not on screen all the time (`--host auto`): it pops up from the bottom
 edge to introduce some items, drops in to react to a surprising line, points at the
 pictures as they appear, waves in the intro and outro, and leaves the stage to the
-footage the rest of the time. Expression changes land with a small squash-and-stretch
-bounce. `--host always` keeps it on screen and `--host none` hides it; the `"host"`
-field of each segment in `edit-plan.json` (`full`, `lead`, `react`, `lead+react`,
-`off`) can be changed by hand.
+footage the rest of the time. Its poses are still pictures that cross-fade with a
+small bounce when the expression changes (`--lip-sync` animates the mouth instead).
+`--host always` keeps it on screen and `--host none` hides it; the `"host"` field of
+each segment in `edit-plan.json` (`full`, `lead`, `react`, `lead+react`, `off`) can be
+changed by hand. With `--also-in`, every translation reuses the first version's
+scenes, icons and pictures, so the versions look the same and illustrations are paid
+once.
 
 `--assets nutria` uses the bundled otter host (round glasses, teal sweater and a pencil
 behind the ear, 12 expressions with talking frames). Its SVG sources and the script
@@ -509,7 +528,8 @@ sounds with `--assets <folder>`:
 assets/
   personaje/feliz.png, feliz_habla.png, sorprendido.png, ...   (_habla = mouth open)
             saludando.png (waves), senalando.png (points at pictures)  (optional)
-  sfx/whoosh.wav, pop.wav, tick.wav, click.wav, bloop.wav      (optional overrides)
+  sfx/whoosh.wav, pop.wav, tick.wav, click.wav, bloop.wav,
+      stamp.wav, scribble.wav                                  (optional overrides)
   suscribete.gif (or .webm/.mov/.png) and suscribete.mp3       (optional)
 ```
 

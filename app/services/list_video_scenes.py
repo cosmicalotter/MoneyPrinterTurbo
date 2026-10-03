@@ -40,7 +40,7 @@ SCENE_TYPES = ("statement", "stat", "sequence", "compare", "diagram")
 SCENE_MARKS = ("cross", "check")
 SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
-MIN_SCENE_SECONDS = 2.5
+MIN_SCENE_SECONDS = 2.2
 INK = (27, 27, 47)
 WHITE = (255, 255, 255)
 TEAL = (42, 157, 143)
@@ -73,6 +73,7 @@ class Scene:
     expression: str = ""
     center: Optional[SceneItem] = None
     exit: bool = True
+    vertical: bool = False  # enter from below and leave upwards instead of sideways
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +177,17 @@ def time_scenes(
     for scene in sorted(timed, key=lambda s: s.start):
         if kept and scene.start < kept[-1].end + 0.6:
             continue
-        if any(scene.start < b and scene.end > a for a, b in blocked):
-            continue
+        clash = [(a, b) for a, b in blocked if scene.start < b and scene.end > a]
+        if clash:
+            # Make room for the blocked moment rather than losing the scene.
+            first = min(a for a, _ in clash)
+            if first - 0.2 - scene.start < MIN_SCENE_SECONDS or first <= scene.start:
+                continue
+            scene.end, scene.exit = first - 0.2, True
+            scene.items = [i for i in scene.items if i.time < scene.end - 1.2]
+            if scene.type in ("sequence", "compare", "diagram") and len(scene.items) < 2:
+                continue
+        scene.vertical = len(kept) % 2 == 1
         kept.append(scene)
     return kept
 
@@ -503,12 +513,16 @@ class SceneRenderer:
             sounds.append((time, self.sfx[name], _SFX.get(name, 0.6)))
 
     @staticmethod
-    def _slide(scene: Scene) -> str:
+    def _slide(scene: Scene, axis: str = "x") -> str:
+        """Offset along ``axis`` while the scene slides in and out (0 otherwise)."""
+        if (axis == "y") != scene.vertical:
+            return "0"
+        size = "H" if scene.vertical else "W"
         s, e, d = scene.start, scene.end, SLIDE_SECONDS
-        enter = f"W*pow(1-clip((t-{s:.3f})/{d},0,1),3)"
+        enter = f"{size}*pow(1-clip((t-{s:.3f})/{d},0,1),3)"
         if not scene.exit:
             return enter
-        return f"{enter}-W*pow(clip((t-{e - d:.3f})/{d},0,1),3)"
+        return f"{enter}-{size}*pow(clip((t-{e - d:.3f})/{d},0,1),3)"
 
     def _frames(
         self, frames: List[Image.Image], folder: str, name: str, x: float, y: float, start: float, scene: Scene
@@ -520,7 +534,7 @@ class SceneRenderer:
         return fx.Overlay(
             os.path.join(folder, f"{name}_%03d.png"),
             x=f"{int(x)}+{self._slide(scene)}",
-            y=str(int(y)),
+            y=f"{int(y)}+{self._slide(scene, 'y')}",
             start=start,
             end=scene.end,
             mode="frames",
@@ -581,7 +595,10 @@ class SceneRenderer:
         folder = os.path.join(self.work_dir, key)
         color = self.theme.accent if scene.type == "statement" else self.canvas_color
         overlays = [
-            fx.Overlay(self._background(color), x=self._slide(scene), y="0", start=scene.start, end=scene.end)
+            fx.Overlay(
+                self._background(color), x=self._slide(scene), y=self._slide(scene, "y"),
+                start=scene.start, end=scene.end,
+            )
         ]
         sounds: List[Tuple[float, str, float]] = []
         self._sound(sounds, scene.start - 0.1, "whoosh")
@@ -717,7 +734,7 @@ class SceneRenderer:
         items = scene.items[:5]
         rx, ry = (W * 0.36, H * 0.33) if not theme.portrait else (W * 0.3, H * 0.33)
         angles = {
-            2: [180, 0], 3: [215, 325, 90], 4: [215, 325, 145, 35], 5: [200, 340, 270, 135, 45],
+            2: [180, 0], 3: [200, 340, 270], 4: [215, 325, 145, 35], 5: [200, 340, 270, 135, 45],
         }[max(2, len(items))]
         for number, (item, angle) in enumerate(zip(items, angles)):
             a = math.radians(angle)

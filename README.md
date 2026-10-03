@@ -472,9 +472,20 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 生成（`--beats ai`）；示意图会被抠成贴纸，照片则显示为带边框的卡片。视频还会加入
 章节标签、订阅动画、音效、进度条、淡入淡出，并把音频响度统一到 -14 LUFS。
 `credits.txt` 汇总配图署名，`edit-plan.json` 可修改后通过 `--edit-plan` 重新渲染。
+**讲解场景**会在每个条目中插入一到两次，以极简手绘风格在带纸张纹理的频道配色画布上
+讲清一个要点：主持人配一句金句（`statement`）、以填充饼图或滚动数字呈现的数据
+（`stat`）、随旁白依次出现的并列事物（被否定时盖上红叉，`sequence`）、左右对比
+（`compare`），以及随旁白逐条画出箭头的概念图（`diagram`）。图标来自 OpenMoji
+（免费，CC BY-SA）；使用 `--illustrations ai` 时由 Imagen 绘制涂鸦插画（需 Gemini
+凭据，约 0.02 美元/张，有缓存）。`--scene-color` 设置画布颜色（默认为 `--accent`
+的浅色调），`--no-scenes` 关闭场景。
+配置了 Gemini 凭据时，弹出的配图会先经 Gemini **审核**：它会结合旁白句子比较四张
+候选图，挑出一眼就能看懂的那张（排除复杂示意图、拼图、水印和其他语言的文字）；
+都不合格时改用该节拍的 emoji 图标。`--no-picture-check` 则直接使用第一张结果。
 主持角色不会全程停留在画面上（`--host auto`）：它会从画面底部探出来介绍部分条目、
 在惊人的句子处跳出来做反应、指向弹出的配图、在开场和结尾挥手，其余时间把画面
-留给素材；切换表情时带有轻微的挤压回弹。`--host always` 让角色全程出现，
+留给素材；表情为静态图片，切换时淡入淡出并轻微回弹（`--lip-sync` 改为口型动画）。
+使用 `--also-in` 时，各语言版本沿用第一个版本的场景、图标和配图。`--host always` 让角色全程出现，
 `--host none` 则隐藏角色；也可以手动修改 `edit-plan.json` 中各片段的 `"host"`
 （`full`、`lead`、`react`、`lead+react`、`off`）。
 `--assets nutria` 使用内置的水獭主持人（圆框眼镜、青绿色毛衣、耳后夹着铅笔，共 12
