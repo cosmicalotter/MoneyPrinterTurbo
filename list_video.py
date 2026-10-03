@@ -181,15 +181,21 @@ Automatic editing (on by default, --no-edit turns it off):
   to -14 LUFS (--progress-bar adds a progress bar). The plan is saved as edit-plan.json; edit it
   and pass it back with --edit-plan to re-render with your changes.
 
-  Explainer scenes interrupt the footage to make one idea obvious: the host
-  alone with a punchline, a number as a filling pie or a count-up, things
-  listed (stamped with a red cross when the narration denies them), two
-  situations side by side, or a diagram whose arrows are drawn as each factor
-  is named. They use OpenMoji icons, or doodles drawn by Imagen with
+  Pictures pop in over the footage when the narration names them: one in the
+  middle of the screen, or 2-4 spread left to right (the host steps aside).
+  When Gemini credentials are configured, Gemini picks each picture among
+  several (simple, on topic, no foreign text); an icon replaces a picture
+  that fails. Only light, flat backgrounds are cut out as stickers; photos
+  become framed cards.
+
+  Explainer scenes replace the footage about once per item to make one idea
+  obvious, in 15 styles: statement, question, figure (a real diagram or photo
+  full screen, shown as long as Gemini says it takes to read), zoom, stat
+  (pie or count-up), grid ("7 out of 10"), gauge, bars, sequence (with red
+  crosses / green ticks), compare, steps or cycle, timeline, formula,
+  diagram, and story (a 2-4 frame flipbook with the host). They use real
+  pictures checked by Gemini, OpenMoji icons, or doodles drawn by Imagen with
   --illustrations ai, on a paper canvas in the channel colour (--scene-color).
-  Pictures that pop in are checked by Gemini (simple, on topic, no foreign
-  text) when Gemini credentials are configured; an icon replaces a picture
-  that fails.
 
   Background footage follows the narration: the plan picks a new stock scene
   every 6-8 seconds and each scene is cut into shots of --video-clip-duration
@@ -198,7 +204,8 @@ Automatic editing (on by default, --no-edit turns it off):
   The host is not on screen all the time (--host auto): it pops up from the
   bottom to introduce some items, drops in to react to a surprising line,
   points at pictures as they appear and leaves the stage to the footage the
-  rest of the time; expression changes cross-fade with a small bounce. Use
+  rest of the time; it changes its face about every 3 seconds with a small
+  cross-fade and bounce. Use
   --host always to keep it on screen, or --host none to hide it. The poses
   are still pictures; --lip-sync swaps in the *_habla frames while it talks.
 

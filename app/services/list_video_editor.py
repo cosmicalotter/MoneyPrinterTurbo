@@ -263,6 +263,25 @@ def scene_canvas_color(option: str, accent: Tuple[int, int, int]) -> Tuple[int, 
     return tuple(int(c + (255 - c) * 0.84) for c in accent)
 
 
+def _before_scenes(beat: _Beat, cover: List[Tuple[float, float]]) -> Optional[_Beat]:
+    """Cut a beat short before the next scene; None when it would be hidden (and heard) under one."""
+    for start, end in cover:
+        if beat.start < end + 0.2 and beat.end > start - 0.2:
+            if beat.start >= start - 0.2:
+                return None
+            beat.end = start - 0.2
+    shortest = 1.2 if beat.kind == "text" else IMAGE_BEAT_MIN
+    if beat.end - beat.start < shortest:
+        return None
+    if beat.kind == "images":
+        beat.members = [m for m in beat.members if m.start < beat.end - 1.0]
+        for member in beat.members:
+            member.end = beat.end
+        if not beat.members:
+            return None
+    return beat
+
+
 def _avoid_cover(windows: List[host.HostWindow], cover: List[Tuple[float, float]]) -> List[host.HostWindow]:
     """Host visits never begin under a scene: the bloop would sound over nothing."""
     kept = []
@@ -449,11 +468,7 @@ class Editor:
             cover = [(scene.start, scene.end) for scene in timed_scenes]
             covers.append(cover)
             beats = schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
-            # Pictures and facts would only be hidden (and heard) under a scene.
-            self._beats[index] = [
-                (beat, "") for beat in beats
-                if not any(beat.start < end + 0.2 and beat.end > start - 0.2 for start, end in cover)
-            ]
+            self._beats[index] = [(beat, "") for beat in (_before_scenes(b, cover) for b in beats) if beat]
             reactions = []
             for beat in entry.get("beats") or []:
                 if beat.get("type") != "react":

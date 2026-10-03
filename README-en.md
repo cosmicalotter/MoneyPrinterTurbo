@@ -487,32 +487,42 @@ character's expression and reactions, plus pictures and key facts that pop in ex
 when the narration mentions them (timed from TTS word boundaries).
 Pictures come from Wikimedia Commons, Pexels, or Pixabay (`--beats web`) or from the
 image model (`--beats ai`); diagrams are cut out as stickers and photos become framed
-cards. The video also gets chapter labels, a subscribe animation, sound effects, a
-progress bar, fades, and audio normalized to -14 LUFS. `credits.txt` lists picture
-attributions for the description, and `edit-plan.json` can be edited and passed back
-with `--edit-plan` to re-render.
+cards. The video also gets chapter labels, a subscribe animation, sound effects,
+fades, and audio normalized to -14 LUFS (`--progress-bar` adds a progress bar).
+`credits.txt` lists picture attributions for the description, and `edit-plan.json` can
+be edited and passed back with `--edit-plan` to re-render.
 
-**Explainer scenes** interrupt the footage once or twice per item to make one idea
-obvious, in a minimalist hand-drawn style on a paper canvas in the channel colour:
-the host alone with a punchline (`statement`), a number as a filling pie or a
-count-up (`stat`), things listed left to right as they are named, stamped with a red
-cross when the narration denies them (`sequence`), two situations side by side
-(`compare`), or a central idea with arrows drawn from each factor as it is named
-(`diagram`). Pictures are OpenMoji icons (free, CC BY-SA) or, with
-`--illustrations ai`, doodles drawn by Imagen with Gemini credentials (about US$0.02
-each, cached). `--scene-color` picks the canvas (default: a light tint of `--accent`;
-statements use the accent itself) and `--no-scenes` turns them off.
+**Pictures pop in over the footage** when the narration names them: one picture sits in
+the middle of the screen, and 2-4 things named one after the other are spread left to
+right (left/right, left/centre/right) while the host steps aside. When Gemini
+credentials are configured, Gemini sees several candidates with the narrated sentence
+and keeps the one a viewer gets at a glance (no dense diagrams, collages, watermarks or
+text in another language); when none passes, the beat's emoji icon is used.
+`--no-picture-check` keeps the first result. Only pictures on a light, flat background
+that come off as one clean shape are cut out as stickers; photos become framed cards.
 
-Pictures that pop in are **checked by Gemini** when Gemini credentials are configured:
-it sees four candidates with the narrated sentence and keeps the one a viewer gets at a
-glance (no dense diagrams, collages, watermarks or text in another language); when none
-passes, the beat's emoji icon is used. `--no-picture-check` keeps the first result.
+**Explainer scenes** replace the footage about once per item to make one idea obvious,
+in a minimalist hand-drawn style on a paper canvas in the channel colour. There are 15
+styles, and the director is asked to vary them: `statement` (the host with a
+punchline), `question`, `figure` (a real diagram, chart or photo full screen, searched
+in English and in the narration language, shown as long as Gemini says it takes to
+read), `zoom` (one thing while the camera pushes in), `stat` (a pie that fills or a
+number that counts up), `grid` ("7 out of 10" as icons), `gauge`, `bars`, `sequence`
+(things popping in, stamped with a red cross or a green tick), `compare`, `steps` (or
+a `cycle`), `timeline`, `formula` ("heat + oxygen + fuel = fire"), `diagram` (arrows
+drawn to a central idea) and `story` (a 2-4 frame flipbook where the host does
+something and something happens). Elements use real pictures checked by Gemini, OpenMoji
+icons (free, CC BY-SA) or, with `--illustrations ai`, doodles drawn by Imagen (about
+US$0.02 each, cached; story frames are drawn from each other by a Gemini image model so
+they match). `--scene-color` picks the canvas (default: a light tint of `--accent`;
+statements and questions use the accent itself) and `--no-scenes` turns them off.
 
 The host is not on screen all the time (`--host auto`): it pops up from the bottom
 edge to introduce some items, drops in to react to a surprising line, points at the
 pictures as they appear, waves in the intro and outro, and leaves the stage to the
-footage the rest of the time. Its poses are still pictures that cross-fade with a
-small bounce when the expression changes (`--lip-sync` animates the mouth instead).
+footage the rest of the time. Its poses are still pictures; it changes its face about
+every 3 seconds (on a breath) with a small cross-fade and bounce (`--lip-sync` animates
+the mouth instead).
 `--host always` keeps it on screen and `--host none` hides it; the `"host"` field of
 each segment in `edit-plan.json` (`full`, `lead`, `react`, `lead+react`, `off`) can be
 changed by hand. With `--also-in`, every translation reuses the first version's

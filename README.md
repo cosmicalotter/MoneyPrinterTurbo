@@ -470,21 +470,24 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 逐词时间戳）。
 配图来自 Wikimedia Commons、Pexels 或 Pixabay（`--beats web`），也可由文生图模型
 生成（`--beats ai`）；示意图会被抠成贴纸，照片则显示为带边框的卡片。视频还会加入
-章节标签、订阅动画、音效、进度条、淡入淡出，并把音频响度统一到 -14 LUFS。
+章节标签、订阅动画、音效（`--progress-bar` 可加进度条）、淡入淡出，并把音频响度统一到 -14 LUFS。
 `credits.txt` 汇总配图署名，`edit-plan.json` 可修改后通过 `--edit-plan` 重新渲染。
-**讲解场景**会在每个条目中插入一到两次，以极简手绘风格在带纸张纹理的频道配色画布上
-讲清一个要点：主持人配一句金句（`statement`）、以填充饼图或滚动数字呈现的数据
-（`stat`）、随旁白依次出现的并列事物（被否定时盖上红叉，`sequence`）、左右对比
-（`compare`），以及随旁白逐条画出箭头的概念图（`diagram`）。图标来自 OpenMoji
-（免费，CC BY-SA）；使用 `--illustrations ai` 时由 Imagen 绘制涂鸦插画（需 Gemini
-凭据，约 0.02 美元/张，有缓存）。`--scene-color` 设置画布颜色（默认为 `--accent`
-的浅色调），`--no-scenes` 关闭场景。
-配置了 Gemini 凭据时，弹出的配图会先经 Gemini **审核**：它会结合旁白句子比较四张
-候选图，挑出一眼就能看懂的那张（排除复杂示意图、拼图、水印和其他语言的文字）；
-都不合格时改用该节拍的 emoji 图标。`--no-picture-check` 则直接使用第一张结果。
+旁白提到某样东西时，**配图**会浮现在素材之上：单张图片居中显示，依次提到的 2–4 样
+东西则左右对称排列（此时主持人暂时离场）。配置了 Gemini 凭据时，Gemini 会结合旁白
+句子比较多张候选图，挑出一眼就能看懂的那张（排除复杂示意图、拼图、水印和其他语言
+的文字）；都不合格时改用 emoji 图标，`--no-picture-check` 则直接使用第一张结果。
+只有浅色纯色背景且能完整抠出的图片才会做成贴纸，照片显示为带白边的卡片。
+**讲解场景**大约每个条目替换一次素材，以极简手绘风格在纸张纹理的频道配色画布上讲清
+一个要点，共 15 种并会轮换使用：`statement`、`question`、`figure`（全屏显示真实的
+示意图或照片，停留时长由 Gemini 判断）、`zoom`、`stat`、`grid`（“10 个里有 7 个”）、
+`gauge`、`bars`、`sequence`（红叉/绿勾）、`compare`、`steps`（或循环）、`timeline`、
+`formula`、`diagram` 和 `story`（主持人参与的 2–4 帧小动画）。元素使用经 Gemini 审核
+的真实图片、OpenMoji 图标，或 `--illustrations ai` 时由 Imagen 绘制的涂鸦插画。
+`--scene-color` 设置画布颜色，`--no-scenes` 关闭场景。
 主持角色不会全程停留在画面上（`--host auto`）：它会从画面底部探出来介绍部分条目、
 在惊人的句子处跳出来做反应、指向弹出的配图、在开场和结尾挥手，其余时间把画面
-留给素材；表情为静态图片，切换时淡入淡出并轻微回弹（`--lip-sync` 改为口型动画）。
+留给素材；表情为静态图片，约每 3 秒切换一次并带淡入淡出和轻微回弹（`--lip-sync`
+改为口型动画）。
 使用 `--also-in` 时，各语言版本沿用第一个版本的场景、图标和配图。`--host always` 让角色全程出现，
 `--host none` 则隐藏角色；也可以手动修改 `edit-plan.json` 中各片段的 `"host"`
 （`full`、`lead`、`react`、`lead+react`、`off`）。
