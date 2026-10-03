@@ -22,7 +22,7 @@ import io
 import json
 import os
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from loguru import logger
 from PIL import Image, ImageOps
@@ -79,29 +79,69 @@ def language_name(language: str) -> str:
     return _LANGUAGE_NAMES.get((language or "").split("-")[0].lower(), "the narration's language")
 
 
-def build_choice_prompt(line: str, query: str, count: int, language: str = "") -> str:
+PURPOSES = ("beat", "scene", "figure")
+
+
+def build_choice_prompt(line: str, query: str, count: int, language: str = "", purpose: str = "beat") -> str:
+    """What the picture editor is asked; ``purpose`` is where the picture will be shown.
+
+    * beat: big, over the footage, for a couple of seconds;
+    * scene: small, beside icons in a minimalist drawn scene;
+    * figure: filling the screen, long enough to read a diagram.
+    """
+    language = language_name(language)
+    if purpose == "figure":
+        rules = f"""- explains or shows exactly what the narrator says (a diagram, chart, infographic or a striking photo);
+- is clean and readable on a TV: large shapes, little clutter, sharp, not a page of text or a screenshot;
+- any text is in {language} or in English and readable; never text in another language or alphabet;
+- has no watermark, logo, gore or anything disturbing."""
+        answer = (
+            f'{{"choice": <number from 0 to {count}>, "seconds": <how long a viewer needs to understand it: '
+            '3 or 4 for a photo, 5 to 8 for a diagram with text>, "reason": "<a few words>"}'
+        )
+    else:
+        small = (
+            "- it will be shown small next to simple icons, so it must be one isolated object or figure "
+            "(clip art, a cut-out on a plain background, or a clean photo of only that thing);\n"
+            "- it must be very closely related to the words: if you are not sure, answer 0;\n"
+            if purpose == "scene"
+            else ""
+        )
+        rules = f"""- clearly and literally shows what the narrator says, so a viewer gets it in under two seconds;
+{small}- is simple: one main subject on a clean background, not a dense scientific diagram, collage, chart or infographic;
+- has no text or labels, except at most a few words in {language} or English, and never text in another language or alphabet;
+- has no watermark, logo, gore or anything disturbing, and is sharp."""
+        answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
     return f"""
 You are the picture editor of an educational YouTube channel for a general audience.
 The narrator says: "{line}"
 We want a picture of: "{query}"
 Below are {count} candidate pictures, numbered 1 to {count} in order.
 Choose the one picture that:
-- clearly and literally shows what the narrator says, so a viewer gets it in under two seconds;
-- is simple: one main subject on a clean background, not a dense scientific diagram, collage, chart or infographic;
-- has no text or labels, except at most a few words in {language_name(language)} or English, and never text in another language or alphabet;
-- has no watermark, logo, gore or anything disturbing, and is sharp.
+{rules}
 If none of the pictures meets every rule, answer 0.
-Return only JSON: {{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}
+Return only JSON: {answer}
 """.strip()
 
 
-def _parse_choice(text: str, count: int) -> Optional[int]:
+def _parse_answer(text: str) -> Optional[dict]:
     match = re.search(r"\{.*\}", text or "", re.S)
     if not match:
         return None
     try:
-        choice = int(json.loads(match.group(0)).get("choice"))
-    except (ValueError, TypeError, AttributeError):
+        answer = json.loads(match.group(0))
+    except ValueError:
+        return None
+    return answer if isinstance(answer, dict) else None
+
+
+def _parse_choice(text: str, count: int) -> Optional[int]:
+    answer = _parse_answer(text)
+    if answer is None:
+        return None
+    try:
+        choice = int(answer.get("choice"))
+    except (ValueError, TypeError):
         return None
     if choice == 0:
         return -1
@@ -110,36 +150,64 @@ def _parse_choice(text: str, count: int) -> Optional[int]:
     return None
 
 
+def _ask(paths: List[str], prompt: str, app_config) -> str:
+    from google import genai
+    from google.genai import types
+
+    kwargs = _client_kwargs(app_config)
+    model = str(app_config.get("gemini_vision_model", "") or "").strip() or VISION_DEFAULT_MODEL
+    contents: list = [prompt]
+    for number, path in enumerate(paths, 1):
+        contents.append(f"Picture {number}:")
+        contents.append(types.Part.from_bytes(data=_jpeg(path), mime_type="image/jpeg"))
+    with genai.Client(**kwargs) as client:
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json"),
+        )
+    return response.text
+
+
 def choose_picture(
-    paths: List[str], line: str, query: str, language: str = "", app_config=None
+    paths: List[str], line: str, query: str, language: str = "", app_config=None, purpose: str = "beat"
 ) -> Optional[int]:
     """Index of the best picture, -1 when none is good enough, None when the check failed."""
     if not paths:
         return -1
     app_config = _app(app_config)
     try:
-        from google import genai
-        from google.genai import types
-
-        kwargs = _client_kwargs(app_config)
-        model = str(app_config.get("gemini_vision_model", "") or "").strip() or VISION_DEFAULT_MODEL
-        contents: list = [build_choice_prompt(line, query, len(paths), language)]
-        for number, path in enumerate(paths, 1):
-            contents.append(f"Picture {number}:")
-            contents.append(types.Part.from_bytes(data=_jpeg(path), mime_type="image/jpeg"))
-        with genai.Client(**kwargs) as client:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(temperature=0, response_mime_type="application/json"),
-            )
-        choice = _parse_choice(response.text, len(paths))
+        text = _ask(paths, build_choice_prompt(line, query, len(paths), language, purpose), app_config)
+        choice = _parse_choice(text, len(paths))
         if choice is None:
-            logger.warning(f"picture check returned an unexpected answer: {response.text!r}")
+            logger.warning(f"picture check returned an unexpected answer: {text!r}")
         return choice
     except Exception as exc:
         logger.warning(f"picture check failed ({type(exc).__name__}: {exc}); using the first candidate")
         return None
+
+
+def choose_figure(
+    paths: List[str], line: str, query: str, language: str = "", app_config=None
+) -> Optional[Tuple[int, float]]:
+    """(index, seconds to show it) for a full-screen picture; index -1 when none fits; None if the check failed."""
+    if not paths:
+        return -1, 0.0
+    app_config = _app(app_config)
+    try:
+        text = _ask(paths, build_choice_prompt(line, query, len(paths), language, "figure"), app_config)
+    except Exception as exc:
+        logger.warning(f"figure check failed ({type(exc).__name__}: {exc}); using the first candidate")
+        return None
+    choice = _parse_choice(text, len(paths))
+    if choice is None:
+        logger.warning(f"figure check returned an unexpected answer: {text!r}")
+        return None
+    try:
+        seconds = float((_parse_answer(text) or {}).get("seconds") or 0)
+    except (TypeError, ValueError):
+        seconds = 0.0
+    return choice, min(9.0, max(3.0, seconds)) if seconds else 0.0
 
 
 def _cache_path(model: str, prompt: str) -> str:
@@ -192,3 +260,69 @@ def illustrate(subject: str, app_config=None) -> str:
     except Exception as exc:
         logger.warning(f"illustration failed for {subject!r}: {type(exc).__name__}: {exc}")
         return ""
+
+
+SEQUENCE_DEFAULT_MODEL = "gemini-2.5-flash-image"
+SEQUENCE_PROMPT = (
+    "Minimalist hand-drawn doodle illustration for an educational explainer video, "
+    "thick uniform dark outlines, flat soft colours, plain pure white background, no text: {subject}"
+)
+SEQUENCE_NEXT = (
+    "Redraw the same scene with the same style, characters, objects and framing, changing only this: "
+    "{subject}. No text."
+)
+
+
+def illustrate_sequence(descriptions: List[str], app_config=None) -> List[str]:
+    """Consecutive frames of one little scene, each drawn from the previous one.
+
+    Uses a Gemini image model that can edit pictures (Imagen cannot), so the
+    characters and props stay the same from frame to frame. Frames are cached
+    by their whole story. Returns [] when the model is not available.
+    """
+    descriptions = [d.strip() for d in descriptions if d and d.strip()]
+    if len(descriptions) < 2:
+        return []
+    app_config = _app(app_config)
+    model = str(app_config.get("gemini_image_model", "") or "").strip()
+    if not model or model.startswith("imagen"):
+        model = SEQUENCE_DEFAULT_MODEL
+    story = "\n".join(descriptions)
+    paths = [_cache_path(model, f"{story}\n#{n}") for n in range(len(descriptions))]
+    if all(os.path.isfile(p) and os.path.getsize(p) > 0 for p in paths):
+        return paths
+    try:
+        from google import genai
+        from google.genai import types
+
+        kwargs = _client_kwargs(app_config)
+        previous = None
+        with genai.Client(**kwargs) as client:
+            for number, subject in enumerate(descriptions):
+                if previous is None:
+                    contents: list = [SEQUENCE_PROMPT.format(subject=subject)]
+                else:
+                    contents = [
+                        types.Part.from_bytes(data=previous, mime_type="image/png"),
+                        SEQUENCE_NEXT.format(subject=subject),
+                    ]
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
+                )
+                data = next(
+                    part.inline_data.data
+                    for part in response.candidates[0].content.parts
+                    if getattr(part, "inline_data", None) and part.inline_data.data
+                )
+                with Image.open(io.BytesIO(data)) as image:
+                    image.convert("RGB").save(paths[number])
+                with open(paths[number], "rb") as fp:
+                    previous = fp.read()
+        logger.info(f"story drawn in {len(paths)} frames")
+        return paths
+    except Exception as exc:
+        logger.warning(f"story frames failed: {type(exc).__name__}: {exc}")
+        return []
+

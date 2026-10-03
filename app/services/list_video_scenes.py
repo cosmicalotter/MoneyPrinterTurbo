@@ -36,18 +36,31 @@ from app.services import list_video_fx as fx
 from app.utils import utils
 
 FPS = 30
-SCENE_TYPES = ("statement", "stat", "sequence", "compare", "diagram")
+SCENE_TYPES = (
+    "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
+    "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
+)
+# Scenes whose elements are anchored one by one to the narration.
+ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "formula", "timeline")
+# Scenes rendered as a full-frame video clip (a slow zoom) instead of layers.
+CLIP_SCENES = ("figure", "zoom")
 SCENE_MARKS = ("cross", "check")
 SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
 MIN_SCENE_SECONDS = 2.2
+ITEM_SECONDS = 1.8
 INK = (27, 27, 47)
 WHITE = (255, 255, 255)
 TEAL = (42, 157, 143)
 CROSS = (226, 44, 58)
 CHECK = (38, 166, 91)
+AMBER = (244, 180, 50)
+GREY = (190, 190, 198)
 HAND_FONT = "PatrickHand-Regular.ttf"
 _SFX = {"pop": 0.5, "stamp": 0.8, "scribble": 0.45, "whoosh": 0.5, "tick": 0.6}
+# Seconds a scene stays after its last element, by type.
+_TAILS = {"statement": 2.6, "stat": 3.0, "bars": 3.0, "grid": 3.4, "gauge": 3.2, "zoom": 3.4,
+          "question": 2.8, "story": 2.8, "figure": 5.0}
 
 
 @dataclass
@@ -58,6 +71,11 @@ class SceneItem:
     mark: str = ""
     at: str = ""
     time: float = 0.0
+    query: str = ""  # English search for a real picture of the item
+    value: float = 0.0
+    date: str = ""
+    expression: str = ""
+    role: str = ""  # "result" for the last term of a formula
 
 
 @dataclass
@@ -74,6 +92,15 @@ class Scene:
     center: Optional[SceneItem] = None
     exit: bool = True
     vertical: bool = False  # enter from below and leave upwards instead of sideways
+    total: int = 10
+    operator: str = "+"
+    cycle: bool = False
+    low: str = ""
+    high: str = ""
+    direction: str = "in"
+    look: str = "diagram"
+    query: str = ""
+    query_local: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -82,18 +109,64 @@ class Scene:
 
 
 def _item(data: dict) -> SceneItem:
+    try:
+        value = float(data.get("value") or 0)
+    except (TypeError, ValueError):
+        value = 0.0
     return SceneItem(
         label=str(data.get("label") or ""),
         icon=str(data.get("icon") or ""),
         draw=str(data.get("draw") or ""),
         mark=str(data.get("mark") or "") if data.get("mark") in SCENE_MARKS else "",
         at=str(data.get("at") or ""),
+        query=str(data.get("query") or ""),
+        value=value,
+        date=str(data.get("date") or ""),
+        expression=str(data.get("expression") or ""),
+        role=str(data.get("role") or ""),
     )
 
 
 def _snap(pauses: Sequence[float], target: float, low: float, high: float) -> float:
     inside = [p for p in pauses if low <= p <= high]
     return min(inside, key=lambda p: abs(p - target)) if inside else target
+
+
+def _scene_from(spec: dict, kind: str, start: float, end: float, items: List[SceneItem]) -> Scene:
+    def number(key, default=0.0):
+        try:
+            return float(spec.get(key) if spec.get(key) is not None else default)
+        except (TypeError, ValueError):
+            return default
+
+    scene = Scene(
+        type=kind,
+        start=start,
+        end=end,
+        items=items,
+        text=str(spec.get("text") or ""),
+        value=number("value"),
+        unit=str(spec.get("unit") or ""),
+        chart=spec.get("chart") if spec.get("chart") in ("pie", "number") else "number",
+        expression=str(spec.get("expression") or ""),
+        center=_item(spec["center"]) if isinstance(spec.get("center"), dict) else None,
+        total=int(min(100, max(2, number("total", 10)))),
+        operator=str(spec.get("operator") or "+")[:2],
+        cycle=bool(spec.get("cycle")),
+        low=str(spec.get("low") or ""),
+        high=str(spec.get("high") or ""),
+        direction="out" if spec.get("direction") == "out" else "in",
+        look="photo" if spec.get("look") == "photo" else "diagram",
+        query=str(spec.get("query") or ""),
+        query_local=str(spec.get("query_local") or ""),
+    )
+    if kind in ("stat", "grid", "gauge", "zoom", "figure"):
+        item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
+        scene.center = scene.center or SceneItem(
+            icon=str(item.get("icon") or ""), label=str(item.get("label") or spec.get("label") or ""),
+            draw=str(item.get("draw") or ""), query=str(item.get("query") or ""), at=str(spec.get("at") or ""),
+        )
+    return scene
 
 
 def time_scenes(
@@ -114,13 +187,18 @@ def time_scenes(
         if kind not in SCENE_TYPES:
             continue
         items: List[SceneItem] = []
-        if kind in ("statement", "stat"):
+        if kind not in ITEM_SCENES:
             time = locate(spec.get("at", ""))
             if time is None:
                 continue
             times = [time]
         else:
-            for data in spec.get("items") or []:
+            source = list(spec.get("items") or spec.get("frames") or [])
+            if kind == "formula" and isinstance(spec.get("result"), dict):
+                source.append(dict(spec["result"], role="result"))
+            for data in source:
+                if not isinstance(data, dict):
+                    continue
                 item = _item(data)
                 time = locate(item.at)
                 if time is not None:
@@ -134,36 +212,30 @@ def time_scenes(
                     item.time = spaced[-1].time + 0.5
                 spaced.append(item)
             items = spaced
-            needed = 2 if kind != "diagram" else 2
-            if len(items) < needed:
+            if len(items) < 2:
                 continue
             times = [i.time for i in items]
 
-        start = max(0.0, min(times) - 0.45)
+        start = max(0.0, min(times) - (0.3 if kind == "figure" else 0.45))
         if start < 0.5:
             start = 0.0
         last = max(times)
-        if kind == "statement":
+        if kind == "figure":
+            try:
+                seconds = float(spec.get("seconds") or 5)
+            except (TypeError, ValueError):
+                seconds = 5.0
+            seconds = min(9.0, max(3.0, seconds))
+            end = _snap(pauses, start + seconds, start + seconds - 1, start + seconds + 1) + 0.25
+        elif kind == "statement":
             end = _snap(pauses, last + 2.6, last + 1.6, last + 5.0) + 0.3
         else:
-            tail = 3.0 if kind == "stat" else 2.4
-            end = _snap(pauses, last + tail, last + 1.8, last + 3.8) + 0.25
+            tail = _TAILS.get(kind, 2.4)
+            end = _snap(pauses, last + tail, last + 1.8, last + tail + 1.4) + 0.25
         end = min(end, start + MAX_SCENE_SECONDS, duration)
-        scene = Scene(
-            type=kind,
-            start=start,
-            end=end,
-            items=[i for i in items if i.time < end - 1.2],
-            text=str(spec.get("text") or ""),
-            value=float(spec.get("value") or 0),
-            unit=str(spec.get("unit") or ""),
-            chart=spec.get("chart") if spec.get("chart") in ("pie", "number") else "number",
-            expression=str(spec.get("expression") or ""),
-            center=_item(spec["center"]) if isinstance(spec.get("center"), dict) else None,
-        )
-        if scene.type == "stat":
-            scene.center = SceneItem(icon=str(spec.get("icon") or ""), label=str(spec.get("label") or ""))
-        if scene.type in ("sequence", "compare", "diagram") and len(scene.items) < 2:
+        # Every element stays on screen at least ITEM_SECONDS.
+        scene = _scene_from(spec, kind, start, end, [i for i in items if i.time < end - ITEM_SECONDS])
+        if kind in ITEM_SCENES and len(scene.items) < 2:
             continue
         if duration - scene.end < 1.2:
             scene.end, scene.exit = duration, False
@@ -184,8 +256,8 @@ def time_scenes(
             if first - 0.2 - scene.start < MIN_SCENE_SECONDS or first <= scene.start:
                 continue
             scene.end, scene.exit = first - 0.2, True
-            scene.items = [i for i in scene.items if i.time < scene.end - 1.2]
-            if scene.type in ("sequence", "compare", "diagram") and len(scene.items) < 2:
+            scene.items = [i for i in scene.items if i.time < scene.end - ITEM_SECONDS]
+            if scene.type in ITEM_SCENES and len(scene.items) < 2:
                 continue
         scene.vertical = len(kept) % 2 == 1
         kept.append(scene)
@@ -252,17 +324,42 @@ def die_cut(image: Image.Image, outline: int, shadow: bool = True) -> Image.Imag
     return out
 
 
-def prepare_picture(path: str) -> Optional[Image.Image]:
-    """A transparent cut-out of an icon or an illustration drawn on white."""
+def prepare_picture(path: str, allow_cutout: bool = True) -> Optional[Image.Image]:
+    """A clean transparent cut-out of an icon or drawing, or the photo itself.
+
+    Pictures that cannot be cut out cleanly (photos, dark or busy backdrops)
+    come back whole and marked ``info["framed"]``, so scenes show them as a
+    framed card instead of a shredded sticker.
+    """
     try:
         with Image.open(path) as source:
             image = source.convert("RGBA")
     except Exception:
         return None
-    if not fx.has_transparency(image):
-        image = fx.remove_flat_background(image) or image
-    bbox = image.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
-    return image.crop(bbox) if bbox else image
+    cutout = fx.cutout_or_none(image, allow_cutout)
+    if cutout is None:
+        photo = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        photo.alpha_composite(image)
+        photo.info["framed"] = True
+        return photo
+    bbox = cutout.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
+    return cutout.crop(bbox) if bbox else cutout
+
+
+def framed_card(image: Image.Image, border: int, radius: int) -> Image.Image:
+    """A photo in a rounded white frame with a soft shadow."""
+    card = Image.new("RGBA", (image.width + border * 2, image.height + border * 2), (0, 0, 0, 0))
+    ImageDraw.Draw(card).rounded_rectangle((0, 0, card.width - 1, card.height - 1), radius, fill=WHITE + (255,))
+    mask = Image.new("L", image.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, image.width - 1, image.height - 1), max(1, radius - border // 2), fill=255)
+    card.paste(image.convert("RGB"), (border, border), mask)
+    blur = max(2, border)
+    out = Image.new("RGBA", (card.width + blur * 4, card.height + blur * 4), (0, 0, 0, 0))
+    shade = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    shade.paste((0, 0, 0, 255), (blur * 2, blur * 2 + blur // 2), card.getchannel("A").point(lambda a: a * 80 // 255))
+    out.alpha_composite(shade.filter(ImageFilter.GaussianBlur(blur)))
+    out.alpha_composite(card, (blur * 2, blur * 2))
+    return out
 
 
 class _Text:
@@ -471,6 +568,97 @@ def stamp_frames(image: Image.Image, frames: int = 6) -> List[Image.Image]:
     return out
 
 
+def burst_frames(radius: int, width: int, frames: int = 8, color=INK) -> List[Image.Image]:
+    """Short strokes flying out of a point: "something just happened"."""
+    size = (radius * 2 + width * 4, radius * 2 + width * 4)
+    out = []
+    for frame in range(1, frames + 1):
+        p = frame / frames
+        fade = 1 - max(0.0, (p - 0.55) / 0.45)
+
+        def paint(draw: ImageDraw.ImageDraw, s: float, p=p, fade=fade) -> None:
+            c = size[0] * s / 2
+            for k in range(8):
+                a = math.radians(k * 45 + 22)
+                inner, outer = radius * (0.45 + 0.4 * p), radius * (0.62 + 0.38 * p)
+                draw.line(
+                    [(c + inner * s * math.cos(a), c + inner * s * math.sin(a)),
+                     (c + outer * s * math.cos(a), c + outer * s * math.sin(a))],
+                    fill=color + (int(255 * fade),), width=int(width * s),
+                )
+
+        out.append(_supersampled(size, paint, scale=2))
+    return out
+
+
+def bar_frames(length: int, thickness: int, line: int, color, frames: int = 15) -> List[Image.Image]:
+    """A rounded bar growing from the left to ``length``."""
+    size = (length + line * 4, thickness + line * 4)
+    out = []
+    for frame in range(1, frames + 1):
+        shown = max(thickness, int(length * _ease_out_cubic(frame / frames)))
+
+        def paint(draw: ImageDraw.ImageDraw, s: float, shown=shown) -> None:
+            box = (line * 2 * s, line * 2 * s, (line * 2 + shown) * s, (line * 2 + thickness) * s)
+            draw.rounded_rectangle(box, thickness * s / 2.4, fill=color + (255,), outline=INK + (255,), width=int(line * s))
+
+        out.append(_supersampled(size, paint, scale=2))
+    return out
+
+
+def gauge_frames(value: float, radius: int, line: int, frames: int = 20) -> List[Image.Image]:
+    """A half-circle meter whose needle swings from 0 to ``value`` percent."""
+    size = (radius * 2 + line * 6, radius + line * 8)
+    value = min(100.0, max(0.0, value))
+    out = []
+    for frame in range(1, frames + 1):
+        shown = value * _ease_out_back(frame / frames) if frame < frames else value
+
+        def paint(draw: ImageDraw.ImageDraw, s: float, shown=shown) -> None:
+            cx, cy = size[0] * s / 2, (radius + line * 3) * s
+            r = radius * s
+            box = (cx - r, cy - r, cx + r, cy + r)
+            for start, stop, color in ((180, 240, TEAL), (240, 300, AMBER), (300, 360, CROSS)):
+                draw.pieslice(box, start, stop, fill=color + (255,))
+            inner = r * 0.62
+            draw.pieslice((cx - inner, cy - inner, cx + inner, cy + inner), 180, 360, fill=WHITE + (255,))
+            draw.arc(box, 180, 360, fill=INK + (255,), width=int(line * s))
+            a = math.radians(180 + 180 * min(100.0, max(0.0, shown)) / 100)
+            tip = (cx + r * 0.9 * math.cos(a), cy + r * 0.9 * math.sin(a))
+            draw.line([(cx, cy), tip], fill=INK + (255,), width=int(line * 1.4 * s))
+            k = line * 1.6 * s
+            draw.ellipse((cx - k, cy - k, cx + k, cy + k), fill=INK + (255,))
+
+        out.append(_supersampled(size, paint, scale=2))
+    return out
+
+
+def ken_burns_clip(still: Image.Image, output: str, frames: int, size: Tuple[int, int], zoom_from: float, zoom_to: float) -> str:
+    """A slow push-in (or pull-out) video of ``still`` with exactly ``frames`` frames."""
+    import subprocess
+
+    width, height = size
+    source = output.rsplit(".", 1)[0] + "-still.png"
+    still.convert("RGB").resize((int(width * 1.5), int(height * 1.5)), Image.LANCZOS).save(source)
+    frames = max(2, frames)
+    zoom = f"{zoom_from}+({zoom_to - zoom_from})*on/{frames - 1}"
+    command = [
+        utils.get_ffmpeg_binary(), "-v", "error", "-y", "-loop", "1", "-i", source,
+        "-vf", f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={FPS},format=yuv420p",
+        "-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", output,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0 or not os.path.isfile(output):
+        raise RuntimeError(f"zoom clip failed: {(result.stderr or '').strip()[-400:]}")
+    return output
+
+
+def fit_cover(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
+    from PIL import ImageOps
+
+    return ImageOps.fit(image.convert("RGB"), size, Image.LANCZOS)
+
+
 # ---------------------------------------------------------------------------
 # Scene layouts
 # ---------------------------------------------------------------------------
@@ -549,7 +737,12 @@ class SceneRenderer:
         image = self.picture(item)
         if image is None:
             return None
+        framed = bool(image.info.get("framed"))
         image = image.copy()
+        if framed:
+            border = self.theme.px(10)
+            image.thumbnail((box - border * 2, box - border * 2), Image.LANCZOS)
+            return framed_card(image, border, self.theme.px(22))
         image.thumbnail((box, box), Image.LANCZOS)
         return die_cut(image, self.theme.px(8))
 
@@ -593,13 +786,16 @@ class SceneRenderer:
 
     def build(self, scene: Scene, key: str) -> Tuple[List[fx.Overlay], List[Tuple[float, str, float]]]:
         folder = os.path.join(self.work_dir, key)
-        color = self.theme.accent if scene.type == "statement" else self.canvas_color
-        overlays = [
-            fx.Overlay(
-                self._background(color), x=self._slide(scene), y=self._slide(scene, "y"),
-                start=scene.start, end=scene.end,
+        os.makedirs(folder, exist_ok=True)
+        color = self.theme.accent if scene.type in ("statement", "question") else self.canvas_color
+        overlays = []
+        if scene.type not in CLIP_SCENES:
+            overlays.append(
+                fx.Overlay(
+                    self._background(color), x=self._slide(scene), y=self._slide(scene, "y"),
+                    start=scene.start, end=scene.end,
+                )
             )
-        ]
         sounds: List[Tuple[float, str, float]] = []
         self._sound(sounds, scene.start - 0.1, "whoosh")
         if scene.exit:
@@ -757,3 +953,320 @@ class SceneRenderer:
             when = item.time + 0.25
             overlays.append(self._frames(frames, folder, f"arrow{number}", left, top, when, scene))
             self._sound(sounds, when, "scribble")
+
+    # -- clip scenes ---------------------------------------------------------------
+
+    def _clip(self, scene: Scene, still: Image.Image, folder: str, zoom_from: float, zoom_to: float) -> fx.Overlay:
+        frames = int(round((scene.end - scene.start) * FPS)) + 2
+        path = ken_burns_clip(
+            still, os.path.join(folder, "clip.mp4"), frames, (self.theme.width, self.theme.height), zoom_from, zoom_to
+        )
+        return fx.Overlay(
+            path, x=self._slide(scene), y=self._slide(scene, "y"), start=scene.start, end=scene.end, mode="media"
+        )
+
+    def _caption(self, canvas: Image.Image, text: str) -> None:
+        """A hand-lettered caption on a white pill near the bottom."""
+        W, H = canvas.size
+        label = self.text.render(text.upper(), int(H * 0.07), int(W * 0.8))
+        pad = self.theme.px(18)
+        pill = Image.new("RGBA", (label.width + pad * 3, label.height + pad * 2), (0, 0, 0, 0))
+        ImageDraw.Draw(pill).rounded_rectangle((0, 0, pill.width - 1, pill.height - 1), pill.height // 2, fill=WHITE + (240,))
+        pill.alpha_composite(label, ((pill.width - label.width) // 2, pad))
+        canvas.alpha_composite(pill, ((W - pill.width) // 2, int(H * 0.95) - pill.height))
+
+    def _build_figure(self, scene, folder, overlays, sounds) -> None:
+        """A real picture or diagram filling the screen, slowly zooming."""
+        W, H = self.theme.width, self.theme.height
+        item = scene.center or SceneItem()
+        image = self.picture(item)
+        if image is None:
+            raise ValueError("the figure has no picture")
+        canvas = Image.new("RGBA", (W, H), self.canvas_color + (255,))
+        canvas.paste(paper((W, H), self.canvas_color))
+        photo = bool(image.info.get("framed")) and scene.look == "photo"
+        if photo:
+            canvas.paste(fit_cover(image, (W, H)))
+        else:
+            box = (int(W * 0.9), int(H * (0.78 if item.label else 0.86)))
+            picture = image.copy()
+            if image.info.get("framed"):
+                border = self.theme.px(12)
+                picture.thumbnail((box[0] - border * 2, box[1] - border * 2), Image.LANCZOS)
+                picture = framed_card(picture, border, self.theme.px(18))
+            else:
+                picture.thumbnail(box, Image.LANCZOS)
+                picture = die_cut(picture, self.theme.px(8))
+            top = (H * (0.92 if item.label else 1.0) - picture.height) / 2
+            canvas.alpha_composite(picture, ((W - picture.width) // 2, max(0, int(top))))
+        if item.label:
+            self._caption(canvas, item.label)
+        overlays.append(self._clip(scene, canvas, folder, 1.0, 1.12 if photo else 1.05))
+
+    def _build_zoom(self, scene, folder, overlays, sounds) -> None:
+        """One thing, big, while the camera slowly pushes in (or pulls out)."""
+        W, H = self.theme.width, self.theme.height
+        item = scene.center or SceneItem()
+        canvas = paper((W, H), self.canvas_color).convert("RGBA")
+        box = int(H * (0.62 if not self.theme.portrait else 0.34))
+        card, _ = self._card(item, box, int(H * 0.085), int(W * 0.8), label_on_top=False)
+        canvas.alpha_composite(card, ((W - card.width) // 2, max(0, (H - card.height) // 2)))
+        zoom = (1.0, 1.16) if scene.direction == "in" else (1.16, 1.0)
+        overlays.append(self._clip(scene, canvas, folder, *zoom))
+        self._sound(sounds, scene.start + SLIDE_SECONDS, "pop")
+
+    # -- story ---------------------------------------------------------------------
+
+    def _build_story(self, scene, folder, overlays, sounds) -> None:
+        """A tiny flipbook: 2-4 moments where the host and a prop change."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        frames = scene.items[:4]
+        with_host = self.host_still is not None and not theme.portrait
+        prop_center = (W * (0.66 if with_host else 0.5), H * 0.44)
+        last_expression = None
+        for number, item in enumerate(frames):
+            until = frames[number + 1].time if number + 1 < len(frames) else scene.end
+            image = self.picture(item)
+            whole_scene = image is not None and bool(image.info.get("scene"))
+            if whole_scene:
+                # An illustrated moment (drawn by the image model) fills the stage.
+                picture = image.copy()
+                border = theme.px(12)
+                picture.thumbnail((int(W * 0.8), int(H * 0.72)), Image.LANCZOS)
+                card = framed_card(picture, border, theme.px(18))
+                overlay = self._centered(pop_frames(card, start_scale=0.9), folder, f"moment{number}", W / 2, H * 0.44, item.time, scene)
+            else:
+                card, _ = self._card(item, int(H * (0.42 if not theme.portrait else 0.26)), int(H * 0.07), int(W * 0.46), label_on_top=False)
+                overlay = self._centered(pop_frames(card), folder, f"prop{number}", *prop_center, item.time, scene)
+            overlay.end = until
+            overlays.append(overlay)
+            self._sound(sounds, item.time, "pop")
+            if number > 0:
+                burst = burst_frames(int(H * 0.26), theme.px(7))
+                center = (W / 2, H * 0.44) if whole_scene else prop_center
+                flash = self._centered(burst, folder, f"burst{number}", *center, item.time, scene)
+                flash.hold, flash.end = False, item.time + len(burst) / FPS
+                overlays.append(flash)
+            if with_host and not whole_scene:
+                expression = item.expression or scene.expression or "explicando"
+                height = int(H * 0.72)
+                pose = die_cut(self.host_still(expression, height), theme.px(6), shadow=False)
+                motion = pop_frames(pose, frames=8, start_scale=0.55 if last_expression is None else 0.93)
+                w, h = motion[-1].size
+                pad_y = (h - pose.height) / 2
+                top = H + 0.08 * pose.height - pose.height - pad_y
+                host_overlay = self._frames(motion, folder, f"host{number}", W * 0.27 - w / 2, top, item.time, scene)
+                host_overlay.end = until
+                overlays.append(host_overlay)
+                last_expression = expression
+            if whole_scene and item.label:
+                label = self.text.render(item.label.upper(), int(H * 0.075), int(W * 0.8))
+                caption = self._centered(pop_frames(label), folder, f"caption{number}", W / 2, H * 0.89, item.time + 0.2, scene)
+                caption.end = until
+                overlays.append(caption)
+
+    # -- steps, timeline, formula -----------------------------------------------------
+
+    def _badge(self, number: int, size: int) -> Image.Image:
+        def paint(draw: ImageDraw.ImageDraw, s: float) -> None:
+            draw.ellipse((0, 0, size * s - 1, size * s - 1), fill=self.theme.accent + (255,), outline=INK + (255,), width=int(size * 0.07 * s))
+
+        badge = _supersampled((size, size), paint, scale=2)
+        digit = self.text.render(str(number), int(size * 0.72), size, color=WHITE, max_lines=1)
+        badge.alpha_composite(digit, ((size - digit.width) // 2, (size - digit.height) // 2))
+        return badge
+
+    def _build_steps(self, scene, folder, overlays, sounds) -> None:
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        items = scene.items[:5]
+        n = len(items)
+        if scene.cycle and n >= 3 and not theme.portrait:
+            centers = [
+                (W / 2 + W * 0.3 * math.cos(math.radians(-90 + 360 * k / n)), H * 0.53 + H * 0.31 * math.sin(math.radians(-90 + 360 * k / n)))
+                for k in range(n)
+            ]
+            box = int(H * 0.16)
+        elif theme.portrait:
+            centers = [(W * 0.5, H * (0.18 + 0.68 * (k + 0.5) / n)) for k in range(n)]
+            box = int(min(H * 0.13, H * 0.5 / n))
+        else:
+            centers = [(W * 0.06 + W * 0.88 * (k + 0.5) / n, H * 0.54) for k in range(n)]
+            box = int(min(H * 0.3, W * 0.62 / n))
+        cards = []
+        for number, (item, (cx, cy)) in enumerate(zip(items, centers)):
+            card, _ = self._card(item, box, int(H * 0.06), int(W * 0.8 / n) if not theme.portrait else int(W * 0.7), label_on_top=False, beside=theme.portrait)
+            badge = self._badge(number + 1, theme.px(64))
+            combined = Image.new("RGBA", (max(card.width, badge.width), card.height + badge.height // 2), (0, 0, 0, 0))
+            combined.alpha_composite(card, ((combined.width - card.width) // 2, badge.height // 2))
+            combined.alpha_composite(badge, (0, 0))
+            cards.append(combined)
+            overlays.append(self._centered(pop_frames(combined), folder, f"step{number}", cx, cy, item.time, scene))
+            self._sound(sounds, item.time, "pop")
+        pairs = list(zip(range(n - 1), range(1, n)))
+        if scene.cycle and n >= 3 and not theme.portrait:
+            pairs.append((n - 1, 0))
+        for a, b in pairs:
+            (ax, ay), (bx, by) = centers[a], centers[b]
+            length = math.hypot(bx - ax, by - ay) or 1
+            ux, uy = (bx - ax) / length, (by - ay) / length
+            ra = max(cards[a].size) * 0.5
+            rb = max(cards[b].size) * 0.5
+            if length < ra + rb + theme.px(30):
+                ra = rb = (length - theme.px(30)) / 2
+            frames, (left, top) = arrow_frames(
+                (ax + ux * ra, ay + uy * ra), (bx - ux * rb, by - uy * rb), theme.px(6), frames=8,
+                bend=0.18 if scene.cycle else 0.0,
+            )
+            when = items[b].time if b > 0 else items[a].time + 0.4
+            overlays.append(self._frames(frames, folder, f"arrow{a}-{b}", left, top, when - 0.15, scene))
+            self._sound(sounds, when - 0.15, "scribble")
+
+    def _build_timeline(self, scene, folder, overlays, sounds) -> None:
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        items = scene.items[:5]
+        n = len(items)
+        y = H * (0.5 if not theme.portrait else 0.5)
+        frames, (left, top) = arrow_frames((W * 0.05, y), (W * 0.95, y), theme.px(8), frames=12, bend=0.0)
+        overlays.append(self._frames(frames, folder, "line", left, top, scene.start + SLIDE_SECONDS, scene))
+        self._sound(sounds, scene.start + SLIDE_SECONDS, "scribble")
+        for number, item in enumerate(items):
+            cx = W * 0.08 + W * 0.84 * (number + 0.5) / n
+            dot = _supersampled((theme.px(34), theme.px(34)), lambda d, s: d.ellipse((0, 0, theme.px(34) * s - 1, theme.px(34) * s - 1), fill=self.theme.accent + (255,), outline=INK + (255,), width=int(theme.px(5) * s)))
+            overlays.append(self._centered(stamp_frames(dot), folder, f"dot{number}", cx, y, item.time, scene))
+            if item.date:
+                date = self.text.render(item.date.upper(), int(H * 0.08), int(W * 0.8 / n), max_lines=1)
+                overlays.append(self._centered(pop_frames(date), folder, f"date{number}", cx, y - H * 0.1, item.time, scene))
+            card, _ = self._card(item, int(min(H * 0.22, W * 0.7 / n)), int(H * 0.05), int(W * 0.85 / n), label_on_top=False)
+            above = number % 2 == 1 and not item.date
+            cy = y - H * 0.06 - card.height / 2 if above else y + H * 0.06 + card.height / 2
+            overlays.append(self._centered(pop_frames(card), folder, f"event{number}", cx, cy, item.time + 0.1, scene))
+            self._sound(sounds, item.time, "pop")
+
+    def _build_formula(self, scene, folder, overlays, sounds) -> None:
+        W, H = self.theme.width, self.theme.height
+        terms = [i for i in scene.items if i.role != "result"][:3]
+        result = next((i for i in scene.items if i.role == "result"), None)
+        parts = terms + ([result] if result else [])
+        n = len(parts)
+        symbols = [scene.operator or "+"] * (len(terms) - 1) + (["="] if result else [])
+        slot = W * 0.92 / (n + len(symbols) * 0.45)
+        box = int(min(H * 0.32, slot * 0.86))
+        x = W * 0.04
+        for number, item in enumerate(parts):
+            cx = x + slot / 2
+            card, _ = self._card(item, box, int(H * 0.06), int(slot * 0.95), label_on_top=False)
+            is_result = item is result
+            frames = stamp_frames(card) if is_result else pop_frames(card)
+            overlays.append(self._centered(frames, folder, f"term{number}", cx, H * 0.5, item.time, scene))
+            self._sound(sounds, item.time, "stamp" if is_result else "pop")
+            x += slot
+            if number < len(symbols):
+                sign = self.text.render(symbols[number], int(H * 0.2), int(slot * 0.45), max_lines=1)
+                overlays.append(self._centered(pop_frames(sign), folder, f"sign{number}", x + slot * 0.225, H * 0.47, parts[number + 1].time - 0.15, scene))
+                x += slot * 0.45
+
+    # -- numbers -------------------------------------------------------------------
+
+    def _build_bars(self, scene, folder, overlays, sounds) -> None:
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        items = scene.items[:5]
+        n = len(items)
+        top_value = max((abs(i.value) for i in items), default=1) or 1
+        row = H * 0.72 / n
+        thickness = int(min(row * 0.55, H * 0.11))
+        label_width = int(W * 0.26)
+        bar_left = W * 0.08 + label_width + theme.px(24)
+        longest = int(W * 0.92 - bar_left - W * 0.12)
+        for number, item in enumerate(items):
+            cy = H * 0.16 + row * (number + 0.5)
+            label, _ = self._card(item, int(min(row * 0.8, H * 0.12)), int(min(row * 0.42, H * 0.06)), label_width, label_on_top=False, beside=True)
+            overlays.append(self._centered(pop_frames(label), folder, f"label{number}", W * 0.08 + label_width / 2, cy, item.time, scene))
+            highlight = abs(item.value) == top_value
+            length = max(thickness, int(longest * abs(item.value) / top_value))
+            frames = bar_frames(length, thickness, theme.px(5), self.theme.accent if highlight else TEAL)
+            overlays.append(self._frames(frames, folder, f"bar{number}", bar_left, cy - frames[-1].height / 2, item.time + 0.1, scene))
+            value = self.text.render(f"{item.value:g}{scene.unit}", int(thickness * 0.95), int(W * 0.16), max_lines=1)
+            overlays.append(self._frames(pop_frames(value), folder, f"value{number}", bar_left + length + theme.px(18), cy - value.height * 0.6, item.time + 0.5, scene))
+            self._sound(sounds, item.time + 0.1, "scribble")
+
+    def _build_grid(self, scene, folder, overlays, sounds) -> None:
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        total = max(2, min(100, scene.total))
+        count = int(round(min(total, max(0.0, scene.value))))
+        columns = {10: 5, 20: 10, 50: 10, 100: 20}.get(total, min(10, total))
+        rows = math.ceil(total / columns)
+        area_w, area_h = W * 0.8, H * (0.56 if not theme.portrait else 0.4)
+        cell = int(min(area_w / columns, area_h / rows))
+        item = scene.center or SceneItem()
+        icon_item = SceneItem(icon=item.icon or "🧑", draw=item.draw)
+        source = self.picture(icon_item)
+        if source is None or source.info.get("framed"):
+            source = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            ImageDraw.Draw(source).ellipse((8, 8, 56, 56), fill=TEAL + (255,), outline=INK + (255,), width=5)
+        icon = source.copy()
+        icon.thumbnail((int(cell * 0.86), int(cell * 0.86)), Image.LANCZOS)
+        faded = icon.convert("LA").convert("RGBA")
+        faded.putalpha(faded.getchannel("A").point(lambda a: a * 90 // 255))
+        grid_w, grid_h = cell * columns, cell * rows
+        steps = 16
+        frames = []
+        for frame in range(1, steps + 1):
+            lit = int(round(count * _ease_out_cubic(frame / steps)))
+            canvas = Image.new("RGBA", (grid_w, grid_h), (0, 0, 0, 0))
+            for k in range(total):
+                r, c = divmod(k, columns)
+                piece = icon if k < lit else faded
+                canvas.alpha_composite(piece, (c * cell + (cell - piece.width) // 2, r * cell + (cell - piece.height) // 2))
+            frames.append(canvas)
+        appear = scene.start + SLIDE_SECONDS + 0.05
+        overlays.append(self._centered(frames, folder, "grid", W / 2, H * 0.42, appear, scene))
+        for k in range(0, steps, 4):
+            self._sound(sounds, appear + k / FPS, "tick")
+        label = item.label or f"{count} / {total}"
+        text = self.text.render(label.upper(), int(H * 0.09), int(W * 0.86))
+        overlays.append(self._centered(pop_frames(text), folder, "label", W / 2, H * 0.42 + grid_h / 2 + H * 0.1, appear + 0.6, scene))
+        self._sound(sounds, appear + 0.6, "pop")
+
+    def _build_gauge(self, scene, folder, overlays, sounds) -> None:
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        appear = scene.start + SLIDE_SECONDS + 0.05
+        radius = int(H * (0.32 if not theme.portrait else 0.2))
+        frames = gauge_frames(scene.value, radius, theme.px(9))
+        cy = H * 0.5
+        overlays.append(self._centered(frames, folder, "gauge", W / 2, cy, appear, scene))
+        self._sound(sounds, appear, "scribble")
+        bottom = cy + frames[-1].height / 2
+        for name, text, x in (("low", scene.low, W / 2 - radius), ("high", scene.high, W / 2 + radius)):
+            if text:
+                image = self.text.render(text.upper(), int(H * 0.055), int(W * 0.25))
+                overlays.append(self._centered(pop_frames(image), folder, name, x, bottom + H * 0.04, appear + 0.2, scene))
+        label = scene.center.label if scene.center else ""
+        if label:
+            image = self.text.render(label.upper(), int(H * 0.09), int(W * 0.8))
+            overlays.append(self._centered(pop_frames(image), folder, "label", W / 2, H * 0.12, appear + 0.5, scene))
+            self._sound(sounds, appear + 0.5, "pop")
+
+    # -- question -------------------------------------------------------------------
+
+    def _build_question(self, scene, folder, overlays, sounds) -> None:
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        appear = scene.start + SLIDE_SECONDS * 0.6
+        with_host = self.host_still is not None
+        text_width = int(W * (0.56 if with_host and not theme.portrait else 0.86))
+        text = self.text.render(scene.text.upper() or "?", int(H * 0.11), text_width, max_lines=3)
+        cx = W * (0.62 if with_host and not theme.portrait else 0.5)
+        overlays.append(self._centered(pop_frames(text), folder, "question", cx, H * 0.42, appear + 0.15, scene))
+        self._sound(sounds, appear + 0.15, "pop")
+        marks = [(-0.36, -0.3, -12), (0.38, -0.26, 14), (-0.3, 0.34, 8), (0.34, 0.36, -10)]
+        for number, (dx, dy, angle) in enumerate(marks):
+            mark = self.text.render("?", int(H * 0.14), int(W * 0.2), color=WHITE, max_lines=1)
+            mark = mark.rotate(angle, resample=Image.BICUBIC, expand=True)
+            when = appear + 0.4 + number * 0.18
+            overlays.append(self._centered(pop_frames(mark), folder, f"mark{number}", cx + dx * text_width, H * 0.42 + dy * H * 0.8, when, scene))
+        if with_host and not theme.portrait:
+            height = int(H * 0.8)
+            pose = die_cut(self.host_still(scene.expression or "pensando", height), theme.px(6), shadow=False)
+            frames = pop_frames(pose, frames=10, start_scale=0.55)
+            w, h = frames[-1].size
+            pad_y = (h - pose.height) / 2
+            overlays.append(self._frames(frames, folder, "host", W * 0.2 - w / 2, H + 0.1 * pose.height - pose.height - pad_y, appear, scene))

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -53,7 +54,7 @@ class EditOptions:
     beats: str = "web"
     subscribe: str = "both"
     accent: str = fx.DEFAULT_ACCENT
-    progress_bar: bool = True
+    progress_bar: bool = False
     sound_effects: bool = True
     plan_file: str = ""
     language: str = ""
@@ -85,7 +86,7 @@ class Narration:
 
 @dataclass
 class _Beat:
-    kind: str
+    kind: str  # "image", "images" (a group shown side by side) or "text"
     start: float
     end: float
     query: str = ""
@@ -93,6 +94,8 @@ class _Beat:
     text: str = ""
     icon: str = ""
     at: str = ""
+    members: List["_Beat"] = field(default_factory=list)
+    picture: str = ""
 
 
 @dataclass
@@ -154,51 +157,86 @@ def anchor_time(text: str, anchor: str, sub_maker, speech_seconds: float) -> Opt
     return speech_seconds * sum(lengths[:index]) / sum(lengths)
 
 
+GROUP_TAIL = 3.5  # a group of pictures stays this long after its last one
+GROUP_MAX = 9.0
+
+
+def _picture_spans(beat: _Beat) -> Tuple[float, float]:
+    """(shortest, longest) seconds a picture beat should stay on screen."""
+    if beat.kind == "images":
+        last = beat.members[-1].start - beat.start
+        return last + IMAGE_BEAT_MIN, min(GROUP_MAX, last + GROUP_TAIL)
+    return IMAGE_BEAT_MIN, IMAGE_BEAT_MAX
+
+
 def schedule_beats(beats: List[dict], text: str, narration: Narration, duration: float) -> List[_Beat]:
     """Give plan beats start/end times that never overlap the same zone."""
+
+    def locate(anchor):
+        return anchor_time(text, anchor, narration.sub_maker, narration.speech_seconds)
+
+    def picture(data, start) -> _Beat:
+        return _Beat(
+            kind="image", start=start, end=0.0, query=data.get("query", ""), look=data.get("look", "diagram"),
+            icon=data.get("icon", ""), at=data.get("at", ""),
+        )
+
     timed = []
     for beat in beats:
-        if beat.get("type") not in ("image", "text"):
+        kind = beat.get("type")
+        if kind == "images":
+            members = []
+            for data in beat.get("items") or []:
+                start = locate(data.get("at", ""))
+                if start is not None and start <= duration - 1.0:
+                    members.append(picture(data, max(0.15, start - 0.1)))
+            members.sort(key=lambda b: b.start)
+            for previous, member in zip(members, members[1:]):
+                member.start = max(member.start, previous.start + 0.5)
+            members = [m for m in members if m.start <= duration - 1.0]
+            if len(members) >= 2:
+                timed.append(_Beat(kind="images", start=members[0].start, end=0.0, at=members[0].at, members=members))
+            elif members:
+                timed.append(members[0])
             continue
-        start = anchor_time(text, beat.get("at", ""), narration.sub_maker, narration.speech_seconds)
+        if kind not in ("image", "text"):
+            continue
+        start = locate(beat.get("at", ""))
         if start is None:
             logger.debug(f"beat anchor not found in narration: {beat.get('at')!r}")
             continue
         start = max(0.15, start - 0.1)
         if start > duration - 1.0:
             continue
-        timed.append(
-            _Beat(
-                kind=beat["type"],
-                start=start,
-                end=0.0,
-                query=beat.get("query", ""),
-                look=beat.get("look", "diagram"),
-                text=beat.get("text", ""),
-                icon=beat.get("icon", ""),
-                at=beat.get("at", ""),
-            )
-        )
+        if kind == "image":
+            timed.append(picture(beat, start))
+        else:
+            timed.append(_Beat(kind="text", start=start, end=0.0, text=beat.get("text", ""), at=beat.get("at", "")))
     timed.sort(key=lambda b: b.start)
 
     scheduled: List[_Beat] = []
-    for kind, longest, shortest in (
-        ("image", IMAGE_BEAT_MAX, IMAGE_BEAT_MIN),
-        ("text", TEXT_BEAT_SECONDS, 1.2),
-    ):
+    for zone in (("image", "images"), ("text",)):
         # Keep the earliest beat and skip any that would cut it short, then
-        # let each kept beat run until the next one of the same kind.
+        # let each kept beat run until the next one of the same zone.
         kept: List[_Beat] = []
-        for beat in (b for b in timed if b.kind == kind):
-            if kept and beat.start - kept[-1].start < shortest + 0.15:
-                continue
-            if duration - 0.3 - beat.start < shortest:
+        for beat in (b for b in timed if b.kind in zone):
+            shortest = _picture_spans(beat)[0] if beat.kind != "text" else 1.2
+            if kept:
+                previous_shortest = _picture_spans(kept[-1])[0] if kept[-1].kind != "text" else 1.2
+                if beat.start - kept[-1].start < previous_shortest + 0.15:
+                    continue
+            if duration - 0.3 - beat.start < min(shortest, IMAGE_BEAT_MIN if beat.kind != "text" else 1.2):
                 continue
             kept.append(beat)
         for position, beat in enumerate(kept):
+            longest = _picture_spans(beat)[1] if beat.kind != "text" else TEXT_BEAT_SECONDS
             limit = kept[position + 1].start - 0.15 if position + 1 < len(kept) else duration - 0.3
             beat.end = min(beat.start + longest, limit)
-        scheduled += kept
+            if beat.kind == "images":
+                beat.members = [m for m in beat.members if m.start < beat.end - 1.0]
+                for member in beat.members:
+                    member.end = beat.end
+        scheduled += [b for b in kept if b.kind != "images" or b.members]
     return sorted(scheduled, key=lambda b: b.start)
 
 
@@ -301,6 +339,7 @@ class Editor:
         self._beats: Dict[int, List[Tuple[_Beat, str]]] = {}
         self._scenes: Dict[int, List[scenes.Scene]] = {}
         self._scene_pictures: Dict[Tuple[str, str], Optional[object]] = {}
+        self._item_pictures: Dict[int, Optional[object]] = {}
         self._gemini = gemini_media.enabled()
         self.host_plan: List[host.HostSegment] = []
         self.plan: List[dict] = []
@@ -389,10 +428,11 @@ class Editor:
         return shots
 
     def _prepare(self) -> None:
-        """Time the scenes, fetch every picture and plan the host over the whole video."""
+        """Time scenes and beats, fetch every picture, and plan the host over the whole video."""
         if self.host_plan:
             return
-        infos = []
+        lines: Dict[int, object] = {}
+        reactions_by_segment: List[List[Tuple[float, str]]] = []
         covers: List[List[Tuple[float, float]]] = []
         for index, segment in enumerate(self.segments):
             narration = self.narrations[index]
@@ -403,27 +443,17 @@ class Editor:
             def locate(anchor, segment=segment, narration=narration):
                 return anchor_time(segment.text, anchor, narration.sub_maker, narration.speech_seconds)
 
-            blocked = [self._subscribe_window(index, duration)] if self._subscribe_window(index, duration) else []
-            timed_scenes = scenes.time_scenes(entry.get("scenes") or [], locate, pauses, duration, blocked)
-            for scene in timed_scenes:
-                # Alternate sideways and vertical entrances across the video.
-                scene.vertical = sum(len(v) for v in self._scenes.values()) % 2 == 1
-                self._scenes.setdefault(index, []).append(scene)
-            self._scenes.setdefault(index, [])
+            window = self._subscribe_window(index, duration)
+            timed_scenes = scenes.time_scenes(entry.get("scenes") or [], locate, pauses, duration, [window] if window else [])
+            self._scenes[index] = timed_scenes
             cover = [(scene.start, scene.end) for scene in timed_scenes]
             covers.append(cover)
-
             beats = schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
-            prepared = []
-            for beat in beats:
-                # Pictures and facts would only be hidden (and heard) under a scene.
-                if any(beat.start < end + 0.2 and beat.end > start - 0.2 for start, end in cover):
-                    continue
-                picture = self._beat_picture(beat, sentence_at(segment.text, beat.at)) if beat.kind == "image" else ""
-                if beat.kind == "image" and not picture:
-                    continue
-                prepared.append((beat, picture))
-            self._beats[index] = prepared
+            # Pictures and facts would only be hidden (and heard) under a scene.
+            self._beats[index] = [
+                (beat, "") for beat in beats
+                if not any(beat.start < end + 0.2 and beat.end > start - 0.2 for start, end in cover)
+            ]
             reactions = []
             for beat in entry.get("beats") or []:
                 if beat.get("type") != "react":
@@ -434,15 +464,44 @@ class Editor:
                 if any(start - 0.3 <= time <= end for start, end in cover):
                     continue
                 reactions.append((max(0.4, time), beat["expression"]))
+            reactions_by_segment.append(reactions)
+            lines[index] = segment.text
+
+        self._fetch_pictures(lines)
+
+        # Alternate sideways and vertical entrances across the video.
+        count = 0
+        infos = []
+        for index, segment in enumerate(self.segments):
+            narration = self.narrations[index]
+            entry = self._entry(index)
+            for scene in self._scenes[index]:
+                scene.vertical = count % 2 == 1
+                count += 1
+            prepared = []
+            for beat, _ in self._beats[index]:
+                if beat.kind == "images":
+                    beat.members = [m for m in beat.members if m.picture]
+                    if len(beat.members) == 1:
+                        single = beat.members[0]
+                        single.end = beat.end
+                        beat = single
+                    elif not beat.members:
+                        continue
+                if beat.kind == "image" and not beat.picture:
+                    continue
+                prepared.append((beat, beat.picture))
+            self._beats[index] = prepared
             infos.append(
                 host.SegmentInfo(
                     kind=segment.kind,
-                    duration=duration,
+                    duration=narration.frames / 30.0,
                     expression=entry.get("expression", ""),
-                    reactions=reactions,
+                    reactions=reactions_by_segment[index],
                     pictures=[b.start for b, _ in prepared if b.kind == "image"],
-                    pauses=pauses,
+                    pauses=host.find_pauses(narration.pcm),
                     mode=entry.get("host", ""),
+                    blocked=[(b.start, b.end) for b, _ in prepared if b.kind == "images"],
                 )
             )
         names = sorted(self.poses)
@@ -455,6 +514,38 @@ class Editor:
             for entry, planned in zip(self.plan, self.host_plan):
                 entry["host"] = planned.mode
             self._save_plan()
+
+    def _fetch_pictures(self, texts: Dict[int, str]) -> None:
+        """Find every picture of the video at once (searches and checks run in parallel)."""
+        jobs = []
+        for index, beats in self._beats.items():
+            text = texts[index]
+            for beat, _ in beats:
+                for member in beat.members if beat.kind == "images" else [beat] if beat.kind == "image" else []:
+                    jobs.append(lambda m=member, t=text: setattr(m, "picture", self._beat_picture(m, sentence_at(t, m.at))))
+        for index, timed in self._scenes.items():
+            text = texts[index]
+            for scene in timed:
+                if scene.type == "figure":
+                    jobs.append(lambda sc=scene, t=text: self._figure_picture(sc, t))
+                elif scene.type == "story" and self.options.illustrations == "ai" and self._gemini:
+                    jobs.append(lambda sc=scene: self._story_pictures(sc))
+                for item in scene.items + ([scene.center] if scene.center and scene.type != "figure" else []):
+                    if item.query or item.icon or item.draw:
+                        jobs.append(lambda i=item, t=text: self._item_picture(i, sentence_at(t, i.at)))
+        if not jobs:
+            return
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for future in [pool.submit(job) for job in jobs]:
+                try:
+                    future.result()
+                except Exception as exc:
+                    logger.warning(f"a picture could not be prepared: {type(exc).__name__}: {exc}")
+        # Full-screen pictures that were not found leave the footage alone.
+        for index, timed in self._scenes.items():
+            self._scenes[index] = [
+                sc for sc in timed if sc.type != "figure" or self._item_pictures.get(id(sc.center)) is not None
+            ]
 
     # -- assets -------------------------------------------------------------
 
@@ -482,6 +573,29 @@ class Editor:
             )
         return self._renderer
 
+    def _web_picture(self, query: str, look: str, line: str, purpose: str) -> str:
+        """The best web picture for ``query``; Gemini picks among several when it can."""
+        save_dir = os.path.join(self.work_dir, "pictures")
+        check = self.options.picture_check and self._gemini
+        candidates = web_images.find_candidates(
+            query, save_dir, kind=look, exclude_urls=self._used_urls, limit=4 if check else 1
+        )
+        if not candidates:
+            return ""
+        choice = 0
+        if check:
+            verdict = gemini_media.choose_picture(
+                [c.path for c in candidates], line or query, query, self.options.language, purpose=purpose
+            )
+            choice = 0 if verdict is None else verdict
+        if choice < 0:
+            logger.info(f"pictures for {query!r} did not pass the check")
+            return ""
+        found = candidates[choice]
+        self._used_urls.add(found.url)
+        self.credits.append(found.credit())
+        return found.path
+
     def _beat_picture(self, beat: _Beat, line: str = "") -> str:
         """A picture for an image beat: AI, or web pictures checked by Gemini, or the icon."""
         save_dir = os.path.join(self.work_dir, "pictures")
@@ -498,23 +612,9 @@ class Editor:
                 if items:
                     self.credits.append(f"{beat.query} — AI-generated illustration")
                     return items[0].url
-        check = self.options.picture_check and self._gemini
-        candidates = web_images.find_candidates(
-            beat.query, save_dir, kind=beat.look, exclude_urls=self._used_urls, limit=4 if check else 1
-        )
-        if candidates:
-            choice = 0
-            if check:
-                verdict = gemini_media.choose_picture(
-                    [c.path for c in candidates], line or beat.query, beat.query, self.options.language
-                )
-                choice = 0 if verdict is None else verdict
-            if choice >= 0:
-                found = candidates[choice]
-                self._used_urls.add(found.url)
-                self.credits.append(found.credit())
-                return found.path
-            logger.info(f"pictures for {beat.query!r} did not pass the check")
+        path = self._web_picture(beat.query, beat.look, line, "beat") if beat.query else ""
+        if path:
+            return path
         if beat.icon:
             path = icons.fetch(beat.icon)
             if path:
@@ -523,26 +623,82 @@ class Editor:
         self.warnings.append(f"no picture found for {beat.query!r}")
         return ""
 
-    def _scene_picture(self, item: scenes.SceneItem):
-        """Picture for a scene element: an AI doodle or an OpenMoji icon (cached)."""
-        key = (item.icon, item.draw)
-        if key in self._scene_pictures:
-            return self._scene_pictures[key]
+    def _item_picture(self, item: scenes.SceneItem, line: str = "") -> None:
+        """Scene element picture: AI doodle, a checked web picture, or the icon."""
         image = None
         if self.options.illustrations == "ai" and self._gemini and item.draw:
             path = gemini_media.illustrate(item.draw)
             if path:
                 image = scenes.prepare_picture(path)
                 self.credits.append("Illustrations: generated with Google Imagen")
+        if image is None and item.query and self.options.picture_check and self._gemini:
+            # Real pictures only when Gemini can confirm they fit; icons otherwise.
+            path = self._web_picture(item.query, "diagram", line, "scene")
+            if path:
+                image = scenes.prepare_picture(path)
         if image is None:
+            image = self._icon_picture(item)
+        self._item_pictures.setdefault(id(item), image)
+
+    def _icon_picture(self, item: scenes.SceneItem):
+        key = (item.icon, item.draw)
+        if key not in self._scene_pictures:
+            image = None
             for query in (item.icon, item.draw):
                 path = icons.fetch(query) if query else ""
                 if path:
                     image = scenes.prepare_picture(path)
                     self.credits.append(icons.CREDIT)
                     break
-        self._scene_pictures[key] = image
-        return image
+            self._scene_pictures[key] = image
+        return self._scene_pictures[key]
+
+    def _figure_picture(self, scene: scenes.Scene, text: str) -> None:
+        """A full-screen picture, checked by Gemini, which also says how long to show it."""
+        if not (self.options.picture_check and self._gemini):
+            logger.info("full-screen pictures need Gemini to check them; skipped")
+            return
+        save_dir = os.path.join(self.work_dir, "pictures")
+        candidates = []
+        for query in dict.fromkeys(q for q in (scene.query_local, scene.query) if q):
+            candidates += web_images.find_candidates(query, save_dir, kind=scene.look, exclude_urls=self._used_urls, limit=3)
+        candidates = candidates[:5]
+        if not candidates:
+            return
+        line = sentence_at(text, scene.center.at if scene.center and scene.center.at else "")
+        verdict = gemini_media.choose_figure([c.path for c in candidates], line, scene.query, self.options.language)
+        choice, seconds = verdict if verdict is not None else (0, 0.0)
+        if choice < 0:
+            logger.info(f"no full-screen picture for {scene.query!r} passed the check")
+            return
+        found = candidates[choice]
+        self._used_urls.add(found.url)
+        self.credits.append(found.credit())
+        image = scenes.prepare_picture(found.path, allow_cutout=scene.look != "photo")
+        if image is not None and seconds:
+            scene.end = min(scene.end, scene.start + seconds + 0.3)
+            scene.exit = True
+        if scene.center is None:
+            scene.center = scenes.SceneItem()
+        self._item_pictures[id(scene.center)] = image
+
+    def _story_pictures(self, scene: scenes.Scene) -> None:
+        """The flipbook drawn by the image model so the moments match each other."""
+        frames = gemini_media.illustrate_sequence([item.draw or item.label for item in scene.items])
+        if len(frames) != len(scene.items):
+            return
+        self.credits.append("Illustrations: generated with Google Gemini")
+        for item, path in zip(scene.items, frames):
+            image = scenes.prepare_picture(path, allow_cutout=False)
+            if image is not None:
+                image.info["scene"] = True
+                self._item_pictures[id(item)] = image
+
+    def _scene_picture(self, item: scenes.SceneItem):
+        """Picture for a scene element (prepared in advance, or an icon on demand)."""
+        if id(item) in self._item_pictures:
+            return self._item_pictures[id(item)]
+        return self._icon_picture(item)
 
     def scene_renderer(self) -> scenes.SceneRenderer:
         if self._scene_renderer is None:
@@ -610,25 +766,26 @@ class Editor:
         if has_character and not theme.portrait:
             character_right = int(width * 0.02) + self.renderer().canvas[0]
         for number, (beat, picture) in enumerate(self._beats.get(index, [])):
-            if beat.kind == "image":
-                if theme.portrait:
-                    box_w, box_h, cx, cy = int(width * 0.84), int(height * 0.36), width * 0.5, height * 0.4
-                else:
-                    box_w, box_h, cx, cy = int(width * 0.38), int(height * 0.6), width * 0.7, height * 0.48
-                try:
-                    sticker = fx.make_sticker(theme, picture, box_w, box_h, seed=index * 10 + number)
-                except Exception as exc:
-                    self.warnings.append(f"picture for {beat.query!r} could not be used: {exc}")
-                    continue
-                path, w, h = self._save(sticker, f"beat-{index:02d}-{number}.png")
-                x = int(fx.clamp(cx - w / 2, 0, width - w))
-                y = int(fx.clamp(cy - h / 2, 0, height - h))
-                rise = theme.px(46)
-                ease = fx.ease_expression(0.35, beat.start)
-                edit.overlays.append(
-                    fx.Overlay(path, x=str(x), y=f"{y}+{rise}*(1-{ease})", start=beat.start, end=beat.end, fade_in=0.25, fade_out=0.2)
-                )
-                self._sound(edit, beat.start, "pop")
+            if beat.kind in ("image", "images"):
+                members = beat.members if beat.kind == "images" else [beat]
+                for position, (member, (cx, cy, box_w, box_h)) in enumerate(zip(members, self._picture_slots(len(members)))):
+                    try:
+                        sticker = fx.make_sticker(
+                            theme, member.picture or picture, box_w, box_h, seed=index * 10 + number + position,
+                            allow_cutout=member.look != "photo",
+                        )
+                    except Exception as exc:
+                        self.warnings.append(f"picture for {member.query!r} could not be used: {exc}")
+                        continue
+                    path, w, h = self._save(sticker, f"beat-{index:02d}-{number}-{position}.png")
+                    x = int(fx.clamp(cx - w / 2, 0, width - w))
+                    y = int(fx.clamp(cy - h / 2, 0, height - h))
+                    rise = theme.px(46)
+                    ease = fx.ease_expression(0.35, member.start)
+                    edit.overlays.append(
+                        fx.Overlay(path, x=str(x), y=f"{y}+{rise}*(1-{ease})", start=member.start, end=beat.end, fade_in=0.25, fade_out=0.2)
+                    )
+                    self._sound(edit, member.start, "pop")
             else:
                 if subscribe_window and beat.end > subscribe_window[0] - 0.2 and beat.start < subscribe_window[1]:
                     continue
@@ -682,6 +839,27 @@ class Editor:
                 fx.Overlay(path, x=f"-w+w*({offset:.3f}+t)/{self.total:.3f}", y=str(height - bar_h))
             )
         return edit
+
+    def _picture_slots(self, count: int) -> List[Tuple[float, float, int, int]]:
+        """(centre x, centre y, box width, box height) for 1-4 pictures shown together.
+
+        One picture sits in the middle; more are spread symmetrically
+        (left/right, left/middle/right, ...).
+        """
+        width, height = self.theme.width, self.theme.height
+        if self.theme.portrait:
+            if count == 1:
+                return [(width * 0.5, height * 0.4, int(width * 0.84), int(height * 0.36))]
+            rows = [height * (0.18 + 0.56 * (k + 0.5) / count) for k in range(count)]
+            return [(width * 0.5, y, int(width * 0.8), int(height * 0.56 / count)) for y in rows]
+        if count == 1:
+            return [(width * 0.5, height * 0.45, int(width * 0.44), int(height * 0.62))]
+        step = min(0.3, 0.9 / count)
+        box_w = int(width * min(0.34, 0.86 / count))
+        return [
+            (width * (0.5 + (k - (count - 1) / 2) * step), height * 0.45, box_w, int(height * 0.5))
+            for k in range(count)
+        ]
 
     def _host_overlay(self, index: int, planned: host.HostSegment) -> fx.Overlay:
         theme = self.theme

@@ -20,6 +20,7 @@ Asset folder layout (all optional):
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import re
@@ -226,6 +227,12 @@ def remove_flat_background(image: Image.Image, tolerance: int = 26) -> Optional[
     close = np.abs(border - background).max(axis=1) <= tolerance
     if close.mean() < 0.85:
         return None
+    # A light page (diagrams, clip art) or a perfectly flat digital colour.
+    # Dark or noisy backdrops are photos: cutting them shreds the subject.
+    luminance = float(np.dot(background, (0.299, 0.587, 0.114)))
+    flatness = float(np.abs(border - background).mean())
+    if luminance < 200 and flatness > 2.5:
+        return None
 
     similar = np.abs(pixels - background).max(axis=2) <= tolerance
     height, width = similar.shape
@@ -247,6 +254,8 @@ def remove_flat_background(image: Image.Image, tolerance: int = 26) -> Optional[
             stack.append((y, x + 1))
     if reached.mean() > 0.97 or reached.mean() < 0.03:
         return None
+    if main_shape_share(~reached) < 0.85:
+        return None  # the "subject" would fall apart into pieces
 
     mask = Image.fromarray(np.where(reached, 0, 255).astype(np.uint8))
     mask = mask.resize(rgb.size, Image.BILINEAR).filter(ImageFilter.GaussianBlur(1.2))
@@ -255,8 +264,49 @@ def remove_flat_background(image: Image.Image, tolerance: int = 26) -> Optional[
     return cutout
 
 
+def main_shape_share(mask: np.ndarray, side: int = 160) -> float:
+    """Share of the ``True`` pixels that belong to the largest connected shape."""
+    from collections import deque
+
+    mask = np.asarray(mask, dtype=bool)
+    step = max(1, int(math.ceil(max(mask.shape) / side)))
+    grid = mask[::step, ::step]
+    total = int(grid.sum())
+    if total == 0:
+        return 0.0
+    seen = np.zeros_like(grid)
+    height, width = grid.shape
+    largest = 0
+    for y, x in zip(*np.nonzero(grid)):
+        if seen[y, x]:
+            continue
+        seen[y, x] = True
+        queue, size = deque([(y, x)]), 0
+        while queue:
+            cy, cx = queue.popleft()
+            size += 1
+            for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                if 0 <= ny < height and 0 <= nx < width and grid[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True
+                    queue.append((ny, nx))
+        largest = max(largest, size)
+    return largest / total
+
+
 def has_transparency(image: Image.Image) -> bool:
     return image.mode == "RGBA" and image.getchannel("A").getextrema()[0] < 245
+
+
+def cutout_or_none(image: Image.Image, allow_cutout: bool = True) -> Optional[Image.Image]:
+    """A clean transparent cut-out of ``image``, or None when it should stay a photo."""
+    image = image.convert("RGBA")
+    if has_transparency(image):
+        alpha = np.asarray(image.getchannel("A")) > 40
+        # Scattered transparent fragments look like confetti as stickers.
+        return image if main_shape_share(alpha) >= 0.6 else None
+    if not allow_cutout:
+        return None
+    return remove_flat_background(image)
 
 
 def make_sticker(
@@ -265,23 +315,28 @@ def make_sticker(
     max_width: int,
     max_height: int,
     seed: int = 0,
+    allow_cutout: bool = True,
 ) -> Image.Image:
     """Turn a picture into an on-screen element.
 
-    Pictures with transparency (or a plain background that can be removed)
-    become die-cut stickers with a white outline; photos become rounded
-    cards with a white frame, tilted slightly.
+    Pictures with transparency (or a light, flat background that comes off as
+    one clean shape) become die-cut stickers with a white outline; photos and
+    anything that would cut out badly become rounded cards with a white
+    frame, tilted slightly. ``allow_cutout=False`` always makes a card.
     """
     with Image.open(image_path) as source:
         image = ImageOps.exif_transpose(source).convert("RGBA")
     rng = random.Random(seed)
 
-    if not has_transparency(image):
-        cutout = remove_flat_background(image)
-        if cutout is not None:
-            image = cutout
+    cutout = cutout_or_none(image, allow_cutout)
+    if cutout is None and has_transparency(image):
+        flat = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        flat.alpha_composite(image)
+        image = flat
+    elif cutout is not None:
+        image = cutout
 
-    if has_transparency(image):
+    if cutout is not None:
         bbox = image.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
         if bbox:
             image = image.crop(bbox)

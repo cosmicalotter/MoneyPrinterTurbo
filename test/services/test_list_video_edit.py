@@ -278,7 +278,7 @@ class TestEditor(_TempDirCase):
         plan_file = self.path("plan.json")
         Path(plan_file).write_text(json.dumps(plan), encoding="utf-8")
         found = web_images.WebImage(str(RESOURCES / "1.png"), "wikimedia", "Brain", "Ana", "CC BY 4.0", "https://x")
-        ed = self._editor(editor.EditOptions(assets_dir=assets, plan_file=plan_file, language="es-CO"))
+        ed = self._editor(editor.EditOptions(assets_dir=assets, plan_file=plan_file, language="es-CO", progress_bar=True))
         with patch.object(editor.web_images, "find_candidates", return_value=[found]) as find:
             ed.make_plan()
             edit = ed.segment_edit(1, 6.3, show_titles=True)
@@ -313,7 +313,7 @@ class TestEditor(_TempDirCase):
         intro = ed.segment_edit(0, 0.0, show_titles=True)
         outro = ed.segment_edit(3, 19.0, show_titles=True)
         middle = ed.segment_edit(1, 6.3, show_titles=True)
-        self.assertEqual([o.mode for o in intro.overlays], ["frames", "still"])
+        self.assertEqual([o.mode for o in intro.overlays], ["frames"])  # no progress bar by default
         self.assertAlmostEqual(intro.overlays[0].start, 190 / 30 - 0.3 - editor.SUBSCRIBE_SECONDS)
         self.assertEqual(outro.overlays[0].start, 0.6)
         self.assertFalse(any(o.mode == "frames" for o in middle.overlays))

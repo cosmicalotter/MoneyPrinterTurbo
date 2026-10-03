@@ -1187,12 +1187,15 @@ def translate_list_script(script, language: str, app_config=None):
 # 出精确的出现时间。
 # =============================================================================
 
-EDIT_BEAT_TYPES = ("image", "text", "react")
+EDIT_BEAT_TYPES = ("image", "images", "text", "react")
 EDIT_IMAGE_LOOKS = ("diagram", "photo")
 EDIT_HOST_MODES = ("full", "lead", "react", "lead+react", "off")
-EDIT_SCENE_TYPES = ("statement", "stat", "sequence", "compare", "diagram")
+EDIT_SCENE_TYPES = (
+    "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
+    "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
+)
 EDIT_SCENE_MARKS = ("cross", "check")
-MAX_EDIT_BEATS_PER_SEGMENT = 4
+MAX_EDIT_BEATS_PER_SEGMENT = 6
 MAX_EDIT_REACTIONS_PER_SEGMENT = 2
 MAX_EDIT_BACKGROUNDS_PER_SEGMENT = 8
 MAX_EDIT_SCENES_PER_SEGMENT = 3
@@ -1217,14 +1220,21 @@ def _edit_plan_example(expressions: list) -> dict:
                     {
                         "type": "sequence",
                         "items": [
-                            {"at": "not a muscle", "label": "a muscle", "icon": "💪", "draw": "a flexed arm muscle", "mark": "cross"},
-                            {"at": "but a cleaning crew", "label": "a cleaning crew", "icon": "🧹", "draw": "a tiny broom sweeping", "mark": "check"},
+                            {"at": "not a muscle", "label": "a muscle", "icon": "💪", "query": "flexed arm muscle", "draw": "a flexed arm muscle", "mark": "cross"},
+                            {"at": "but a cleaning crew", "label": "a cleaning crew", "icon": "🧹", "query": "", "draw": "a tiny broom sweeping", "mark": "check"},
                         ],
                     },
-                    {"type": "stat", "at": "about 70 percent", "value": 70, "unit": "%", "label": "happens at night", "chart": "pie", "icon": "🌙"},
+                    {"type": "figure", "at": "this is how it flows", "query": "glymphatic system diagram", "query_local": "", "look": "diagram", "seconds": 7, "label": ""},
                 ],
                 "beats": [
                     {"type": "image", "at": "you wake up tired", "query": "tired man yawning in bed", "look": "photo", "icon": "🥱"},
+                    {
+                        "type": "images",
+                        "items": [
+                            {"at": "coffee", "query": "cup of coffee", "look": "photo", "icon": "☕"},
+                            {"at": "or an energy drink", "query": "energy drink can", "look": "photo", "icon": "🥤"},
+                        ],
+                    },
                     {"type": "text", "at": "one night without sleep", "text": "24 h awake"},
                 ]
                 + ([{"type": "react", "at": "it starts to fail", "expression": expressions[-1]}] if expressions else []),
@@ -1285,17 +1295,28 @@ simple pictures of the things being mentioned and key facts as short text.
 2. {expression_rule}.
 3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text; the element appears when those words are spoken.
 4. "backgrounds": stock footage behind the narration, one entry about every 15 to 20 words (a new shot every 6 to 8 seconds), the first one on the segment's first words; each is {{"at": ..., "query": ...}} where "query" is an English stock video search of 2 to 4 words describing a concrete scene a camera can film (people, places, objects, animals, nature, close-ups), never text, logos, charts or abstract ideas, and different from the other queries of the video.
-5. "scenes": full-screen minimalist explainer graphics drawn on a plain canvas that interrupt the footage to make one idea crystal clear; 1 or 2 per item (0 or 1 for intro and outro), each covering one idea of 3 to 10 seconds, never two in a row on consecutive sentences. Types:
-{statement_rule}
-- {{"type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "pie" or "number", "icon": ...}}: a number stated in the narration; "pie" only for a percentage of a whole.
-- {{"type": "sequence", "items": [{{"at": ..., "label": ..., "icon": ..., "draw": ..., "mark": ""}}, ...]}}: 2 to 4 things the narration lists, popping in left to right as each one is named; "mark" is "cross" for something the narration denies ("it is not X, nor Y"), "check" for the right answer, otherwise "".
-- {{"type": "compare", "items": [left, right]}}: two contrasting situations side by side (before/after, with/without, see it/lose it), same item format.
-- {{"type": "diagram", "center": {{"label": ..., "icon": ..., "draw": ...}}, "items": [3 to 5 items]}}: several factors or parts that lead to one central idea; an arrow is drawn from each item to the centre as it is named.
-   In every scene "label" has at most 3 words in {language_name}; "icon" is ONE emoji that depicts the thing literally (when no emoji fits, 1 or 2 English words such as "kidney" or "stomach"); "draw" is an English description of 5 to 12 words of a simple illustration of that thing.
-6. "beats": 1 to 2 per item (0 or 1 for intro and outro), never during a scene:
-- image beat: {{"type": "image", "at": ..., "query": ..., "look": ..., "icon": ...}}: a picture that pops in next to the host. "query" is an English search of 2 to 5 words for the SIMPLEST picture that literally shows those words to a 12-year-old (e.g. "tired man after workout", never "muscle fiber microscopy"); never a labelled scientific diagram unless the narration explains that exact structure; "look" is "photo" for real-life scenes and "diagram" for drawings, anatomy or maps; "icon" is an emoji used if no good picture exists.
+5. "beats" (what pops in over the footage; the main resource, 2 to 5 per item, 0 to 2 for intro and outro, never during a scene):
+- image beat: {{"type": "image", "at": ..., "query": ..., "look": ..., "icon": ...}}: ONE picture of exactly what is being said, shown big in the centre (e.g. "resistance is anything that slows the current down" -> "car braking illustration"). "query" is an English search of 2 to 5 words for the SIMPLEST picture that literally shows those words to a 12-year-old (e.g. "tired man after workout", never "muscle fiber microscopy"); never a labelled scientific diagram unless the narration explains that exact structure; "look" is "photo" for real-life scenes and "diagram" for drawings, clip art, anatomy or maps; "icon" is an emoji used if no good picture exists.
+- images beat: {{"type": "images", "items": [2 to 4 image items, each with its own "at", "query", "look", "icon"]}}: several things named one after the other, shown side by side (left/right, or left/centre/right) as each is named.
 - text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number, a key term or a surprising fact stated in the narration; at most one per segment.
 {react_rule}
+6. "scenes": full-screen explainer moments that replace the footage to make one idea crystal clear; about one per item (two for long items, 0 or 1 for intro and outro), never two in a row on consecutive sentences, and use MANY different types across the video (never the same type twice in a row; a statement at most every third item). Types:
+{statement_rule}
+- {{"type": "question", "at": ..., "text": ..., "expression": ...}}: a big question the narration asks, with the host thinking.
+- {{"type": "figure", "at": ..., "query": ..., "query_local": ..., "look": ..., "seconds": ..., "label": ...}}: a real picture filling the screen: an explanatory diagram, chart or infographic (look "diagram", e.g. "voltage current resistance diagram") or a striking photo (look "photo"); "query" in English, "query_local" the same search in {language_name} (it finds diagrams labelled in that language); "seconds" 3 to 4 for a photo, 6 to 8 for a diagram with text to read; "label" an optional caption of at most 6 words.
+- {{"type": "zoom", "at": ..., "label": ..., "icon": ..., "query": ..., "draw": ..., "direction": "in" or "out"}}: one key thing shown big while the camera slowly pushes in or pulls out.
+- {{"type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "pie" or "number", "icon": ...}}: a number stated in the narration; "pie" only for a percentage of a whole.
+- {{"type": "grid", "at": ..., "value": 7, "total": 10, "label": ..., "icon": ...}}: "7 out of 10" as a grid of icons with 7 coloured in.
+- {{"type": "gauge", "at": ..., "value": 0 to 100, "label": ..., "low": ..., "high": ...}}: a meter whose needle swings to a level (risk, temperature, strength).
+- {{"type": "bars", "unit": ..., "items": [2 to 5 items with "value"]}}: quantities compared as growing bars.
+- {{"type": "sequence", "items": [2 to 4 items]}}: things the narration lists, popping in left to right as each one is named; "mark" is "cross" for something the narration denies ("it is not X, nor Y"), "check" for the right answer, otherwise "".
+- {{"type": "compare", "items": [left, right]}}: two contrasting situations side by side (before/after, with/without, see it/lose it).
+- {{"type": "steps", "cycle": false, "items": [2 to 5 items]}}: a process in order with numbered arrows; "cycle": true when it loops back (like the water cycle).
+- {{"type": "timeline", "items": [2 to 5 items with "date"]}}: events in time on a line.
+- {{"type": "formula", "operator": "+", "items": [2 to 3 items], "result": item}}: ingredients that combine into a result ("heat + oxygen + fuel = fire"); operator "+", "×", "−" or "→".
+- {{"type": "diagram", "center": item, "items": [3 to 5 items]}}: several factors or parts that lead to one central idea; an arrow is drawn from each item to the centre as it is named.
+- {{"type": "story", "items": [2 to 4 frames, each an item with "expression"]}}: a tiny flipbook where the host does something and something happens (plug in -> current flows -> the bulb lights up); each frame's "label" is a short caption.
+   An item is {{"at": ..., "label": ..., "icon": ..., "query": ..., "draw": ...}} (plus "mark", "value", "date" or "expression" where a type asks for them): "label" has at most 3 words in {language_name}; "icon" is ONE emoji that depicts the thing literally (when no emoji fits, 1 or 2 English words such as "kidney" or "stomach"); "query" is an optional English search of 2 to 4 words for a real picture of a concrete thing (leave it empty for abstract ideas, where the emoji is clearer); "draw" is an English description of 5 to 12 words of a simple illustration of that thing.
 7. never add facts that the narration does not state.
 {reference_rule}
 ## Output Example:
@@ -1318,7 +1339,19 @@ def _normalize_backgrounds(entries) -> list:
     return backgrounds[:MAX_EDIT_BACKGROUNDS_PER_SEGMENT]
 
 
-def _scene_item(data, needs_anchor: bool = True) -> Optional[dict]:
+def _number(value) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _plain_number(number: float):
+    return int(number) if float(number).is_integer() else round(number, 2)
+
+
+def _scene_item(data, needs_anchor: bool = True, lookup: Optional[dict] = None) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
     item = {
@@ -1329,9 +1362,109 @@ def _scene_item(data, needs_anchor: bool = True) -> Optional[dict]:
     }
     if (needs_anchor and not item["at"]) or not (item["label"] or item["icon"] or item["draw"]):
         return None
+    query = str(data.get("query") or "").strip()[:80]
+    if query:
+        item["query"] = query
     if data.get("mark") in EDIT_SCENE_MARKS:
         item["mark"] = data["mark"]
+    value = _number(data.get("value"))
+    if value is not None:
+        item["value"] = _plain_number(value)
+    date = str(data.get("date") or "").strip()[:14]
+    if date:
+        item["date"] = date
+    if lookup is not None:
+        expression = lookup.get(str(data.get("expression") or "").strip().lower(), "")
+        if expression:
+            item["expression"] = expression
     return item
+
+
+_ITEM_LIMITS = {
+    "sequence": (2, 4), "compare": (2, 2), "diagram": (2, 5), "story": (2, 4),
+    "steps": (2, 5), "bars": (2, 5), "timeline": (2, 5), "formula": (2, 3),
+}
+
+
+def _normalize_scene(entry: dict, lookup: dict) -> Optional[dict]:
+    kind = entry["type"]
+    anchor = str(entry.get("at") or "").strip()
+    label = str(entry.get("label") or "").strip()[:MAX_SCENE_LABEL_LENGTH]
+    icon = str(entry.get("icon") or "").strip()[:40]
+    expression = lookup.get(str(entry.get("expression") or "").strip().lower(), "")
+    if kind in ("statement", "question"):
+        text = str(entry.get("text") or "").strip()[:MAX_STATEMENT_LENGTH if kind == "statement" else 80]
+        if anchor and text:
+            return {"type": kind, "at": anchor, "text": text, "expression": expression}
+        return None
+    if kind == "stat":
+        value = _number(entry.get("value"))
+        if not anchor or value is None:
+            return None
+        unit = str(entry.get("unit") or "").strip()[:6]
+        chart = "pie" if entry.get("chart") == "pie" and unit == "%" and 0 < value <= 100 else "number"
+        return {"type": kind, "at": anchor, "value": _plain_number(value), "unit": unit, "label": label, "chart": chart, "icon": icon}
+    if kind == "grid":
+        value, total = _number(entry.get("value")), _number(entry.get("total") or 10)
+        if not anchor or value is None or total is None or not 2 <= total <= 100 or not 0 <= value <= total:
+            return None
+        return {"type": kind, "at": anchor, "value": int(round(value)), "total": int(round(total)), "label": label, "icon": icon}
+    if kind == "gauge":
+        value = _number(entry.get("value"))
+        if not anchor or value is None:
+            return None
+        return {
+            "type": kind, "at": anchor, "value": _plain_number(min(100.0, max(0.0, value))), "label": label,
+            "low": str(entry.get("low") or "").strip()[:MAX_SCENE_LABEL_LENGTH],
+            "high": str(entry.get("high") or "").strip()[:MAX_SCENE_LABEL_LENGTH],
+        }
+    if kind == "zoom":
+        item = _scene_item(dict(entry, at=anchor), needs_anchor=True)
+        if item is None:
+            return None
+        item.update(type=kind, direction="out" if entry.get("direction") == "out" else "in")
+        return item
+    if kind == "figure":
+        query = str(entry.get("query") or "").strip()[:100]
+        if not anchor or not query:
+            return None
+        seconds = _number(entry.get("seconds")) or 5
+        return {
+            "type": kind, "at": anchor, "query": query,
+            "query_local": str(entry.get("query_local") or "").strip()[:100],
+            "look": "photo" if entry.get("look") == "photo" else "diagram",
+            "seconds": _plain_number(min(9.0, max(3.0, seconds))), "label": str(entry.get("label") or "").strip()[:60],
+        }
+    items = [
+        item
+        for item in (_scene_item(data, lookup=lookup) for data in entry.get("items") or entry.get("frames") or [])
+        if item
+    ]
+    if kind == "bars":
+        items = [item for item in items if "value" in item]
+    if kind == "timeline":
+        items = [item for item in items if item.get("date")] or items
+    low, high = _ITEM_LIMITS[kind]
+    if len(items) < low:
+        return None
+    scene = {"type": kind, "items": items[:high]}
+    if kind == "diagram":
+        center = _scene_item(entry.get("center"), needs_anchor=False)
+        scene["center"] = center or {"at": "", "label": "", "icon": "", "draw": ""}
+    elif kind == "steps":
+        scene["cycle"] = bool(entry.get("cycle"))
+    elif kind == "bars":
+        scene["unit"] = str(entry.get("unit") or "").strip()[:6]
+    elif kind == "formula":
+        result = _scene_item(entry.get("result"))
+        if result is None:
+            return None
+        operator = str(entry.get("operator") or "+").strip()
+        scene["operator"] = operator if operator in ("+", "×", "x", "−", "-", "→", "÷") else "+"
+        scene["result"] = result
+    elif kind == "story":
+        scene["expression"] = expression
+    return scene
 
 
 def _normalize_scenes(entries, lookup: dict) -> list:
@@ -1339,38 +1472,24 @@ def _normalize_scenes(entries, lookup: dict) -> list:
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict) or entry.get("type") not in EDIT_SCENE_TYPES:
             continue
-        kind = entry["type"]
-        anchor = str(entry.get("at") or "").strip()
-        if kind == "statement":
-            text = str(entry.get("text") or "").strip()[:MAX_STATEMENT_LENGTH]
-            if anchor and text:
-                expression = lookup.get(str(entry.get("expression") or "").strip().lower(), "")
-                scenes.append({"type": kind, "at": anchor, "text": text, "expression": expression})
-        elif kind == "stat":
-            try:
-                value = float(entry.get("value"))
-            except (TypeError, ValueError):
-                continue
-            if not anchor or not math.isfinite(value):
-                continue
-            unit = str(entry.get("unit") or "").strip()[:6]
-            chart = "pie" if entry.get("chart") == "pie" and unit == "%" and 0 < value <= 100 else "number"
-            scenes.append({
-                "type": kind, "at": anchor, "value": int(value) if value.is_integer() else round(value, 1),
-                "unit": unit, "label": str(entry.get("label") or "").strip()[:MAX_SCENE_LABEL_LENGTH],
-                "chart": chart, "icon": str(entry.get("icon") or "").strip()[:40],
-            })
-        else:
-            items = [item for item in map(_scene_item, entry.get("items") or []) if item]
-            limits = {"sequence": (2, 4), "compare": (2, 2), "diagram": (2, 5)}[kind]
-            if len(items) < limits[0]:
-                continue
-            scene = {"type": kind, "items": items[: limits[1]]}
-            if kind == "diagram":
-                center = _scene_item(entry.get("center"), needs_anchor=False)
-                scene["center"] = center or {"at": "", "label": "", "icon": "", "draw": ""}
+        scene = _normalize_scene(entry, lookup)
+        if scene is not None:
             scenes.append(scene)
     return scenes[:MAX_EDIT_SCENES_PER_SEGMENT]
+
+
+def _image_beat(beat: dict, anchor: str) -> Optional[dict]:
+    query = str(beat.get("query") or "").strip()[:100]
+    if not query or not anchor:
+        return None
+    image = {
+        "type": "image", "at": anchor, "query": query,
+        "look": beat.get("look") if beat.get("look") in EDIT_IMAGE_LOOKS else "diagram",
+    }
+    icon = str(beat.get("icon") or "").strip()[:40]
+    if icon:
+        image["icon"] = icon
+    return image
 
 
 def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
@@ -1395,19 +1514,25 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
         for beat in entry.get("beats") or []:
             if not isinstance(beat, dict) or beat.get("type") not in EDIT_BEAT_TYPES:
                 continue
+            if beat["type"] == "images":
+                members = [
+                    image for image in (
+                        _image_beat(item, str(item.get("at") or "").strip())
+                        for item in beat.get("items") or [] if isinstance(item, dict)
+                    ) if image
+                ][:4]
+                if len(members) >= 2:
+                    beats.append({"type": "images", "items": [{k: v for k, v in m.items() if k != "type"} for m in members]})
+                elif members:
+                    beats.append(members[0])
+                continue
             anchor = str(beat.get("at") or "").strip()
             if not anchor:
                 continue
             if beat["type"] == "image":
-                query = str(beat.get("query") or "").strip()[:100]
-                if not query:
-                    continue
-                look = beat.get("look") if beat.get("look") in EDIT_IMAGE_LOOKS else "diagram"
-                image = {"type": "image", "at": anchor, "query": query, "look": look}
-                icon = str(beat.get("icon") or "").strip()[:40]
-                if icon:
-                    image["icon"] = icon
-                beats.append(image)
+                image = _image_beat(beat, anchor)
+                if image:
+                    beats.append(image)
             elif beat["type"] == "text":
                 text = str(beat.get("text") or "").strip()[:MAX_EDIT_TEXT_LENGTH]
                 if text:

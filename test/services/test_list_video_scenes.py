@@ -428,8 +428,9 @@ class TestEditorScenesAndPictures(_TempDirCase):
             editor.icons, "fetch"
         ) as fetch:
             item = scenes.SceneItem(label="vela", icon="🕯️", draw="a lit candle")
+            ed._item_picture(item)
             self.assertIsNotNone(ed._scene_picture(item))
-            self.assertIs(ed._scene_picture(item), ed._scene_picture(item))  # cached
+            self.assertIs(ed._scene_picture(item), ed._scene_picture(item))  # prepared once
         illustrate.assert_called_once_with("a lit candle")
         fetch.assert_not_called()
         icons_only = self._editor()

@@ -177,8 +177,8 @@ Script format (JSON):
 Automatic editing (on by default, --no-edit turns it off):
   The LLM plans each segment: the host character's expression plus pictures
   and key facts that pop in when the narration mentions them. The result has
-  chapter labels, sound effects, a subscribe animation, a progress bar and
-  audio normalized to -14 LUFS. The plan is saved as edit-plan.json; edit it
+  chapter labels, sound effects, a subscribe animation and audio normalized
+  to -14 LUFS (--progress-bar adds a progress bar). The plan is saved as edit-plan.json; edit it
   and pass it back with --edit-plan to re-render with your changes.
 
   Explainer scenes interrupt the footage to make one idea obvious: the host
@@ -348,7 +348,9 @@ for the YouTube description, and edit-plan.json.
     )
     edit_group.add_argument("--accent", type=_accent, default=None, help="accent colour, e.g. #FF4F5E")
     edit_group.add_argument("--edit-plan", default="", help="reuse an edited edit-plan.json")
-    edit_group.add_argument("--no-progress-bar", action="store_true", help="hide the progress bar")
+    edit_group.add_argument(
+        "--progress-bar", action="store_true", help="show a progress bar along the bottom edge"
+    )
     edit_group.add_argument("--no-sfx", action="store_true", help="no sound effects")
     edit_group.add_argument(
         "--voice-style",
@@ -576,7 +578,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             beats=args.beats,
             subscribe=args.subscribe,
             accent=args.accent or EditOptions.accent,
-            progress_bar=not args.no_progress_bar,
+            progress_bar=args.progress_bar,
             sound_effects=not args.no_sfx,
             plan_file=os.path.abspath(args.edit_plan) if args.edit_plan else "",
             language=params.video_language or "",

@@ -44,6 +44,20 @@ CUE_SPACING = 0.6
 REACTION_HOLD = 2.6
 POINT_HOLD = 2.0
 REACTION_STAY = 3.6  # how long a drop-in visit lasts after the reaction
+IDLE_SECONDS = 3.2  # a calm host still changes its face about this often
+# Faces the host moves between while it talks, by the mood of the segment.
+IDLE_PALETTES = (
+    ("explicando", "neutral", "feliz", "pensando"),
+    ("feliz", "explicando", "emocionado", "neutral"),
+    ("emocionado", "feliz", "explicando", "sorprendido"),
+    ("riendo", "feliz", "explicando"),
+    ("sorprendido", "explicando", "pensando", "emocionado"),
+    ("sin_palabras", "sorprendido", "pensando"),
+    ("pensando", "explicando", "neutral", "sorprendido"),
+    ("preocupado", "pensando", "explicando"),
+    ("triste", "preocupado", "pensando"),
+    ("neutral", "explicando", "feliz", "pensando"),
+)
 
 
 @dataclass
@@ -72,6 +86,8 @@ class SegmentInfo:
     pictures: List[float] = field(default_factory=list)
     pauses: List[float] = field(default_factory=list)
     mode: str = ""
+    # Moments the host must leave the stage (pictures spread across the screen).
+    blocked: List[Tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -174,6 +190,23 @@ def _normalize_windows(windows: List[List[float]], duration: float) -> List[List
     return [w for w in merged if w[1] - w[0] >= MIN_WINDOW or (w[0] == 0.0 and w[1] == duration)]
 
 
+def _subtract(windows: List[List[float]], blocked: Sequence[Tuple[float, float]]) -> List[List[float]]:
+    """Cut the blocked moments out of the visits (leaving in time to exit first)."""
+    for start, end in blocked:
+        cut_from, cut_to = start - EXIT_SECONDS - 0.1, end + 0.2
+        pieces = []
+        for a, b in windows:
+            if b <= cut_from or a >= cut_to:
+                pieces.append([a, b])
+                continue
+            if cut_from - a >= MIN_WINDOW:
+                pieces.append([a, cut_from])
+            if b - cut_to >= MIN_WINDOW:
+                pieces.append([cut_to, b])
+        windows = pieces
+    return windows
+
+
 def _cues_for(
     info: SegmentInfo,
     windows: List[List[float]],
@@ -181,6 +214,7 @@ def _cues_for(
     base: str,
     wave: str,
     point: str,
+    names: Sequence[str] = (),
 ) -> List[HostCue]:
     duration = info.duration
     cues: List[HostCue] = []
@@ -220,8 +254,48 @@ def _cues_for(
             if expression == last.expression or time - last.time < CUE_SPACING or time >= end - 0.3:
                 continue
             window_cues.append(HostCue(time, expression, True))
-        cues += window_cues
+        cues += _idle_changes(window_cues, end, base, names, info.pauses, (wave, point))
     return cues
+
+
+def idle_palette(base: str, names: Sequence[str], excluded: Sequence[str] = ()) -> List[str]:
+    """The faces a host with ``base`` mood cycles through while it talks."""
+    available = [n for n in names if n not in excluded]
+    palette = next((p for p in IDLE_PALETTES if p[0] == base), None)
+    if palette is None:
+        palette = (base,) + IDLE_PALETTES[0]
+    return [n for n in dict.fromkeys(palette) if n in available]
+
+
+def _idle_changes(
+    window_cues: List[HostCue], end: float, base: str, names: Sequence[str], pauses: Sequence[float], excluded
+) -> List[HostCue]:
+    """Fill long stretches with a new face about every IDLE_SECONDS, on a breath when possible."""
+    palette = idle_palette(base, names, [n for n in excluded if n])
+    if len(palette) < 2:
+        return window_cues
+    out: List[HostCue] = []
+    turn = 0
+    for position, cue in enumerate(window_cues):
+        out.append(cue)
+        until = window_cues[position + 1].time if position + 1 < len(window_cues) else end - 1.2
+        # Reactions, waves and pointing keep their face until they end.
+        if cue.expression not in palette:
+            continue
+        current, time = cue.expression, cue.time
+        while True:
+            target = time + IDLE_SECONDS
+            when = _snap(pauses, target, target - 0.8, target + 0.8)
+            if when > until - 1.2:
+                break
+            turn += 1
+            following = palette[turn % len(palette)]
+            if following == current:
+                turn += 1
+                following = palette[turn % len(palette)]
+            out.append(HostCue(when, following, True))
+            current, time = following, when
+    return out
 
 
 def plan_host(
@@ -248,8 +322,8 @@ def plan_host(
         if info.duration < 5.0 and mode in ("lead", "lead+react"):
             mode = "full"
         raw, events = _windows_for(info, mode, base, point)
-        windows = _normalize_windows(raw, info.duration)
-        cues = _cues_for(info, windows, events, base, wave, point)
+        windows = _subtract(_normalize_windows(raw, info.duration), info.blocked)
+        cues = _cues_for(info, windows, events, base, wave, point, names)
         planned.append(
             HostSegment(mode, [HostWindow(a, b) for a, b in windows], cues)
         )
