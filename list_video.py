@@ -379,7 +379,10 @@ for the YouTube description, and edit-plan.json.
     edit_group.add_argument(
         "--voice-style",
         default=None,
-        help='delivery instructions for Gemini voices, e.g. "Narra con entusiasmo y curiosidad"',
+        help=(
+            "delivery for Gemini voices: a preset (divulgador, entusiasta, profe, calmado, narrador) "
+            'or your own directions, e.g. "Narra con entusiasmo y curiosidad"'
+        ),
     )
     edit_group.add_argument(
         "--also-in",

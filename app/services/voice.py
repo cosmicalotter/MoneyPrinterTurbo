@@ -694,6 +694,10 @@ def _single_tts(
             return minimax_tts(text, voice_id, voice_rate, voice_file, voice_volume)
         logger.error(f"Invalid MiniMax voice name format: {voice_name}")
         return None
+    elif voice_name.startswith("gcloud:"):
+        from app.services import voice_google
+
+        return voice_google.gcloud_tts(text, voice_name, voice_rate, voice_file, voice_volume)
     elif is_elevenlabs_voice(voice_name):
         # 格式: elevenlabs:{voice_id}:{name}
         parts = voice_name.split(":")
@@ -1633,7 +1637,7 @@ def gemini_tts(
     Args:
         text: 要转换的文本
         voice_name: 语音名称，如 "Zephyr", "Puck" 等
-        voice_rate: 语音速率（当前未使用）
+        voice_rate: 语音速率（转换为自然语言的节奏指令）
         voice_file: 输出音频文件路径
         voice_volume: 音频音量（当前未使用）
         
@@ -1656,7 +1660,8 @@ def gemini_tts(
             logger.error(f"Gemini TTS is not configured: {exc}")
             return None
 
-        logger.info(f"start, voice name: {voice_name}, try: 1")
+        logger.info(f"start, voice name: {voice_name}")
+        from app.services import voice_google
 
         generation_config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
@@ -1670,45 +1675,35 @@ def gemini_tts(
         )
 
         # Gemini TTS follows natural-language delivery instructions placed
-        # before the text ("Say cheerfully: ..."). An optional style makes the
-        # narration sound far less robotic; without one the text is sent as is.
+        # before the text ("Say cheerfully: ..."). A style (or a preset such as
+        # "divulgador") and the voice rate become those directions.
         model = str(config.app.get("gemini_tts_model", "") or "").strip() or GEMINI_TTS_DEFAULT_MODEL
-        style = str(config.app.get("gemini_tts_style", "") or "").strip().rstrip(":")
+        style = voice_google.gemini_delivery(str(config.app.get("gemini_tts_style", "") or ""), voice_rate)
         contents = f"{style}:\n{text}" if style else text
 
-        # google-genai 使用统一 Client 调用文本和 TTS 模型。上下文管理器确保
-        # 请求结束后释放 HTTP 连接，同时保留原有 PCM 转码和字幕时间轴逻辑。
-        with genai.Client(**client_kwargs) as client:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=generation_config,
-            )
+        def request(model_name: str, prompt: str):
+            # google-genai 使用统一 Client 调用文本和 TTS 模型。上下文管理器确保
+            # 请求结束后释放 HTTP 连接。
+            with genai.Client(**client_kwargs) as client:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=generation_config,
+                )
+            if not response.candidates or not response.candidates[0].content:
+                return None
+            for part in response.candidates[0].content.parts or []:
+                if getattr(part, "inline_data", None) and part.inline_data.data:
+                    data = part.inline_data.data
+                    # 音频数据通常已经是原始字节；字符串则是 base64。
+                    return base64.b64decode(data) if isinstance(data, str) else data
+            return None
 
-        # 检查响应
-        if not response.candidates or not response.candidates[0].content:
-            logger.error("No audio content received from Gemini TTS")
+        audio_bytes = voice_google.gemini_audio(request, text, contents, model)
+        if not audio_bytes:
+            logger.error("No audio data received from Gemini TTS")
             return None
-            
-        # 获取音频数据
-        audio_data = None
-        for part in response.candidates[0].content.parts:
-            if hasattr(part, 'inline_data') and part.inline_data:
-                audio_data = part.inline_data.data
-                break
-                
-        if not audio_data:
-            logger.error("No audio data found in response")
-            return None
-            
-        # 音频数据已经是原始字节，不需要base64解码
-        if isinstance(audio_data, str):
-            # 如果是字符串，则需要base64解码
-            audio_bytes = base64.b64decode(audio_data)
-        else:
-            # 如果已经是字节，直接使用
-            audio_bytes = audio_data
-        
+
         # 尝试不同的音频格式 - Gemini可能返回不同的格式
         audio_segment = None
         

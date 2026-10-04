@@ -302,9 +302,17 @@ gemini_vertex_location = ""
 # Gemini TTS voices ("gemini:*") reuse gemini_api_key. The model defaults to
 # gemini-2.5-flash-preview-tts; gemini-2.5-pro-preview-tts sounds richer.
 gemini_tts_model = ""
-# Optional delivery instructions that make the voice sound less robotic, e.g.
-# "Narra como un divulgador científico cercano y entusiasta, con ritmo natural"
+# Optional delivery instructions that make the voice sound less robotic: a
+# preset (divulgador, entusiasta, profe, calmado, narrador) or your own text, e.g.
+# "Narra como un divulgador científico cercano y entusiasta, con ritmo natural".
+# The voice rate is added as a pace ("at a slightly brisk pace").
 gemini_tts_style = ""
+# Google Cloud Text-to-Speech voices ("gcloud:es-US-Chirp3-HD-Charon") use the
+# Application Default Credentials of Vertex AI (billed to gemini_vertex_project)
+# or this API key. Pitch in semitones works on Neural2/Studio voices, not Chirp 3 HD.
+# Compare voices with: python voice_lab.py
+gcloud_tts_api_key = ""
+gcloud_tts_pitch = 0
 # List videos: the Gemini model that checks pictures before they are shown
 # (default gemini-2.5-flash) and the model that draws scene illustrations with
 # --illustrations ai (default imagen-4.0-fast-generate-001, about US$0.02 each;
