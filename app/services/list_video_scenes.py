@@ -53,6 +53,8 @@ SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
 MIN_SCENE_SECONDS = 2.2
 MAX_SCENE_DELAY = 4.5  # a scene said under a blocked moment (an opener) may wait this long for it
+MAX_CHAIN_DELAY = 3.5  # and this long for the scene before it to leave
+DELAYED_SECONDS = 4.5  # a delayed scene keeps up to this much of its length
 ITEM_SECONDS = 1.8
 INK = (27, 27, 47)
 WHITE = (255, 255, 255)
@@ -227,6 +229,20 @@ def _scene_from(spec: dict, kind: str, start: float, end: float, items: List[Sce
     return scene
 
 
+def _delay(scene: Scene, start: float, duration: float) -> bool:
+    """Move a scene later, keeping its length; False when it no longer fits."""
+    length = min(scene.end - scene.start, DELAYED_SECONDS)
+    scene.start = start
+    if scene.exit or scene.end < duration:
+        scene.end = min(max(scene.end, start + length), duration, start + MAX_SCENE_SECONDS)
+        if duration - scene.end < 1.2:
+            scene.end, scene.exit = duration, False
+    for number, item in enumerate(scene.items):
+        item.time = max(item.time, start + SLIDE_SECONDS + 0.05 + 0.5 * number)
+    scene.items = [i for i in scene.items if i.time < scene.end - ITEM_SECONDS]
+    return scene.end - scene.start >= MIN_SCENE_SECONDS and not (scene.type in ITEM_SCENES and len(scene.items) < 2)
+
+
 def time_scenes(
     specs: List[dict],
     locate: Callable[[str], Optional[float]],
@@ -318,17 +334,16 @@ def time_scenes(
     kept: List[Scene] = []
     for scene in sorted(timed, key=lambda s: s.start):
         inside = [b for a, b in blocked if a <= scene.start < b]
-        if inside and max(inside) - scene.start <= MAX_SCENE_DELAY:
+        if inside:
             # Said while something else holds the screen (a section opener):
             # it waits for it, a little late rather than lost.
-            scene.start = max(inside) + 0.15
-            for number, item in enumerate(scene.items):
-                item.time = max(item.time, scene.start + SLIDE_SECONDS + 0.05 + 0.5 * number)
-            scene.items = [i for i in scene.items if i.time < scene.end - ITEM_SECONDS]
-            if scene.end - scene.start < MIN_SCENE_SECONDS or (scene.type in ITEM_SCENES and len(scene.items) < 2):
+            if max(inside) - scene.start > MAX_SCENE_DELAY or not _delay(scene, max(inside) + 0.15, duration):
                 continue
         if kept and scene.start < kept[-1].end + 0.6:
-            continue
+            # Right after the previous scene (two definitions in a row): it
+            # follows it if that is only a moment late.
+            if kept[-1].end + 0.6 - scene.start > MAX_CHAIN_DELAY or not _delay(scene, kept[-1].end + 0.6, duration):
+                continue
         clash = [(a, b) for a, b in blocked if scene.start < b and scene.end > a]
         if clash:
             # Make room for the blocked moment rather than losing the scene.

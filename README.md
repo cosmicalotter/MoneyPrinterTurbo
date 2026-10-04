@@ -477,8 +477,17 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 句子比较多张候选图，挑出一眼就能看懂的那张（排除复杂示意图、拼图、水印和其他语言
 的文字）；都不合格时改用 emoji 图标，`--no-picture-check` 则直接使用第一张结果。
 只有浅色纯色背景且能完整抠出的图片才会做成贴纸，照片显示为带白边的卡片。
-**讲解场景**大约每个条目替换一次素材，以极简手绘风格在纸张纹理的频道配色画布上讲清
-一个要点，共 15 种并会轮换使用：`statement`、`question`、`figure`（全屏显示真实的
+**科学而易懂：**脚本会定义每个术语、解释原理与原因、给出单位（“电压以伏特计”）和带
+示例的简单定律（欧姆定律），剪辑规划优先使用解释性图片（电子在导线中流动、电荷相斥、
+心脏传导系统），并通过一次简短的 LLM 补充，为只剩背景素材的句子补上图片。
+**章节开场：**每个条目开头约 3 秒显示编号、标题和一张严格对应标题的图片（Gemini 确认
+的网络图片，其次是 Imagen 绘图，最后是图标；`--no-openers` 关闭）。场景占满画面时，
+章节标签会滑出，场景标题不再被遮挡。
+**讲解场景**大约每个条目替换一到两次素材，以极简手绘风格在纸张纹理的频道配色画布上讲清
+一个要点，共 20 种并会轮换使用：`definition`（术语、符号、含义和单位）、`equation`
+（大字公式如 `V = I × R`，逐个解释符号并给出算例）、`annotate`（真实结构图，标签指向
+Gemini 找到的各个部位）、`chain`（真实事物从左到右，箭头上写着动作）、`branch`（一个
+原因分出多个结果）、`statement`、`question`、`figure`（全屏显示真实的
 示意图或照片，停留时长由 Gemini 判断）、`zoom`、`stat`、`grid`（“10 个里有 7 个”）、
 `gauge`、`bars`、`sequence`（红叉/绿勾）、`compare`、`steps`（或循环）、`timeline`、
 `formula`、`diagram` 和 `story`（主持人参与的 2–4 帧小动画）。元素使用经 Gemini 审核
@@ -503,8 +512,16 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 （`--also-in en-US,pt-BR`），按语言设置的参数写作 `LANG=VALUE`，例如
 `--also-voice pt-BR=pt-BR-AntonioNeural-Male`。配合 `--script-only` 时，各译稿保存为
 `<名称>.<LANG>.json` 供审阅，之后可通过 `--also-script` 传回。
-如需更自然的配音，可选用 Gemini 音色并通过 `--voice-style` 或 `config.toml` 中的
-`gemini_tts_style` 描述语气。
+音效默认为原音量的 65 %（`--sfx-volume`），主持人默认较少出场（`--host-presence low`）。
+配音除 ElevenLabs 外，还可使用与 Gemini 相同凭据的两种更便宜且自然的方案：Gemini TTS
+（如 `gemini:Puck-Upbeat`，支持 `--voice-style divulgador` 等预设和语速，失败自动重试并
+切换模型）以及 Google Cloud TTS Chirp 3 HD（如 `gcloud:es-US-Chirp3-HD-Charon`）。
+`uv run python voice_lab.py` 用同一段文字生成多种音色以便比较。
+
+**Cabeceando Studio 桌面应用：**`./studio.sh` 在浏览器中打开本地应用，涵盖项目、脚本
+（LLM 撰写与编辑）、配音（预设、试听、音色实验室）、风格与剪辑选项、后台渲染与进度、
+成片与 YouTube 简介、剪辑规划编辑、频道调研和设置检查。适用于 Fedora、CachyOS 等 Linux，
+`./studio.sh --install` 会把它加入应用菜单。
 
 ## 配音、字幕与配乐 🎙️
 

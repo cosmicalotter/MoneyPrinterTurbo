@@ -501,9 +501,30 @@ text in another language); when none passes, the beat's emoji icon is used.
 `--no-picture-check` keeps the first result. Only pictures on a light, flat background
 that come off as one clean shape are cut out as stickers; photos become framed cards.
 
-**Explainer scenes** replace the footage about once per item to make one idea obvious,
-in a minimalist hand-drawn style on a paper canvas in the channel colour. There are 15
-styles, and the director is asked to vary them: `statement` (the host with a
+**Scientific but easy:** the script writer is asked to define each technical term,
+explain how and why things happen, give units ("voltage is measured in volts") and
+simple laws with a worked example ("Ohm's law: voltage equals current times
+resistance"), and name real structures precisely so they can be shown. The director
+then prefers explanatory pictures (electrons flowing through a wire, charges
+repelling, the heart's conduction system), and a short second LLM pass gives a
+picture to every sentence that was left with only footage (`fill_gaps`).
+
+**Section openers:** each item opens for about three seconds with a card holding its
+number, its title and one picture strictly about that title: web pictures Gemini
+confirms are about the title, else an Imagen drawing of it, else the plan's icon
+(`--no-openers` turns them off). Pictures and scenes said under the opener wait for it,
+and the chapter label slides away while any scene fills the screen, so scene titles are
+never hidden behind it.
+
+**Explainer scenes** replace the footage about once or twice per item to make one idea
+obvious, in a minimalist hand-drawn style on a paper canvas in the channel colour. There
+are 20 styles, and the director is asked to vary them: `definition` (a term, its symbol,
+what it means and its unit), `equation` (a formula such as `V = I × R` written big, each
+symbol explained underneath as it is named, plus a worked example), `annotate` (a real
+diagram or photo of a structure with labels pointing at its parts; Gemini finds where
+each part is), `chain` (real things left to right joined by arrows that say what each
+does to the next: turbine -spins-> magnets -push-> electrons -reach-> your home),
+`branch` (one cause fanning out to its effects), `statement` (the host with a
 punchline), `question`, `figure` (a real diagram, chart or photo full screen, searched
 in English and in the narration language, shown as long as Gemini says it takes to
 read), `zoom` (one thing while the camera pushes in), `stat` (a pie that fills or a
@@ -517,7 +538,8 @@ US$0.02 each, cached; story frames are drawn from each other by a Gemini image m
 they match). `--scene-color` picks the canvas (default: a light tint of `--accent`;
 statements and questions use the accent itself) and `--no-scenes` turns them off.
 
-The host is not on screen all the time (`--host auto`): it pops up from the bottom
+The host is not on screen all the time (`--host auto`, and `--host-presence low` by
+default; `normal` or `high` show it more): it pops up from the bottom
 edge to introduce some items, drops in to react to a surprising line, points at the
 pictures as they appear, waves in the intro and outro, and leaves the stage to the
 footage the rest of the time. Its poses are still pictures; it changes its face about
@@ -554,9 +576,43 @@ default: a free Edge voice for that language). Several languages work in one run
 example `--also-voice pt-BR=pt-BR-AntonioNeural-Male`. With `--script-only` each
 translation is saved next to the script as `<name>.<LANG>.json` for review and can be
 passed back with `--also-script`.
-For a more natural voice, use a Gemini voice (for example `gemini:Charon-Informative`)
-with `--voice-style "Narrate like an enthusiastic science YouTuber"`, or set
-`gemini_tts_model` / `gemini_tts_style` in `config.toml`.
+Sound effects play at 65 % of their original loudness (`--sfx-volume 0` to `2`,
+`--no-sfx` removes them).
+
+**Voices.** Besides ElevenLabs (`elevenlabs:<voice id>`), two cheaper and very natural
+options use the same Google credentials as Gemini:
+
+- Gemini TTS (`gemini:Puck-Upbeat`, `gemini:Charon-Informative`, ...), about US$0.015
+  per minute with the Flash model. It follows delivery directions:
+  `--voice-style divulgador` (or `entusiasta`, `profe`, `calmado`, `narrador`, or your
+  own text) and `--voice-rate`, which becomes a pace. Requests are retried, a missing
+  model falls back to another TTS model and audio that comes back cut short is
+  requested again.
+- Google Cloud Text-to-Speech, Chirp 3 HD (`gcloud:es-US-Chirp3-HD-Charon`), about
+  US$0.03 per minute with a monthly free tier; it uses Application Default Credentials
+  (billed to `gemini_vertex_project`) or `gcloud_tts_api_key`.
+
+`uv run python voice_lab.py` narrates the same text with a shortlist of young male
+Spanish voices (or `--voices a,b,c`, `--style`, `--rate`) into `storage/voice-lab/` so
+they can be compared.
+
+#### Cabeceando Studio (desktop app) 🖥️
+
+`./studio.sh` opens a local app in the browser with the whole workflow: projects, a
+script page (write with the LLM, edit sections, word count and duration), a voice page
+(providers, presets, speed, a test button and a voice lab with prices), style and
+editing options (format, colours, host, scenes, openers, pictures, sound, subtitles,
+other languages), renders that run in the background with live progress and readable
+errors, results with the video and a ready-to-paste YouTube description (chapters and
+credits), the edit plan editor, channel research and settings (`config.toml`) with
+system checks. It works on any Linux, Fedora and CachyOS included:
+
+```shell
+sudo dnf install ffmpeg            # Fedora   (CachyOS: sudo pacman -S ffmpeg)
+uv sync --frozen
+./studio.sh                        # http://127.0.0.1:8600
+./studio.sh --install              # adds "Cabeceando Studio" to the applications menu
+```
 
 #### ⑥ Research Similar Channels 🔎
 

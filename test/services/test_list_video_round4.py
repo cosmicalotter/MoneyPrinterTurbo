@@ -166,6 +166,21 @@ class TestOpenerTiming(unittest.TestCase):
         # Too long a wait drops it.
         self.assertEqual(scenes.time_scenes(specs, locate, [], 20.0, blocked=[(0.0, 9.5)]), [])
 
+    def test_delayed_scenes_keep_their_length_and_can_follow_each_other(self):
+        times = {"voltaje": 1.4, "corriente": 7.4}
+        specs = [
+            {"type": "definition", "at": "voltaje", "term": "voltaje", "text": "el empuje"},
+            {"type": "definition", "at": "corriente", "term": "corriente", "text": "el flujo"},
+        ]
+        for pauses in ([], [4.0, 7.2, 12.0, 17.5]):
+            first, second = scenes.time_scenes(specs, times.get, pauses, 25.0, blocked=[(0.0, 3.75)])
+            self.assertAlmostEqual(first.start, 3.9)
+            self.assertGreaterEqual(first.end - first.start, scenes.DELAYED_SECONDS - 1e-6)
+            self.assertAlmostEqual(second.start, first.end + 0.6)
+        # A scene that would wait too long for the previous one is dropped.
+        times["corriente"] = 2.0
+        self.assertEqual(len(scenes.time_scenes(specs, times.get, [], 25.0)), 1)
+
     def test_opener_drawing(self):
         with tempfile.TemporaryDirectory() as folder:
             theme = fx.Theme(640, 360, FONT, (255, 79, 94))
