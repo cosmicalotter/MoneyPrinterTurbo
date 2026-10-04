@@ -279,8 +279,8 @@ class TestScenePlan(unittest.TestCase):
         ], "beats": [{"type": "image", "at": "q", "query": "tired man", "icon": "🥱"}]}]}
         plan = llm.normalize_edit_plan(data, 1, ["feliz"])[0]
         types = [s["type"] for s in plan["scenes"]]
-        self.assertEqual(types, ["statement", "stat", "stat"])  # at most three per segment
-        statement, pie, number = plan["scenes"]
+        self.assertEqual(types, ["statement", "stat", "stat", "sequence"])  # at most four per segment
+        statement, pie, number, _ = plan["scenes"]
         self.assertEqual(len(statement["text"]), llm.MAX_STATEMENT_LENGTH)
         self.assertEqual(statement["expression"], "feliz")
         self.assertEqual((pie["value"], pie["chart"]), (70, "pie"))

@@ -998,10 +998,18 @@ exactly {item_count} items, one at a time, each shown with its own picture.
 4. "intro": a hook of at most 60 words; do not greet the viewer or say "welcome".
 5. "items": exactly {item_count} objects, ordered to keep curiosity high, with the most surprising item last.
 6. each item "name": at most 5 words.
-7. each item "text": about {words_per_item} words of natural spoken narration, like a friendly science YouTuber talking to a curious friend: start by saying the item name, use short sentences, an everyday comparison or a rhetorical question, one surprising fact and why it matters; no lists, no markdown, no emojis, no textbook tone.
+7. each item "text": about {words_per_item} words of natural spoken narration, like a friendly science YouTuber who is also a careful teacher talking to a curious friend: scientific but easy to follow.
+   - start by saying the item name;
+   - define each technical term in one plain sentence the first time it appears ("voltage is the push that moves the electrons");
+   - explain the mechanism: HOW it works and WHY it happens, step by step, with cause and effect ("because...", "that is why...");
+   - when a quantity appears, say its unit and what it measures ("voltage is measured in volts, current in amperes");
+   - when a simple law or formula applies, say it in words with its name ("Ohm's law: voltage equals current times resistance") and a tiny worked example with everyday numbers;
+   - name the real structures, organs, devices and processes precisely (e.g. "the sinoatrial node, the heart's natural pacemaker"), so they can be shown on screen;
+   - add one everyday comparison and one surprising, verifiable fact;
+   - short sentences, no lists, no markdown, no emojis, no textbook tone.
 8. each "image_term" (including intro_image_term and outro_image_term): 3 to 8 English words describing one concrete, drawable picture, with no text in the picture.
 9. "outro": at most 40 words, closing the video with a question that invites comments.
-10. use only accurate, verifiable facts; for health topics never give treatment instructions or dosages.
+10. use only accurate, verifiable facts with correct scientific terminology and real numbers with their units; never invent figures; for health topics never give treatment instructions or dosages.
 
 ## Output Example:
 {json.dumps(example, ensure_ascii=False)}
@@ -1193,12 +1201,13 @@ EDIT_HOST_MODES = ("full", "lead", "react", "lead+react", "off")
 EDIT_SCENE_TYPES = (
     "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
     "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
+    "definition", "equation", "annotate", "chain", "branch",
 )
 EDIT_SCENE_MARKS = ("cross", "check")
-MAX_EDIT_BEATS_PER_SEGMENT = 6
+MAX_EDIT_BEATS_PER_SEGMENT = 8
 MAX_EDIT_REACTIONS_PER_SEGMENT = 2
 MAX_EDIT_BACKGROUNDS_PER_SEGMENT = 8
-MAX_EDIT_SCENES_PER_SEGMENT = 3
+MAX_EDIT_SCENES_PER_SEGMENT = 4
 MAX_EDIT_TEXT_LENGTH = 40
 MAX_SCENE_LABEL_LENGTH = 32
 MAX_STATEMENT_LENGTH = 48
@@ -1216,7 +1225,16 @@ def _edit_plan_example(expressions: list) -> dict:
                     {"at": "the fluid around your brain", "query": "water flowing slow motion"},
                     {"at": "one night without sleep", "query": "tired man at desk night"},
                 ],
+                "opener": {
+                    "query": "glymphatic system brain illustration", "query_local": "sistema glinfático cerebro",
+                    "look": "diagram", "icon": "🧠", "draw": "a brain being washed by a gentle stream of water",
+                },
                 "scenes": [
+                    {
+                        "type": "definition", "at": "the glymphatic system", "term": "glymphatic system",
+                        "text": "the brain's night-time cleaning network", "symbol": "", "unit": "",
+                        "icon": "🧠", "query": "glymphatic system illustration", "draw": "a brain with tiny water channels",
+                    },
                     {
                         "type": "sequence",
                         "items": [
@@ -1225,6 +1243,14 @@ def _edit_plan_example(expressions: list) -> dict:
                         ],
                     },
                     {"type": "figure", "at": "this is how it flows", "query": "glymphatic system diagram", "query_local": "", "look": "diagram", "seconds": 7, "label": ""},
+                    {
+                        "type": "chain",
+                        "items": [
+                            {"at": "the fluid enters", "label": "fluid", "icon": "💧", "query": "cerebrospinal fluid illustration", "draw": "a drop of clear fluid", "link": "washes"},
+                            {"at": "around the neurons", "label": "neurons", "icon": "🧠", "query": "neurons illustration", "draw": "a few neurons", "link": "drains"},
+                            {"at": "into the veins", "label": "veins", "icon": "🩸", "query": "veins illustration", "draw": "a blue vein"},
+                        ],
+                    },
                 ],
                 "beats": [
                     {"type": "image", "at": "you wake up tired", "query": "tired man yawning in bed", "look": "photo", "icon": "🥱"},
@@ -1276,7 +1302,8 @@ def build_edit_plan_prompt(
 ## Reference plan:
 The same video was already edited in another language. Reuse its visual plan so both versions
 look the same: keep, segment by segment and in the same order, the same backgrounds queries,
-scene types, icons, "draw" descriptions, values, units, marks, picture queries and expressions.
+scene types, openers, icons, "draw" descriptions, formulas, symbols, values, units, marks,
+picture queries and expressions.
 Only translate the labels and texts into {language_name} and choose new "at" anchors copied
 from this version's text. Drop an element only when its idea is missing from this version.
 {json.dumps(reference, ensure_ascii=False)}
@@ -1287,20 +1314,27 @@ from this version's text. Drop an element only when its idea is missing from thi
 ## Goal:
 Plan what appears on screen while each segment below is narrated, so the video feels
 hand-edited, clear and never monotonous: footage that follows the narration, minimalist
-explainer scenes that make an idea obvious at a glance, a host character that reacts,
-simple pictures of the things being mentioned and key facts as short text.
+explainer scenes that make an idea obvious at a glance (definitions, formulas, labelled
+real pictures, processes), a host character that reacts, real and explanatory pictures of
+the things being explained and key facts as short text. The channel is scientific but easy
+to follow: show the real thing, its parts, how it works and why.
 
 ## Constrains:
-1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index", "expression", "backgrounds", "scenes" and "beats"; no markdown, no code fences.
+1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index", "expression", "backgrounds", "scenes" and "beats" (and "opener" for items); no markdown, no code fences.
 2. {expression_rule}.
 3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text; the element appears when those words are spoken.
 4. "backgrounds": stock footage behind the narration, one entry about every 15 to 20 words (a new shot every 6 to 8 seconds), the first one on the segment's first words; each is {{"at": ..., "query": ...}} where "query" is an English stock video search of 2 to 4 words describing a concrete scene a camera can film (people, places, objects, animals, nature, close-ups), never text, logos, charts or abstract ideas, and different from the other queries of the video.
-5. "beats" (what pops in over the footage; the main resource, 2 to 5 per item, 0 to 2 for intro and outro, never during a scene):
-- image beat: {{"type": "image", "at": ..., "query": ..., "look": ..., "icon": ...}}: ONE picture of exactly what is being said, shown big in the centre (e.g. "resistance is anything that slows the current down" -> "car braking illustration"). "query" is an English search of 2 to 5 words for the SIMPLEST picture that literally shows those words to a 12-year-old (e.g. "tired man after workout", never "muscle fiber microscopy"); never a labelled scientific diagram unless the narration explains that exact structure; "look" is "photo" for real-life scenes and "diagram" for drawings, clip art, anatomy or maps; "icon" is an emoji used if no good picture exists.
+5. "beats" (pictures that pop in over the footage; the main resource: 3 to 6 per item, 0 to 2 for intro and outro, never during a scene). Footage alone is the last resort: every sentence that names a concrete thing, a structure, a quantity, a unit or a mechanism gets a beat or a scene, so something explanatory is on screen at least every 6 to 8 seconds:
+- image beat: {{"type": "image", "at": ..., "query": ..., "look": ..., "icon": ...}}: ONE picture of exactly what is being said, shown big in the centre. When the narration explains HOW something works or WHAT it is made of, search for an explanatory picture of exactly that (look "diagram"): "electrons flowing through a wire diagram", "like charges repel diagram", "heart electrical conduction system illustration"; for everyday things the SIMPLEST picture a 12-year-old gets at once (look "photo"): "tired man after workout", "car braking", never a dense textbook figure. "query" is an English search of 2 to 6 words; "icon" is an emoji used if no good picture exists.
 - images beat: {{"type": "images", "items": [2 to 4 image items, each with its own "at", "query", "look", "icon"]}}: several things named one after the other, shown side by side (left/right, or left/centre/right) as each is named.
-- text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number, a key term or a surprising fact stated in the narration; at most one per segment.
+- text beat: {{"type": "text", "at": ..., "text": ...}} where "text" has at most 5 words in {language_name}: a number with its unit, a key term or a surprising fact stated in the narration; at most one per segment.
 {react_rule}
-6. "scenes": full-screen explainer moments that replace the footage to make one idea crystal clear; about one per item (two for long items, 0 or 1 for intro and outro), never two in a row on consecutive sentences, and use MANY different types across the video (never the same type twice in a row; a statement at most every third item). Types:
+6. "scenes": full-screen explainer moments that replace the footage to make one idea crystal clear; one or two per item (0 or 1 for intro and outro), never two in a row on consecutive sentences, and use MANY different types across the video (never the same type twice in a row; a statement at most every third item). Prefer the scientific ones whenever the narration allows: "definition" when a technical term is defined, "equation" when a formula or law is stated, "annotate" when the parts of a structure are named, "chain" or "steps" when a process is explained. Types:
+- {{"type": "definition", "at": ..., "term": ..., "text": ..., "symbol": ..., "unit": ..., "icon": ..., "query": ..., "draw": ...}}: a glossary card when the narration defines a technical term: "term" at most 3 words; "text" the definition in at most 12 words in {language_name}, simplified from the narration; "symbol" its letter if it has one ("V", "I", "R", else ""); "unit" how it is measured when the narration says so ("se mide en voltios (V)", else ""); "icon", "query" and "draw" for a picture of it.
+- {{"type": "equation", "at": ..., "name": ..., "formula": ..., "terms": [{{"symbol": ..., "label": ..., "unit": ..., "at": ...}}], "example": ...}}: a formula or law the narration states, written big with each symbol explained underneath: "name" e.g. "Ley de Ohm"; "formula" with single-letter symbols and spaces, e.g. "V = I × R" (operators =, +, −, ×, /); "terms" one per symbol with "label" (at most 2 words), "unit" (e.g. "voltios (V)") and an optional "at" where the narration explains it; "example" an optional worked example with numbers stated in the narration, e.g. "12 V = 2 A × 6 Ω".
+- {{"type": "annotate", "at": ..., "query": ..., "query_local": ..., "look": "diagram" or "photo", "labels": [{{"label": ..., "at": ...}}]}}: a real picture of a structure (an organ, a machine, a cell, a circuit) with 2 to 5 labels pointing at the parts the narration names, e.g. the heart's conduction system with "nodo sinusal", "nodo AV", "haz de His"; "query" in English for that structure ("heart electrical conduction system diagram"), "query_local" the same in {language_name}; each label at most 3 words in {language_name} with an optional "at" where it is named.
+- {{"type": "chain", "items": [2 to 4 items, each with "link"]}}: a process told as real things left to right joined by arrows, each arrow labelled with what that thing does to the next ("link": a verb of 1 or 2 words in {language_name}, e.g. "la turbina" -gira-> "los imanes" -empujan-> "los electrones" -llegan-> "tu casa"); give each item a "query" for a real picture.
+- {{"type": "branch", "center": item, "items": [2 to 4 items]}}: one cause on the left and the effects it leads to fanning out on the right (the current -> light, heat, motion).
 {statement_rule}
 - {{"type": "question", "at": ..., "text": ..., "expression": ...}}: a big question the narration asks, with the host thinking.
 - {{"type": "figure", "at": ..., "query": ..., "query_local": ..., "look": ..., "seconds": ..., "label": ...}}: a real picture filling the screen: an explanatory diagram, chart or infographic (look "diagram", e.g. "voltage current resistance diagram") or a striking photo (look "photo"); "query" in English, "query_local" the same search in {language_name} (it finds diagrams labelled in that language); "seconds" 3 to 4 for a photo, 6 to 8 for a diagram with text to read; "label" an optional caption of at most 6 words.
@@ -1313,10 +1347,11 @@ simple pictures of the things being mentioned and key facts as short text.
 - {{"type": "compare", "items": [left, right]}}: two contrasting situations side by side (before/after, with/without, see it/lose it).
 - {{"type": "steps", "cycle": false, "items": [2 to 5 items]}}: a process in order with numbered arrows; "cycle": true when it loops back (like the water cycle).
 - {{"type": "timeline", "items": [2 to 5 items with "date"]}}: events in time on a line.
-- {{"type": "formula", "operator": "+", "items": [2 to 3 items], "result": item}}: ingredients that combine into a result ("heat + oxygen + fuel = fire"); operator "+", "×", "−" or "→".
+- {{"type": "formula", "operator": "+", "items": [2 to 3 items], "result": item}}: ingredients that combine into a result ("heat + oxygen + fuel = fire"); operator "+", "×", "−" or "→". For a real physics or chemistry formula use "equation" instead.
 - {{"type": "diagram", "center": item, "items": [3 to 5 items]}}: several factors or parts that lead to one central idea; an arrow is drawn from each item to the centre as it is named.
 - {{"type": "story", "items": [2 to 4 frames, each an item with "expression"]}}: a tiny flipbook where the host does something and something happens (plug in -> current flows -> the bulb lights up); each frame's "label" is a short caption.
-   An item is {{"at": ..., "label": ..., "icon": ..., "query": ..., "draw": ...}} (plus "mark", "value", "date" or "expression" where a type asks for them): "label" has at most 3 words in {language_name}; "icon" is ONE emoji that depicts the thing literally (when no emoji fits, 1 or 2 English words such as "kidney" or "stomach"); "query" is an optional English search of 2 to 4 words for a real picture of a concrete thing (leave it empty for abstract ideas, where the emoji is clearer); "draw" is an English description of 5 to 12 words of a simple illustration of that thing.
+   An item is {{"at": ..., "label": ..., "icon": ..., "query": ..., "draw": ...}} (plus "mark", "value", "date", "link" or "expression" where a type asks for them): "label" has at most 3 words in {language_name}; "icon" is ONE emoji that depicts the thing literally (when no emoji fits, 1 or 2 English words such as "kidney" or "stomach"); "query" is an English search of 2 to 4 words for a real picture of a concrete thing (real pictures are preferred: give one for every concrete thing, organ, device or place; leave it empty only for abstract ideas, where the emoji is clearer); "draw" is an English description of 5 to 12 words of a simple illustration of that thing.
+6b. "opener" (items only): the picture shown for 3 seconds beside the item's number and title when the item starts: {{"query": ..., "query_local": ..., "look": ..., "icon": ..., "draw": ...}} strictly about the item TITLE (not about a detail of its text): "query" an English search for the single most representative picture of that title (e.g. title "Voltaje y corriente" -> "voltage and current circuit diagram"), "query_local" the same in {language_name}, "draw" an English description of a simple illustration of the title. The first sentence of every item is said during the opener, so put no beat or scene on it.
 7. never add facts that the narration does not state.
 {reference_rule}
 ## Output Example:
@@ -1373,6 +1408,9 @@ def _scene_item(data, needs_anchor: bool = True, lookup: Optional[dict] = None) 
     date = str(data.get("date") or "").strip()[:14]
     if date:
         item["date"] = date
+    link = str(data.get("link") or "").strip()[:24]
+    if link:
+        item["link"] = link
     if lookup is not None:
         expression = lookup.get(str(data.get("expression") or "").strip().lower(), "")
         if expression:
@@ -1383,7 +1421,13 @@ def _scene_item(data, needs_anchor: bool = True, lookup: Optional[dict] = None) 
 _ITEM_LIMITS = {
     "sequence": (2, 4), "compare": (2, 2), "diagram": (2, 5), "story": (2, 4),
     "steps": (2, 5), "bars": (2, 5), "timeline": (2, 5), "formula": (2, 3),
+    "chain": (2, 4), "branch": (2, 4),
 }
+MAX_FORMULA_LENGTH = 40
+
+
+def _text(data: dict, key: str, limit: int) -> str:
+    return " ".join(str(data.get(key) or "").split())[:limit]
 
 
 def _normalize_scene(entry: dict, lookup: dict) -> Optional[dict]:
@@ -1424,6 +1468,45 @@ def _normalize_scene(entry: dict, lookup: dict) -> Optional[dict]:
             return None
         item.update(type=kind, direction="out" if entry.get("direction") == "out" else "in")
         return item
+    if kind == "definition":
+        term = _text(entry, "term", MAX_SCENE_LABEL_LENGTH) or label
+        text = _text(entry, "text", 90)
+        if not anchor or not term or not text:
+            return None
+        return {
+            "type": kind, "at": anchor, "term": term, "text": text, "symbol": _text(entry, "symbol", 4),
+            "unit": _text(entry, "unit", 40), "icon": icon, "query": _text(entry, "query", 80), "draw": _text(entry, "draw", 160),
+        }
+    if kind == "equation":
+        formula = _text(entry, "formula", MAX_FORMULA_LENGTH)
+        if not anchor or not formula:
+            return None
+        terms = []
+        for data in entry.get("terms") or []:
+            if not isinstance(data, dict):
+                continue
+            symbol = _text(data, "symbol", 6)
+            if symbol and (data.get("label") or data.get("unit")):
+                terms.append({
+                    "symbol": symbol, "label": _text(data, "label", MAX_SCENE_LABEL_LENGTH),
+                    "unit": _text(data, "unit", 24), "at": _text(data, "at", 80),
+                })
+        return {
+            "type": kind, "at": anchor, "name": _text(entry, "name", 40), "formula": formula,
+            "terms": terms[:4], "example": _text(entry, "example", 48),
+        }
+    if kind == "annotate":
+        query = _text(entry, "query", 100)
+        labels = [
+            {"label": _text(data, "label", MAX_SCENE_LABEL_LENGTH), "at": _text(data, "at", 80)}
+            for data in entry.get("labels") or entry.get("items") or [] if isinstance(data, dict) and _text(data, "label", 1)
+        ]
+        if not anchor or not query or len(labels) < 2:
+            return None
+        return {
+            "type": kind, "at": anchor, "query": query, "query_local": _text(entry, "query_local", 100),
+            "look": "photo" if entry.get("look") == "photo" else "diagram", "labels": labels[:5],
+        }
     if kind == "figure":
         query = str(entry.get("query") or "").strip()[:100]
         if not anchor or not query:
@@ -1448,7 +1531,7 @@ def _normalize_scene(entry: dict, lookup: dict) -> Optional[dict]:
     if len(items) < low:
         return None
     scene = {"type": kind, "items": items[:high]}
-    if kind == "diagram":
+    if kind in ("diagram", "branch"):
         center = _scene_item(entry.get("center"), needs_anchor=False)
         scene["center"] = center or {"at": "", "label": "", "icon": "", "draw": ""}
     elif kind == "steps":
@@ -1580,6 +1663,57 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
         by_index.get(index, {"index": index, "expression": "", "backgrounds": [], "scenes": [], "beats": []})
         for index in range(segment_count)
     ]
+
+
+def build_gap_beats_prompt(gaps: list, language: str = "") -> str:
+    language_name = language or "the language of the narration"
+    return f"""
+# Role: Picture editor for an educational YouTube channel
+
+## Goal:
+These sentences of the narration ({language_name}) are still covered only by stock footage.
+Give each one a picture that makes it clearer: the real thing being named, or an explanatory
+diagram of exactly the mechanism or structure being explained.
+
+## Constrains:
+1. return only a JSON object {{"beats": [...]}} with at most one beat per sentence; no markdown.
+2. each beat is {{"index": <the sentence's index>, "at": ..., "query": ..., "look": ..., "icon": ...}}.
+3. "at" is 2 to 6 consecutive words copied exactly from that sentence: the picture appears when they are spoken.
+4. "query" is an English search of 2 to 6 words: for a mechanism or structure an explanatory picture of exactly that
+   (look "diagram", e.g. "electrons flowing through a wire diagram", "heart electrical conduction system illustration");
+   for an everyday thing the simplest picture of it (look "photo").
+5. "icon" is ONE emoji that depicts the thing, used if no good picture exists.
+6. skip a sentence (no beat) when it has nothing concrete to show.
+
+## Sentences:
+{json.dumps(gaps, ensure_ascii=False)}
+""".strip()
+
+
+def generate_gap_beats(gaps: list, language: str = "", app_config=None) -> dict:
+    """{segment index: [image beats]} for sentences left with only footage ({} when it fails)."""
+    if not gaps:
+        return {}
+    prompt = build_gap_beats_prompt(gaps, language)
+    indexes = {gap["index"] for gap in gaps}
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt) if app_config is None else _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                logger.error(f"failed to fill the edit plan gaps: {response}")
+                return {}
+            data = _parse_list_script_response(response)
+            beats = {}
+            for entry in data.get("beats") or []:
+                if not isinstance(entry, dict) or entry.get("index") not in indexes:
+                    continue
+                beat = _image_beat(entry, str(entry.get("at") or "").strip())
+                if beat:
+                    beats.setdefault(entry["index"], []).append(beat)
+            return beats
+        except Exception as e:
+            logger.warning(f"failed to parse the gap pictures: {type(e).__name__}: {e}")
+    return {}
 
 
 def generate_edit_plan(

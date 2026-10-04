@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -39,9 +40,12 @@ FPS = 30
 SCENE_TYPES = (
     "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
     "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
+    "definition", "equation", "annotate", "chain", "branch",
 )
 # Scenes whose elements are anchored one by one to the narration.
-ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "formula", "timeline")
+ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "formula", "timeline", "chain", "branch")
+# Scenes shown at one anchor whose parts follow by themselves (or at their own anchors).
+PART_SCENES = ("equation", "annotate")
 # Scenes rendered as a full-frame video clip (a slow zoom) instead of layers.
 CLIP_SCENES = ("figure", "zoom")
 SCENE_MARKS = ("cross", "check")
@@ -61,7 +65,10 @@ HAND_FONT = "PatrickHand-Regular.ttf"
 _SFX = {"pop": 0.5, "stamp": 0.8, "scribble": 0.45, "whoosh": 0.5, "tick": 0.6}
 # Seconds a scene stays after its last element, by type.
 _TAILS = {"statement": 2.6, "stat": 3.0, "bars": 3.0, "grid": 3.4, "gauge": 3.2, "zoom": 3.4,
-          "question": 2.8, "story": 2.8, "figure": 5.0}
+          "question": 2.8, "story": 2.8, "figure": 5.0, "definition": 5.2, "equation": 2.8, "annotate": 2.6,
+          "chain": 2.8, "branch": 2.8}
+PART_FIRST = {"equation": 1.2, "annotate": 1.0}  # seconds from the anchor to the first part
+PART_STEP = 0.9  # parts without their own anchor follow each other this far apart
 
 
 @dataclass
@@ -77,6 +84,10 @@ class SceneItem:
     date: str = ""
     expression: str = ""
     role: str = ""  # "result" for the last term of a formula
+    symbol: str = ""  # an equation term's letter ("V")
+    unit: str = ""  # an equation term's unit ("voltios")
+    link: str = ""  # chain: the verb written on the arrow to the next item
+    point: Optional[Tuple[float, float]] = None  # annotate: where the part is (0-1, 0-1 of the picture)
 
 
 @dataclass
@@ -104,6 +115,8 @@ class Scene:
     query_local: str = ""
     enter: bool = True  # False: already on screen when the segment starts (no slide in)
     number: int = 0  # section number of an opener
+    symbol: str = ""  # definition: the quantity's symbol
+    example: str = ""  # equation: a worked example ("12 V = 2 A × 6 Ω")
 
 
 OPENER_SECONDS = 3.2  # how long a section opener holds the screen
@@ -154,6 +167,9 @@ def _item(data: dict) -> SceneItem:
         date=str(data.get("date") or ""),
         expression=str(data.get("expression") or ""),
         role=str(data.get("role") or ""),
+        symbol=str(data.get("symbol") or ""),
+        unit=str(data.get("unit") or ""),
+        link=str(data.get("link") or ""),
     )
 
 
@@ -189,7 +205,19 @@ def _scene_from(spec: dict, kind: str, start: float, end: float, items: List[Sce
         look="photo" if spec.get("look") == "photo" else "diagram",
         query=str(spec.get("query") or ""),
         query_local=str(spec.get("query_local") or ""),
+        symbol=str(spec.get("symbol") or ""),
+        example=str(spec.get("example") or ""),
     )
+    if kind == "definition":
+        scene.center = SceneItem(
+            label=str(spec.get("term") or spec.get("label") or ""), icon=str(spec.get("icon") or ""),
+            draw=str(spec.get("draw") or ""), query=str(spec.get("query") or ""), at=str(spec.get("at") or ""),
+        )
+    elif kind == "equation":
+        scene.text = str(spec.get("formula") or spec.get("text") or "")
+        scene.center = SceneItem(label=str(spec.get("name") or spec.get("label") or ""))
+    elif kind == "annotate":
+        scene.center = SceneItem(query=scene.query, at=str(spec.get("at") or ""))
     if kind in ("stat", "grid", "gauge", "zoom", "figure"):
         item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
         scene.center = scene.center or SceneItem(
@@ -222,6 +250,18 @@ def time_scenes(
             if time is None:
                 continue
             times = [time]
+            if kind in PART_SCENES:
+                # Each part appears when it is explained, or after the previous one.
+                previous = time + PART_FIRST[kind] - PART_STEP
+                for data in spec.get("terms" if kind == "equation" else "labels") or []:
+                    if not isinstance(data, dict):
+                        continue
+                    item = _item(data)
+                    said = locate(item.at) if item.at else None
+                    item.time = max(previous + PART_STEP, said if said is not None and said < previous + 4.0 else 0.0)
+                    previous = item.time
+                    items.append(item)
+                times += [i.time for i in items]
         else:
             source = list(spec.get("items") or spec.get("frames") or [])
             if kind == "formula" and isinstance(spec.get("result"), dict):
@@ -246,7 +286,7 @@ def time_scenes(
                 continue
             times = [i.time for i in items]
 
-        start = max(0.0, min(times) - (0.3 if kind == "figure" else 0.45))
+        start = max(0.0, min(times) - (0.3 if kind in ("figure", "annotate") else 0.45))
         if start < 0.5:
             start = 0.0
         last = max(times)
@@ -260,7 +300,7 @@ def time_scenes(
         elif kind == "statement":
             end = _snap(pauses, last + 2.6, last + 1.6, last + 5.0) + 0.3
         else:
-            tail = _TAILS.get(kind, 2.4)
+            tail = _TAILS.get(kind, 2.4) + (2.4 if kind == "equation" and spec.get("example") else 0.0)
             end = _snap(pauses, last + tail, last + 1.8, last + tail + 1.4) + 0.25
         end = min(end, start + MAX_SCENE_SECONDS, duration)
         # Every element stays on screen at least ITEM_SECONDS.
@@ -1361,3 +1401,251 @@ class SceneRenderer:
             when = scene.start + 0.3
             overlays.append(self._centered(pop_frames(picture, start_scale=0.8), folder, "picture", *picture_center, when, scene))
             self._sound(sounds, when, "pop")
+
+    # -- definitions and equations ------------------------------------------------------
+
+    def _pill(self, text: str, size: int, max_width: int, color=INK, border=None) -> Image.Image:
+        """Hand-lettered text on a white rounded label (with an optional coloured edge)."""
+        label = self.text.render(text, size, max_width, color=color, max_lines=2)
+        pad = self.theme.px(16)
+        pill = Image.new("RGBA", (label.width + pad * 2, label.height + pad * 2 - pad // 2), (0, 0, 0, 0))
+        edge = self.theme.px(4) if border else 0
+        ImageDraw.Draw(pill).rounded_rectangle(
+            (0, 0, pill.width - 1, pill.height - 1), min(pill.height // 2, self.theme.px(26)),
+            fill=WHITE + (245,), outline=(border + (255,)) if border else None, width=edge,
+        )
+        pill.alpha_composite(label, ((pill.width - label.width) // 2, (pill.height - label.height) // 2))
+        return pill
+
+    def _symbol_badge(self, symbol: str, size: int, color) -> Image.Image:
+        def paint(draw: ImageDraw.ImageDraw, s: float) -> None:
+            draw.ellipse((0, 0, size * s - 1, size * s - 1), fill=color + (255,), outline=INK + (255,), width=int(size * 0.06 * s))
+
+        badge = _supersampled((size, size), paint, scale=2)
+        letter = self.text.render(symbol, int(size * 0.62), int(size * 0.8), color=WHITE, max_lines=1)
+        badge.alpha_composite(letter, ((size - letter.width) // 2, (size - letter.height) // 2))
+        return badge
+
+    def _build_definition(self, scene, folder, overlays, sounds) -> None:
+        """A glossary card: the term (and its symbol), what it means and how it is measured."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        appear = scene.start + SLIDE_SECONDS + 0.05
+        item = scene.center or SceneItem()
+        picture = None
+        if item.icon or item.query or item.draw:
+            picture = self._picture(item, int(min(H * 0.5, W * 0.32) if not theme.portrait else H * 0.28))
+        if theme.portrait:
+            column, middle, width = W / 2, H * (0.64 if picture is not None else 0.5), int(W * 0.86)
+            picture_center = (W / 2, H * 0.27)
+        elif picture is not None:
+            column, middle, width = W * 0.66, H * 0.5, int(W * 0.5)
+            picture_center = (W * 0.22, H * 0.52)
+        else:
+            column, middle, width = W / 2, H * 0.5, int(W * 0.8)
+        big = 1.0 if not theme.portrait else 0.62  # text sizes are fractions of the height
+        term = self.text.render(item.label.upper(), int(H * 0.13 * big), int(width * (0.78 if scene.symbol else 1)), color=theme.accent, max_lines=2)
+        if scene.symbol:
+            badge = self._symbol_badge(scene.symbol, int(min(term.height, H * 0.14 * big)), INK)
+            gap = theme.px(22)
+            head = Image.new("RGBA", (term.width + gap + badge.width, max(term.height, badge.height)), (0, 0, 0, 0))
+            head.alpha_composite(term, (0, (head.height - term.height) // 2))
+            head.alpha_composite(badge, (term.width + gap, (head.height - badge.height) // 2))
+        else:
+            head = term
+        meaning = self.text.render(scene.text, int(H * 0.068 * big), width, max_lines=3) if scene.text else None
+        unit = self._pill(scene.unit, int(H * 0.058 * big), int(width * 0.9), border=theme.accent) if scene.unit else None
+        gap = theme.px(26)
+        parts = [p for p in (head, meaning, unit) if p is not None]
+        top = middle - (sum(p.height for p in parts) + gap * (len(parts) - 1)) / 2
+        when = appear + 0.1
+        for name, part, frames, delay in (("term", head, pop_frames, 0.0), ("meaning", meaning, pop_frames, 0.7), ("unit", unit, stamp_frames, 1.5)):
+            if part is None:
+                continue
+            overlays.append(self._centered(frames(part), folder, name, column, top + part.height / 2, when + delay, scene))
+            self._sound(sounds, when + delay, "stamp" if name == "unit" else "pop")
+            top += part.height + gap
+        if picture is not None:
+            overlays.append(self._centered(pop_frames(picture), folder, "picture", *picture_center, appear, scene))
+
+    _TERM_COLORS = ((226, 44, 58), TEAL, (205, 128, 18), (112, 76, 196))
+
+    def _build_equation(self, scene, folder, overlays, sounds) -> None:
+        """A formula written big, each symbol explained underneath as the narration names it."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        appear = scene.start + SLIDE_SECONDS + 0.05
+        tokens = re.findall(r"[^\W_]+(?:_[^\W_]+)?|[^\w\s]", scene.text) or [scene.text or "?"]
+        palette = (theme.accent,) + self._TERM_COLORS[1:]
+        colors = {}
+        for number, term in enumerate(t for t in scene.items if t.symbol):
+            colors.setdefault(term.symbol, palette[number % len(palette)])
+        size = int(H * (0.24 if not theme.portrait else 0.12))
+        while True:
+            images = [self.text.render(t, size, W, color=colors.get(t, INK), max_lines=1) for t in tokens]
+            gap = int(size * 0.18)
+            total = sum(i.width for i in images) + gap * (len(images) - 1)
+            if total <= W * 0.86 or size < 30:
+                break
+            size = int(size * 0.88)
+        has_terms = any(t.symbol for t in scene.items)
+        formula_y = H * (0.42 if has_terms else 0.5)
+        x = (W - total) / 2
+        centers = []
+        for number, image in enumerate(images):
+            centers.append(x + image.width / 2)
+            overlays.append(self._centered(pop_frames(image, frames=7), folder, f"token{number}", centers[-1], formula_y, appear + 0.08 * number, scene))
+            x += image.width + gap
+        self._sound(sounds, appear, "pop")
+        name = scene.center.label if scene.center else ""
+        if name:
+            label = self.text.render(name.upper(), int(H * 0.075), int(W * 0.8), max_lines=1)
+            overlays.append(self._centered(pop_frames(label), folder, "name", W / 2, H * 0.13, appear + 0.2, scene))
+        formula_bottom = formula_y + max(i.height for i in images) / 2
+        used = set()
+        symbols = [i for i, t in enumerate(tokens) if t in colors]
+        spacing = min((b - a for a, b in zip([centers[i] for i in symbols], [centers[i] for i in symbols][1:])), default=W * 0.4)
+        for number, term in enumerate(scene.items[:4]):
+            index = next((i for i, t in enumerate(tokens) if t == term.symbol and i not in used), None)
+            if index is None or not (term.label or term.unit):
+                continue
+            used.add(index)
+            color = colors.get(term.symbol, INK)
+            width = int(min(W * 0.3, spacing * 0.96))
+            lines = [self.text.render(term.label.upper(), int(H * (0.068 if not theme.portrait else 0.034)), width, color=color)] if term.label else []
+            if term.unit:
+                lines.append(self.text.render(term.unit, int(H * (0.056 if not theme.portrait else 0.028)), width))
+            caption = Image.new("RGBA", (max(i.width for i in lines), sum(i.height for i in lines) + theme.px(6) * (len(lines) - 1)), (0, 0, 0, 0))
+            y = 0
+            for line in lines:
+                caption.alpha_composite(line, ((caption.width - line.width) // 2, y))
+                y += line.height + theme.px(6)
+            cx = fx.clamp(centers[index], caption.width / 2 + W * 0.02, W * 0.98 - caption.width / 2)
+            caption_y = formula_bottom + H * 0.14 + caption.height / 2
+            overlays.append(self._centered(pop_frames(caption), folder, f"term{number}", cx, caption_y, term.time, scene))
+            frames, (left, top) = arrow_frames(
+                (cx, caption_y - caption.height / 2 - theme.px(8)), (centers[index], formula_bottom + theme.px(10)), theme.px(5), frames=7, bend=0.0
+            )
+            overlays.append(self._frames(frames, folder, f"pointer{number}", left, top, term.time + 0.1, scene))
+            self._sound(sounds, term.time, "pop")
+        if scene.example:
+            when = max([t.time for t in scene.items] + [appear]) + 1.0
+            example = self._pill(scene.example, int(H * 0.065), int(W * 0.8), border=theme.accent)
+            overlays.append(self._centered(stamp_frames(example), folder, "example", W / 2, H * 0.88, when, scene))
+            self._sound(sounds, when, "stamp")
+
+    # -- annotated picture ------------------------------------------------------------------
+
+    def _build_annotate(self, scene, folder, overlays, sounds) -> None:
+        """A real picture with labels pointing at its parts as each one is explained."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        appear = scene.start + SLIDE_SECONDS * 0.6
+        image = self.picture(scene.center or SceneItem())
+        if image is None:
+            raise ValueError("the annotated picture is missing")
+        border = theme.px(12)
+        photo = image.convert("RGB").convert("RGBA")
+        labels = scene.items[:5]
+        if theme.portrait:
+            box, center = (W * 0.92, H * 0.5), (W / 2, H * 0.3)
+        else:
+            box, center = (W * (0.6 if labels else 0.86), H * 0.86), (W * (0.34 if labels else 0.5), H * 0.5)
+        photo.thumbnail((int(box[0]) - border * 2, int(box[1]) - border * 2), Image.LANCZOS)
+        card = framed_card(photo, border, theme.px(20))
+        overlays.append(self._centered(pop_frames(card, start_scale=0.85), folder, "picture", *center, appear, scene))
+        inner = max(2, border) * 2 + border
+        left_x, top_y = center[0] - card.width / 2 + inner, center[1] - card.height / 2 + inner
+        n = len(labels)
+        for number, item in enumerate(labels):
+            pill = self._pill(item.label.upper(), int(H * (0.052 if not theme.portrait else 0.03)), int(W * (0.3 if not theme.portrait else 0.42)), border=theme.accent)
+            if theme.portrait:
+                columns = 2 if n > 2 else n
+                row, col = divmod(number, columns)
+                lx = W * (0.5 if columns == 1 else 0.27 + 0.46 * col)
+                ly = H * 0.64 + row * (pill.height + H * 0.04) + pill.height / 2
+                anchor = (lx, ly - pill.height / 2)
+            else:
+                lx = W * 0.82
+                ly = H * 0.5 + (number - (n - 1) / 2) * min(H * 0.17, H * 0.8 / max(1, n))
+                anchor = (lx - pill.width / 2, ly)
+            overlays.append(self._centered(pop_frames(pill), folder, f"label{number}", lx, ly, item.time, scene))
+            self._sound(sounds, item.time, "pop")
+            if item.point is None:
+                continue
+            px_, py_ = left_x + item.point[0] * photo.width, top_y + item.point[1] * photo.height
+            dot_size = theme.px(30)
+            dot = _supersampled((dot_size, dot_size), lambda d, s: d.ellipse((0, 0, dot_size * s - 1, dot_size * s - 1), fill=theme.accent + (255,), outline=WHITE + (255,), width=int(theme.px(6) * s)))
+            if math.hypot(anchor[0] - px_, anchor[1] - py_) > theme.px(40):
+                frames, (left, top) = arrow_frames(anchor, (px_, py_), theme.px(5), frames=8, bend=0.1 if number % 2 else -0.1, head=False)
+                overlays.append(self._frames(frames, folder, f"arrow{number}", left, top, item.time + 0.15, scene))
+            overlays.append(self._centered(stamp_frames(dot), folder, f"dot{number}", px_, py_, item.time + 0.4, scene))
+
+    # -- chains and branches ------------------------------------------------------------------
+
+    def _build_chain(self, scene, folder, overlays, sounds) -> None:
+        """Real things left to right, joined by arrows that say what each one does to the next."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        items = scene.items[:4]
+        n = len(items)
+        if theme.portrait:
+            centers = [(W * 0.5, H * (0.1 + 0.82 * (k + 0.5) / n)) for k in range(n)]
+            box = int(min(H * 0.12, H * 0.44 / n))
+        else:
+            centers = [(W * 0.04 + W * 0.92 * (k + 0.5) / n, H * 0.5) for k in range(n)]
+            box = int(min(H * 0.4, W * 0.62 / n))
+        cards = []
+        for number, (item, (cx, cy)) in enumerate(zip(items, centers)):
+            card, _ = self._card(item, box, int(H * 0.058), int(W * 0.8 / n) if not theme.portrait else int(W * 0.5), label_on_top=False, beside=theme.portrait)
+            cards.append(card)
+            overlays.append(self._centered(pop_frames(card), folder, f"link{number}", cx, cy, item.time, scene))
+            self._sound(sounds, item.time, "pop")
+        for a in range(n - 1):
+            (ax, ay), (bx, by) = centers[a], centers[a + 1]
+            if theme.portrait:
+                p0, p1 = (ax, ay + cards[a].height / 2 + theme.px(6)), (bx, by - cards[a + 1].height / 2 - theme.px(6))
+            else:
+                p0, p1 = (ax + cards[a].width / 2 + theme.px(4), ay), (bx - cards[a + 1].width / 2 - theme.px(4), by)
+            if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < theme.px(36):
+                continue
+            when = items[a + 1].time - 0.25
+            frames, (left, top) = arrow_frames(p0, p1, theme.px(6), frames=8, bend=0.0)
+            overlays.append(self._frames(frames, folder, f"arrow{a}", left, top, when, scene))
+            self._sound(sounds, when, "scribble")
+            if items[a].link:
+                verb = self.text.render(items[a].link.lower(), int(H * (0.05 if not theme.portrait else 0.03)), int(W * 0.18 if not theme.portrait else W * 0.4), color=theme.accent)
+                mx, my = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+                spot = (mx + verb.width / 2 + theme.px(16), my) if theme.portrait else (mx, my - verb.height / 2 - theme.px(22))
+                overlays.append(self._centered(pop_frames(verb), folder, f"verb{a}", *spot, when + 0.15, scene))
+
+    def _build_branch(self, scene, folder, overlays, sounds) -> None:
+        """One cause on the left and what it leads to fanning out on the right."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        appear = scene.start + SLIDE_SECONDS + 0.05
+        source = scene.center or SceneItem()
+        items = scene.items[:4]
+        n = len(items)
+        if theme.portrait:
+            origin = (W / 2, H * 0.24)
+            hub, _ = self._card(source, int(H * 0.2), int(H * 0.035), int(W * 0.7), label_on_top=False)
+            if n == 4:
+                spots = [(W * (0.27 + 0.46 * (k % 2)), H * (0.58 + 0.2 * (k // 2))) for k in range(n)]
+            else:
+                spots = [(W * (k + 0.5) / n, H * 0.66) for k in range(n)]
+            box, beside = int(H * 0.11), False
+        else:
+            origin = (W * 0.2, H * 0.52)
+            hub, _ = self._card(source, int(H * 0.38), int(H * 0.06), int(W * 0.3), label_on_top=False)
+            spots = [(W * 0.72, H * (0.52 + (k - (n - 1) / 2) * min(0.24, 0.8 / n))) for k in range(n)]
+            box, beside = int(min(H * 0.18, H * 0.66 / n)), True
+        overlays.append(self._centered(pop_frames(hub), folder, "source", *origin, appear, scene))
+        self._sound(sounds, appear, "pop")
+        for number, (item, (cx, cy)) in enumerate(zip(items, spots)):
+            card, _ = self._card(item, box, int(H * (0.055 if not theme.portrait else 0.03)), int(W * (0.34 if not theme.portrait else 0.42)), label_on_top=False, beside=beside)
+            overlays.append(self._centered(pop_frames(card), folder, f"outcome{number}", cx, cy, item.time, scene))
+            self._sound(sounds, item.time, "pop")
+            if theme.portrait:
+                p0 = (origin[0], origin[1] + hub.height / 2 + theme.px(6))
+                p1 = (cx, cy - card.height / 2 - theme.px(8))
+            else:
+                p0 = (origin[0] + hub.width / 2 + theme.px(6), origin[1])
+                p1 = (cx - card.width / 2 - theme.px(10), cy)
+            frames, (left, top) = arrow_frames(p0, p1, theme.px(6), frames=8, bend=0.12 if cy < origin[1] else -0.12 if cy > origin[1] else 0.0)
+            overlays.append(self._frames(frames, folder, f"arrow{number}", left, top, item.time - 0.2, scene))

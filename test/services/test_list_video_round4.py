@@ -283,6 +283,213 @@ class TestOpenerPlan(unittest.TestCase):
         self.assertIn("opener", gemini_media.PURPOSES)
 
 
+class TestScientificScenes(_TempDirCase):
+    SPECS = [
+        {"type": "definition", "at": "uno", "term": "voltaje", "text": "el empuje", "symbol": "V", "unit": "se mide en voltios (V)", "icon": "🔋"},
+        {"type": "equation", "at": "cinco", "name": "Ley de Ohm", "formula": "V = I × R", "example": "12 V = 2 A × 6 Ω", "terms": [
+            {"symbol": "V", "label": "voltaje", "unit": "voltios"}, {"symbol": "I", "label": "corriente", "unit": "amperios", "at": "corriente"},
+            {"symbol": "R", "label": "resistencia", "unit": "ohmios"},
+        ]},
+        {"type": "annotate", "at": "corazon", "query": "heart conduction", "labels": [{"label": "nodo sinusal"}, {"label": "nodo AV", "at": "nodo"}]},
+        {"type": "chain", "items": [{"at": "turbina", "label": "turbina", "icon": "🌀", "link": "gira"}, {"at": "casa", "label": "casa", "icon": "🏠"}]},
+        {"type": "branch", "center": {"label": "corriente", "icon": "⚡"}, "items": [{"at": "luz", "label": "luz", "icon": "💡"}, {"at": "calor", "label": "calor", "icon": "🔥"}]},
+    ]
+    TIMES = {"uno": 1.0, "cinco": 9.0, "corriente": 12.5, "corazon": 20.0, "nodo": 22.6, "turbina": 30.0, "casa": 31.5, "luz": 40.0, "calor": 41.0}
+
+    def test_timing_of_parts(self):
+        timed = scenes.time_scenes(self.SPECS, self.TIMES.get, [], 60.0)
+        self.assertEqual([s.type for s in timed], ["definition", "equation", "annotate", "chain", "branch"])
+        definition, equation, annotate, chain, branch = timed
+        self.assertEqual((definition.center.label, definition.symbol, definition.unit), ("voltaje", "V", "se mide en voltios (V)"))
+        self.assertGreaterEqual(definition.end - definition.start, 5.0)  # time to read it
+        self.assertEqual((equation.text, equation.center.label, equation.example), ("V = I × R", "Ley de Ohm", "12 V = 2 A × 6 Ω"))
+        times = [t.time for t in equation.items]
+        self.assertAlmostEqual(times[0], 9.0 + scenes.PART_FIRST["equation"])
+        self.assertAlmostEqual(times[1], 12.5)  # explained at its own words
+        self.assertAlmostEqual(times[2], 12.5 + scenes.PART_STEP)
+        self.assertGreater(equation.end, times[2] + 3.0)  # the example has time to show
+        self.assertEqual([i.label for i in annotate.items], ["nodo sinusal", "nodo AV"])
+        self.assertAlmostEqual(annotate.items[1].time, 22.6)
+        self.assertEqual(annotate.query, "heart conduction")
+        self.assertEqual(chain.items[0].link, "gira")
+        self.assertEqual(branch.center.label, "corriente")
+
+    def test_every_new_type_draws(self):
+        for portrait in (False, True):
+            theme = fx.Theme(360, 640, FONT, (255, 79, 94)) if portrait else fx.Theme(640, 360, FONT, (255, 79, 94))
+            icon = scenes.prepare_picture(_icon(self.path("icon.png")))
+            photo = Image.new("RGB", (300, 200), (200, 80, 80))
+            photo.save(self.path("photo.jpg"))
+            framed = scenes.prepare_picture(self.path("photo.jpg"), allow_cutout=False)
+
+            def picture(item):
+                return framed if item.query == "heart conduction" else icon
+
+            renderer = scenes.SceneRenderer(theme, self.path(f"r{portrait}"), (250, 230, 230), picture, font_path=scenes.hand_font_path())
+            timed = scenes.time_scenes(self.SPECS, self.TIMES.get, [], 60.0)
+            timed[2].items[0].point = (0.2, 0.3)
+            for number, scene in enumerate(timed):
+                overlays, sounds = renderer.build(scene, f"s{number}")
+                names = " ".join(os.path.basename(o.source) for o in overlays)
+                self.assertTrue(overlays, scene.type)
+                if scene.type == "equation":
+                    self.assertEqual(names.count("token"), 5)  # V = I × R
+                    self.assertEqual(names.count("pointer"), 3)
+                    self.assertIn("example", names)
+                if scene.type == "annotate":
+                    self.assertIn("dot0", names)
+                    self.assertNotIn("dot1", names)  # Gemini did not find it: label only
+                if scene.type == "chain":
+                    self.assertIn("verb0", names)
+                if scene.type == "definition":
+                    self.assertIn("unit", names)
+            missing = scenes.Scene("annotate", 0, 4, center=scenes.SceneItem(query="nothing"))
+            renderer.picture = lambda item: None
+            with self.assertRaises(ValueError):
+                renderer.build(missing, "missing")
+
+
+class TestScientificPlan(unittest.TestCase):
+    def test_new_scene_types_are_normalized(self):
+        data = {"segments": [{"index": 0, "scenes": [
+            {"type": "definition", "at": "a", "term": "Voltaje", "text": "el empuje de los electrones", "symbol": "V", "unit": "se mide en voltios (V)", "icon": "🔋"},
+            {"type": "equation", "at": "b", "name": "Ley de Ohm", "formula": "V = I × R", "terms": [{"symbol": "V", "label": "voltaje"}, {"symbol": "", "label": "x"}], "example": "12 V = 2 A × 6 Ω"},
+            {"type": "annotate", "at": "c", "query": "heart conduction system", "labels": [{"label": "nodo sinusal"}, {"label": "nodo AV", "at": "nodo"}]},
+            {"type": "chain", "items": [{"at": "x", "label": "A", "link": "gira"}, {"at": "y", "label": "B"}]},
+        ]}, {"index": 1, "scenes": [
+            {"type": "branch", "center": {"label": "C", "icon": "⚡"}, "items": [{"at": "x", "label": "A"}, {"at": "y", "label": "B"}]},
+            {"type": "definition", "at": "a", "term": "x"},
+            {"type": "equation", "at": "b"},
+            {"type": "annotate", "at": "c", "query": "q", "labels": [{"label": "solo"}]},
+        ]}]}
+        plan = llm.normalize_edit_plan(data, 2, [])
+        definition, equation, annotate, chain = plan[0]["scenes"]
+        self.assertEqual((definition["term"], definition["symbol"], definition["unit"]), ("Voltaje", "V", "se mide en voltios (V)"))
+        self.assertEqual(equation["terms"], [{"symbol": "V", "label": "voltaje", "unit": "", "at": ""}])
+        self.assertEqual(equation["example"], "12 V = 2 A × 6 Ω")
+        self.assertEqual([lab["label"] for lab in annotate["labels"]], ["nodo sinusal", "nodo AV"])
+        self.assertEqual(chain["items"][0]["link"], "gira")
+        self.assertEqual([s["type"] for s in plan[1]["scenes"]], ["branch"])  # the rest is incomplete
+        self.assertEqual(plan[1]["scenes"][0]["center"]["label"], "C")
+
+    def test_prompts_ask_for_science(self):
+        prompt = llm.build_edit_plan_prompt([{"index": 0, "kind": "item", "title": "1. Voltaje", "text": "t"}], ["feliz"], "es-CO")
+        for word in ('"definition"', '"equation"', '"annotate"', '"chain"', '"branch"', '"opener"', "Footage alone is the last resort", "heart electrical conduction system"):
+            self.assertIn(word, prompt)
+        script = llm.build_list_script_prompt("Electricidad", 6, "es-CO", 120)
+        for word in ("WHY", "measured in volts", "Ohm's law", "worked example", "sinoatrial node"):
+            self.assertIn(word, script)
+        beat = gemini_media.build_choice_prompt("los electrones fluyen", "electrons flowing", 3, "es", "beat")
+        self.assertIn("explanatory diagram", beat)
+        self.assertNotIn("explanatory diagram", gemini_media.build_choice_prompt("x", "y", 3, "es", "scene"))
+        self.assertIn("parts we will point at", gemini_media.build_choice_prompt("x", "y", 3, "es", "annotate"))
+
+
+class TestGeminiPoints(unittest.TestCase):
+    def test_locate_parts(self):
+        answer = json.dumps({"points": [{"label": "Nodo sinusal", "point": [300, 200]}, {"label": "nodo AV", "point": None}, {"label": "x", "point": [1500, -5]}]})
+        with patch.object(gemini_media, "_ask", return_value=answer) as ask:
+            points = gemini_media.locate_parts("p.png", ["nodo sinusal", "nodo AV", "haz"])
+        self.assertEqual(points, [(0.2, 0.3), None, (0.0, 1.0)])
+        self.assertIn("0-1000", ask.call_args.args[1])
+        with patch.object(gemini_media, "_ask", side_effect=RuntimeError("boom")):
+            self.assertEqual(gemini_media.locate_parts("p.png", ["a", "b"]), [None, None])
+        self.assertEqual(gemini_media.locate_parts("", ["a"]), [None])
+
+
+class TestAnnotatePictures(_TempDirCase):
+    TEXT = "El corazon late. " + " ".join(f"palabra{i}" for i in range(60))
+
+    def _editor(self, gemini=True):
+        patcher = patch.object(editor.gemini_media, "enabled", return_value=gemini)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        narrations = [_narration(1.0, 45), _narration(24.0, 730), _narration(1.0, 45)]
+        theme = fx.Theme(1280, 720, FONT, fx.parse_color(fx.DEFAULT_ACCENT))
+        ed = editor.Editor(editor.EditOptions(subscribe="none", openers=False), theme, self.temp_dir, _segments(self.TEXT), narrations)
+        ed.plan = [
+            {"index": 0, "expression": "", "scenes": [], "beats": []},
+            {"index": 1, "expression": "", "scenes": [
+                {"type": "annotate", "at": "palabra10", "query": "heart conduction system", "query_local": "sistema de conduccion", "labels": [{"label": "nodo sinusal"}, {"label": "nodo AV"}]},
+            ], "beats": []},
+            {"index": 2, "expression": "", "scenes": [], "beats": []},
+        ]
+        return ed
+
+    def test_checked_picture_and_points(self):
+        ed = self._editor()
+        found = web_images.WebImage(str(RESOURCES / "1.png"), "pexels", "P", "A", "L", "https://p", url="https://u/1")
+        with patch.object(editor.web_images, "find_candidates", return_value=[found]) as find, patch.object(
+            editor.gemini_media, "choose_picture", return_value=0
+        ) as choose, patch.object(editor.gemini_media, "locate_parts", return_value=[(0.5, 0.5), None]):
+            ed.segment_edit(1, 1.5, show_titles=False)
+        self.assertEqual([c.args[0] for c in find.call_args_list], ["sistema de conduccion", "heart conduction system"])
+        self.assertEqual(choose.call_args.kwargs["purpose"], "annotate")
+        self.assertIn("nodo sinusal, nodo AV", choose.call_args.args[2])
+        scene = ed._scenes[1][0]
+        self.assertEqual([i.point for i in scene.items], [(0.5, 0.5), None])
+        self.assertTrue(ed._scene_picture(scene.center).info.get("framed"))
+
+    def test_needs_gemini_and_a_passing_picture(self):
+        ed = self._editor(gemini=False)
+        with patch.object(editor.web_images, "find_candidates") as find:
+            ed._prepare()
+        find.assert_not_called()
+        self.assertEqual(ed._scenes[1], [])
+        rejected = self._editor()
+        found = web_images.WebImage(str(RESOURCES / "1.png"), "pexels", "P", "A", "L", "https://p", url="https://u/1")
+        with patch.object(editor.web_images, "find_candidates", return_value=[found]), patch.object(
+            editor.gemini_media, "choose_picture", return_value=-1
+        ), patch.object(editor.gemini_media, "locate_parts") as locate:
+            rejected._prepare()
+        locate.assert_not_called()
+        self.assertEqual(rejected._scenes[1], [])
+
+
+class TestGapFilling(_TempDirCase):
+    TEXT = (
+        "La corriente es el flujo de electrones. Los electrones salen del polo negativo de la pila y viajan por el cable. "
+        "En el camino se encuentran con la resistencia del filamento del bombillo. Por eso el filamento se calienta y brilla con fuerza. "
+        "Corto."
+    )
+
+    def test_uncovered_sentences(self):
+        entry = {"beats": [{"type": "image", "at": "viajan por el cable", "query": "q"}], "scenes": [
+            {"type": "chain", "items": [{"at": "la resistencia del filamento"}]},
+        ]}
+        self.assertEqual(editor.uncovered_sentences(self.TEXT, entry, "item"), [])
+        bare = {"beats": [], "scenes": []}
+        gaps = editor.uncovered_sentences(self.TEXT, bare, "item")
+        self.assertEqual(len(gaps), 3)  # the first is the opener's and "Corto." is too short
+        self.assertTrue(gaps[0].startswith("Los electrones"))
+        self.assertEqual(len(editor.uncovered_sentences(self.TEXT, bare, "intro")), 4)
+
+    def test_second_pass_adds_pictures(self):
+        narrations = [_narration(1.0, 45), _narration(24.0, 730), _narration(1.0, 45)]
+        theme = fx.Theme(1280, 720, FONT, fx.parse_color(fx.DEFAULT_ACCENT))
+        ed = editor.Editor(editor.EditOptions(subscribe="none"), theme, self.temp_dir, _segments(self.TEXT), narrations)
+        plan = [{"index": i, "expression": "", "backgrounds": [], "scenes": [], "beats": []} for i in range(3)]
+        reply = json.dumps({"beats": [
+            {"index": 1, "at": "viajan por el cable", "query": "electrons flowing through a wire diagram", "look": "diagram", "icon": "⚡"},
+            {"index": 7, "at": "x", "query": "nope"},
+            {"index": 1, "at": "", "query": "no anchor"},
+        ]})
+        with patch.object(editor.llm, "generate_edit_plan", return_value=plan), patch.object(llm, "_generate_response", return_value=reply) as ask:
+            result = ed.make_plan()
+        self.assertIn("electrons flowing", ask.call_args.args[0] if ask.call_args.args else "")
+        self.assertEqual(result[1]["beats"], [{"type": "image", "at": "viajan por el cable", "query": "electrons flowing through a wire diagram", "look": "diagram", "icon": "⚡"}])
+        prompt = llm.build_gap_beats_prompt([{"index": 1, "sentence": "Los electrones viajan."}], "es-CO")
+        self.assertIn("Los electrones viajan.", prompt)
+
+        off = editor.Editor(editor.EditOptions(subscribe="none", fill_gaps=False), theme, self.path("off"), _segments(self.TEXT), narrations)
+        with patch.object(editor.llm, "generate_edit_plan", return_value=[dict(e, beats=[]) for e in plan]), patch.object(llm, "generate_gap_beats") as gap:
+            off.make_plan()
+        gap.assert_not_called()
+        self.assertEqual(llm.generate_gap_beats([]), {})
+        with patch.object(llm, "_generate_response", return_value="Error: nope"):
+            self.assertEqual(llm.generate_gap_beats([{"index": 0, "sentence": "s"}]), {})
+
+
 class TestRound4Cli(unittest.TestCase):
     def setUp(self):
         ui_patch = patch.dict(app_config.ui, {}, clear=True)

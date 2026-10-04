@@ -68,6 +68,7 @@ class EditOptions:
     sfx_volume: float = 0.65  # scales every sound effect (1.0 = the original loudness)
     host_presence: str = "low"  # low, normal or high share of the video with the host
     openers: bool = True  # open each item with its number, title and a picture of exactly that
+    fill_gaps: bool = True  # ask the LLM for pictures for sentences left with only footage
 
 
 @dataclass
@@ -254,6 +255,48 @@ def sentence_at(text: str, anchor: str) -> str:
     return (text or "").strip()[:300]
 
 
+def _plan_anchors(entry: dict) -> Tuple[List[str], List[str]]:
+    """(beat anchors, scene anchors) of a plan entry."""
+    beats = []
+    for beat in entry.get("beats") or []:
+        if beat.get("type") == "images":
+            beats += [item.get("at", "") for item in beat.get("items") or []]
+        elif beat.get("type") in ("image", "text"):
+            beats.append(beat.get("at", ""))
+    shown = []
+    for scene in entry.get("scenes") or []:
+        shown.append(scene.get("at", ""))
+        for key in ("items", "terms", "labels"):
+            shown += [item.get("at", "") for item in scene.get(key) or [] if isinstance(item, dict)]
+    return [a for a in beats if a], [a for a in shown if a]
+
+
+def uncovered_sentences(text: str, entry: dict, kind: str, min_words: int = 7) -> List[str]:
+    """Sentences of a segment with nothing explanatory on screen, only footage.
+
+    A scene covers its sentence and the next (it lasts several seconds); an
+    item's first sentence belongs to its opener.
+    """
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?…])\s+", text or "") if s.strip()]
+    words = [normalize_words(sentence) for sentence in sentences]
+
+    def where(anchor: str) -> int:
+        target = normalize_words(anchor)[:3]
+        if not target:
+            return -1
+        return next((i for i, sentence in enumerate(words) if _find_words(sentence, target) >= 0), -1)
+
+    covered = {0} if kind == "item" else set()
+    beats, shown = _plan_anchors(entry)
+    for anchor in beats:
+        covered.add(where(anchor))
+    for anchor in shown:
+        index = where(anchor)
+        if index >= 0:
+            covered.update((index, index + 1))
+    return [s for i, s in enumerate(sentences) if i not in covered and len(s.split()) >= min_words]
+
+
 def scene_canvas_color(option: str, accent: Tuple[int, int, int]) -> Tuple[int, int, int]:
     """"" is a light tint of the accent (soft brand paper); also "accent", "white" or a hex colour."""
     value = (option or "").strip().lower()
@@ -433,6 +476,8 @@ class Editor:
                 self.warnings.append(
                     "the LLM did not return an edit plan; only the base visuals were used"
                 )
+            elif not reference and self.options.fill_gaps and self.options.beats != "none":
+                self._fill_gaps(plan)
         fallback = default_plan(self.segments, self.poses)
         plan = plan or fallback
         for entry, default in zip(plan, fallback):
@@ -447,6 +492,28 @@ class Editor:
         self.plan = plan
         self._save_plan()
         return plan
+
+    def _fill_gaps(self, plan: List[dict]) -> None:
+        """A second, short LLM pass: one picture for each sentence left with only footage."""
+        gaps = [
+            {"index": index, "sentence": sentence}
+            for index, (segment, entry) in enumerate(zip(self.segments, plan))
+            for sentence in uncovered_sentences(segment.text, entry, segment.kind)
+        ]
+        if not gaps:
+            return
+        try:
+            extra = llm.generate_gap_beats(gaps[:40], self.options.language)
+        except Exception as exc:
+            logger.warning(f"could not fill the gaps of the edit plan: {type(exc).__name__}: {exc}")
+            return
+        added = 0
+        for index, beats in extra.items():
+            if 0 <= index < len(plan):
+                plan[index].setdefault("beats", [])
+                plan[index]["beats"] += beats
+                added += len(beats)
+        logger.info(f"{added} pictures added where only footage was planned ({len(gaps)} sentences)")
 
     def _reference_plan(self) -> Optional[list]:
         path = self.options.reference_plan
@@ -603,6 +670,9 @@ class Editor:
             for scene in timed:
                 if scene.type == "figure":
                     jobs.append(lambda sc=scene, t=text: self._figure_picture(sc, t))
+                elif scene.type == "annotate":
+                    jobs.append(lambda sc=scene, t=text: self._annotate_picture(sc, t))
+                    continue
                 elif scene.type == "opener":
                     jobs.append(lambda sc=scene, t=text: self._opener_picture(sc, t))
                     continue
@@ -622,7 +692,8 @@ class Editor:
         # Full-screen pictures that were not found leave the footage alone.
         for index, timed in self._scenes.items():
             self._scenes[index] = [
-                sc for sc in timed if sc.type != "figure" or self._item_pictures.get(id(sc.center)) is not None
+                sc for sc in timed
+                if sc.type not in ("figure", "annotate") or self._item_pictures.get(id(sc.center)) is not None
             ]
 
     # -- assets -------------------------------------------------------------
@@ -760,6 +831,35 @@ class Editor:
             scene.center = scenes.SceneItem()
         self._item_pictures[id(scene.center)] = image
 
+    def _annotate_picture(self, scene: scenes.Scene, text: str) -> None:
+        """A picture of the structure Gemini confirms shows its parts, and where each part is."""
+        if not (self.options.picture_check and self._gemini):
+            logger.info("annotated pictures need Gemini to check them; skipped")
+            return
+        save_dir = os.path.join(self.work_dir, "pictures")
+        candidates = []
+        for query in dict.fromkeys(q for q in (scene.query_local, scene.query) if q):
+            candidates += web_images.find_candidates(query, save_dir, kind=scene.look, exclude_urls=self._used_urls, limit=3)
+        candidates = candidates[:5]
+        if not candidates:
+            return
+        labels = [item.label for item in scene.items]
+        line = sentence_at(text, scene.center.at if scene.center else "")
+        wanted = f"{scene.query} (showing: {', '.join(labels)})" if labels else scene.query
+        choice = gemini_media.choose_picture([c.path for c in candidates], line, wanted, self.options.language, purpose="annotate")
+        if choice is None or choice < 0:
+            logger.info(f"no picture to annotate for {scene.query!r} passed the check")
+            return
+        found = candidates[choice]
+        image = scenes.prepare_picture(found.path, allow_cutout=False)
+        if image is None:
+            return
+        for item, point in zip(scene.items, gemini_media.locate_parts(found.path, labels)):
+            item.point = point
+        self._used_urls.add(found.url)
+        self.credits.append(found.credit())
+        self._item_pictures[id(scene.center)] = image
+
     def _opener_picture(self, scene: scenes.Scene, text: str) -> None:
         """The section opener's picture, strictly about its title.
 
@@ -818,9 +918,9 @@ class Editor:
 
     def scene_renderer(self) -> scenes.SceneRenderer:
         if self._scene_renderer is None:
-            texts = [i.label for ss in self._scenes.values() for sc in ss for i in sc.items] + [
-                sc.text for ss in self._scenes.values() for sc in ss
-            ]
+            every = [sc for ss in self._scenes.values() for sc in ss]
+            texts = [f"{i.label} {i.unit} {i.link}" for sc in every for i in sc.items]
+            texts += [f"{sc.text} {sc.unit} {sc.example} {sc.center.label if sc.center else ''}" for sc in every]
             self._scene_renderer = scenes.SceneRenderer(
                 self.theme,
                 self.work_dir,

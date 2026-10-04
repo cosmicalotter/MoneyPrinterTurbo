@@ -79,7 +79,7 @@ def language_name(language: str) -> str:
     return _LANGUAGE_NAMES.get((language or "").split("-")[0].lower(), "the narration's language")
 
 
-PURPOSES = ("beat", "scene", "figure", "opener")
+PURPOSES = ("beat", "scene", "figure", "opener", "annotate")
 
 
 def build_choice_prompt(line: str, query: str, count: int, language: str = "", purpose: str = "beat") -> str:
@@ -89,7 +89,8 @@ def build_choice_prompt(line: str, query: str, count: int, language: str = "", p
     * scene: small, beside icons in a minimalist drawn scene;
     * figure: filling the screen, long enough to read a diagram;
     * opener: big, beside the title of a new section; ``line`` is that title
-      followed by the section's first sentence.
+      followed by the section's first sentence;
+    * annotate: big, with labels pointing at its parts; ``query`` names the parts.
     """
     language = language_name(language)
     said = f'The narrator says: "{line}"'
@@ -105,6 +106,13 @@ def build_choice_prompt(line: str, query: str, count: int, language: str = "", p
 - any text is in {language} or in English; never text in another language or alphabet;
 - has no watermark, logo, gore or anything disturbing, and is sharp.
 If you are not sure a picture is strictly about the title, answer 0."""
+        answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
+    elif purpose == "annotate":
+        rules = f"""- shows exactly the structure, object or process the narrator explains, large and clear;
+- the parts we will point at are clearly visible in it (they are listed in the request);
+- is clean: a clear illustration, medical or scientific diagram, or photo; few or no labels of its own
+  (any labels in {language} or in English); not a collage, a page of text or a screenshot;
+- has no watermark, logo, gore or anything disturbing, and is sharp."""
         answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
     elif purpose == "figure":
         rules = f"""- explains or shows exactly what the narrator says (a diagram, chart, infographic or a striking photo);
@@ -123,9 +131,15 @@ If you are not sure a picture is strictly about the title, answer 0."""
             if purpose == "scene"
             else ""
         )
-        rules = f"""- clearly and literally shows what the narrator says, so a viewer gets it in under two seconds;
-{small}- is simple: one main subject on a clean background, not a dense scientific diagram, collage, chart or infographic;
-- has no text or labels, except at most a few words in {language} or English, and never text in another language or alphabet;
+        explain = (
+            "- when the narrator explains how something works or what it is made of, a clean explanatory diagram or "
+            "illustration of exactly that is best (electrons moving through a wire, charges attracting, an organ's parts);\n"
+            if purpose == "beat"
+            else ""
+        )
+        rules = f"""- clearly and literally shows what the narrator says, so a viewer gets it in two or three seconds;
+{small}{explain}- is simple and readable on a TV: one main subject or one clear diagram, not a dense textbook figure, collage, page of text or screenshot;
+- has no text or labels, except a few large words in {language} or English, and never text in another language or alphabet;
 - has no watermark, logo, gore or anything disturbing, and is sharp."""
         answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
     return f"""
@@ -342,3 +356,37 @@ def illustrate_sequence(descriptions: List[str], app_config=None) -> List[str]:
         logger.warning(f"story frames failed: {type(exc).__name__}: {exc}")
         return []
 
+
+def build_points_prompt(labels: List[str]) -> str:
+    return f"""
+Point to each of these parts in the picture: {json.dumps(labels, ensure_ascii=False)}.
+Return only JSON: {{"points": [{{"label": "<the label exactly as given>", "point": [y, x]}}]}}
+with y and x normalised to 0-1000 (0, 0 is the top-left corner) at the centre of that part.
+Use "point": null for a part that is not clearly visible. Keep the order of the list.
+""".strip()
+
+
+def locate_parts(path: str, labels: List[str], app_config=None) -> List[Optional[Tuple[float, float]]]:
+    """Where each labelled part is in the picture, as (x, y) fractions; None for parts not found."""
+    if not path or not labels:
+        return [None] * len(labels)
+    app_config = _app(app_config)
+    try:
+        answer = _parse_answer(_ask([path], build_points_prompt(labels), app_config)) or {}
+    except Exception as exc:
+        logger.warning(f"locating parts failed ({type(exc).__name__}: {exc})")
+        return [None] * len(labels)
+    found = {}
+    entries = answer.get("points") if isinstance(answer.get("points"), list) else []
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        point = entry.get("point")
+        try:
+            y, x = (min(1000.0, max(0.0, float(v))) / 1000.0 for v in point)
+        except (TypeError, ValueError):
+            continue
+        label = str(entry.get("label") or "").strip().lower()
+        found.setdefault(label, (x, y))
+        found.setdefault(position, (x, y))
+    return [found.get(label.strip().lower(), found.get(position)) for position, label in enumerate(labels)]
