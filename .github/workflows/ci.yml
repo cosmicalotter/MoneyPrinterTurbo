@@ -55,7 +55,7 @@ jobs:
 
       - name: Lint Python sources
         if: matrix.python-version == '3.11'
-        run: uv run --no-sync ruff check app cli.py list_video.py research.py main.py webui test docs/skill
+        run: uv run --no-sync ruff check app cli.py list_video.py research.py voice_lab.py main.py webui studio test docs/skill
 
       - name: Run unit tests with coverage
         # pytest 兼容现有 unittest.TestCase，同时会收集仓库中的 pytest 风格
