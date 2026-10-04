@@ -33,6 +33,14 @@ POINT_NAMES = ("senalando", "señalando", "pointing", "point", "apuntando")
 # How items take turns: introduce it, drop in later, both, leave it to the
 # footage, ... Intro and outro always keep the host.
 ITEM_PATTERN = ("lead", "react", "lead+react", "off", "react", "full")
+# How much of the video the host spends on screen.
+PRESENCE_PATTERNS = {
+    "low": ("lead", "off", "react", "off", "lead", "off"),
+    "normal": ITEM_PATTERN,
+    "high": ("lead+react", "full", "lead", "full", "react", "full"),
+}
+PRESENCE_LEAD = {"low": (0.3, 3.0, 6.0), "normal": (0.42, 3.5, 8.5), "high": (0.55, 4.0, 11.0)}
+HOST_PRESENCES = tuple(PRESENCE_PATTERNS)
 
 ENTER_SECONDS = 0.5
 EXIT_SECONDS = 0.4
@@ -130,22 +138,24 @@ def _snap(pauses: Sequence[float], target: float, low: float, high: float) -> fl
     return min(inside, key=lambda p: abs(p - target)) if inside else target
 
 
-def segment_mode(kind: str, item_number: int, seed: int) -> str:
+def segment_mode(kind: str, item_number: int, seed: int, presence: str = "normal") -> str:
     if kind in ("intro", "outro"):
         return "full"
     if item_number == 0:
         return "lead"  # the host hands over from the intro
-    return ITEM_PATTERN[(item_number + seed) % len(ITEM_PATTERN)]
+    pattern = PRESENCE_PATTERNS.get(presence, ITEM_PATTERN)
+    return pattern[(item_number + seed) % len(pattern)]
 
 
-def _windows_for(info: SegmentInfo, mode: str, base: str, point: str) -> Tuple[list, list]:
+def _windows_for(info: SegmentInfo, mode: str, base: str, point: str, presence: str = "normal") -> Tuple[list, list]:
     duration = info.duration
     windows: List[List[float]] = []
     cues: List[Tuple[float, str, str]] = []  # time, expression, role
     if mode == "full":
         windows.append([0.0, duration])
     if mode in ("lead", "lead+react"):
-        target = min(max(0.42 * duration, 3.5), 8.5)
+        share, shortest, longest = PRESENCE_LEAD.get(presence, PRESENCE_LEAD["normal"])
+        target = min(max(share * duration, shortest), longest)
         end = _snap(info.pauses, target, target - 1.5, target + 2.0) + 0.45
         windows.append([0.0, end])
 
@@ -299,7 +309,8 @@ def _idle_changes(
 
 
 def plan_host(
-    infos: Sequence[SegmentInfo], names: Sequence[str], host_mode: str = "auto", seed: int = 0
+    infos: Sequence[SegmentInfo], names: Sequence[str], host_mode: str = "auto", seed: int = 0,
+    presence: str = "normal",
 ) -> List[HostSegment]:
     """Decide when the host is on screen and which face it makes."""
     if host_mode == "none" or not names:
@@ -316,12 +327,12 @@ def plan_host(
         elif info.mode:
             mode = info.mode
         else:
-            mode = segment_mode(info.kind, item_number, seed)
+            mode = segment_mode(info.kind, item_number, seed, presence)
         if info.kind == "item":
             item_number += 1
         if info.duration < 5.0 and mode in ("lead", "lead+react"):
             mode = "full"
-        raw, events = _windows_for(info, mode, base, point)
+        raw, events = _windows_for(info, mode, base, point, presence)
         windows = _subtract(_normalize_windows(raw, info.duration), info.blocked)
         cues = _cues_for(info, windows, events, base, wave, point, names)
         planned.append(

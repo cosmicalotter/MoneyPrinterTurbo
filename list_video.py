@@ -337,6 +337,18 @@ for the YouTube description, and edit-plan.json.
         help="use the first picture found instead of letting Gemini choose a simple, relevant one",
     )
     edit_group.add_argument(
+        "--host-presence",
+        choices=["low", "normal", "high"],
+        default="low",
+        help="how much of the video the host is on screen (default: low)",
+    )
+    edit_group.add_argument(
+        "--sfx-volume",
+        type=float,
+        default=0.65,
+        help="loudness of the sound effects, 0 to 2 (default: 0.65)",
+    )
+    edit_group.add_argument(
         "--lip-sync",
         action="store_true",
         help="animate the mouth with the *_habla frames (default: still poses)",
@@ -595,6 +607,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             illustrations=args.illustrations,
             scene_color=args.scene_color or "",
             picture_check=not args.no_picture_check,
+            host_presence=args.host_presence,
+            sfx_volume=min(2.0, max(0.0, args.sfx_volume)),
         )
 
     def render(render_task_id, render_script, render_params, render_options):

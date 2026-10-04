@@ -65,6 +65,8 @@ class EditOptions:
     scene_color: str = ""  # canvas colour; "" is a light tint of the accent
     picture_check: bool = True  # let Gemini vision pick pictures (when configured)
     reference_plan: str = ""  # edit-plan.json of the same video in another language
+    sfx_volume: float = 0.65  # scales every sound effect (1.0 = the original loudness)
+    host_presence: str = "low"  # low, normal or high share of the video with the host
 
 
 @dataclass
@@ -261,6 +263,36 @@ def scene_canvas_color(option: str, accent: Tuple[int, int, int]) -> Tuple[int, 
     if value:
         return fx.parse_color(value)
     return tuple(int(c + (255 - c) * 0.84) for c in accent)
+
+
+def chip_spans(chip: fx.Overlay, covered: List[Tuple[float, float]], duration: float, travel: int) -> List[fx.Overlay]:
+    """The chapter label shown only between scenes: it slides out before each
+    scene and back in after it (the first entrance keeps the label's own x)."""
+    spans: List[List[float]] = [[0.0, duration]]
+    for start, end in sorted(covered):
+        pieces = []
+        for a, b in spans:
+            if b <= start - 0.05 or a >= end + 0.05:
+                pieces.append([a, b])
+                continue
+            if start - 0.05 - a > 0:
+                pieces.append([a, start - 0.05])
+            if b - (end + 0.05) > 0:
+                pieces.append([end + 0.05, b])
+        spans = pieces
+    overlays = []
+    for a, b in spans:
+        if b - a < 1.2:
+            continue
+        leave = f"{travel}*pow(clip((t-{b - 0.3:.3f})/0.3,0,1),2)" if b < duration - 0.05 else "0"
+        if a <= 0.0:
+            x = f"{chip.x}-{leave}"
+        else:
+            back = f"{travel}*(1-{fx.ease_expression(0.35, a)})"
+            base = chip.x.split("-(", 1)[0]
+            x = f"{base}-{back}-{leave}"
+        overlays.append(fx.Overlay(chip.source, x=x, y=chip.y, start=a, end=b))
+    return overlays
 
 
 def _before_scenes(beat: _Beat, cover: List[Tuple[float, float]]) -> Optional[_Beat]:
@@ -522,7 +554,8 @@ class Editor:
         names = sorted(self.poses)
         mode = self.options.host if self.options.host in host.HOST_MODES else "auto"
         seed = fx.safe_seed("".join(s.chapter for s in self.segments)) % len(host.ITEM_PATTERN)
-        self.host_plan = host.plan_host(infos, names, mode, seed)
+        presence = self.options.host_presence if self.options.host_presence in host.HOST_PRESENCES else "low"
+        self.host_plan = host.plan_host(infos, names, mode, seed, presence)
         for planned, cover in zip(self.host_plan, covers):
             planned.windows = _avoid_cover(planned.windows, cover)
         if self.plan and names:
@@ -837,7 +870,10 @@ class Editor:
             edit.sounds += sounds
 
         if chip_overlay is not None:
-            edit.overlays.append(chip_overlay)
+            # The label hides while a scene fills the screen, so nothing drawn
+            # at the top of the scene ends up behind it.
+            covered = [(sc.start, sc.end) for sc in self._scenes.get(index, [])]
+            edit.overlays += chip_spans(chip_overlay, covered, duration, chip_w + margin)
 
         if subscribe_window:
             edit.overlays.append(self._subscribe_overlay(subscribe_window[0], has_character))
@@ -846,6 +882,9 @@ class Editor:
                 edit.sounds.append((subscribe_window[0], self._subscribe["sound"], _SFX_GAIN["subscribe"]))
             else:
                 self._sound(edit, click, "click")
+
+        volume = max(0.0, float(self.options.sfx_volume))
+        edit.sounds = [(time, path, gain * volume) for time, path, gain in edit.sounds if gain * volume > 0]
 
         if self.options.progress_bar:
             bar = fx.render_progress_bar(theme)
