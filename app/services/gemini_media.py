@@ -79,7 +79,7 @@ def language_name(language: str) -> str:
     return _LANGUAGE_NAMES.get((language or "").split("-")[0].lower(), "the narration's language")
 
 
-PURPOSES = ("beat", "scene", "figure")
+PURPOSES = ("beat", "scene", "figure", "opener")
 
 
 def build_choice_prompt(line: str, query: str, count: int, language: str = "", purpose: str = "beat") -> str:
@@ -87,10 +87,26 @@ def build_choice_prompt(line: str, query: str, count: int, language: str = "", p
 
     * beat: big, over the footage, for a couple of seconds;
     * scene: small, beside icons in a minimalist drawn scene;
-    * figure: filling the screen, long enough to read a diagram.
+    * figure: filling the screen, long enough to read a diagram;
+    * opener: big, beside the title of a new section; ``line`` is that title
+      followed by the section's first sentence.
     """
     language = language_name(language)
-    if purpose == "figure":
+    said = f'The narrator says: "{line}"'
+    if purpose == "opener":
+        said = (
+            f'This picture opens a new section of the video, shown for three seconds beside its title. '
+            f'The section title and first sentence: "{line}"'
+        )
+        rules = f"""- shows exactly the topic of the section title, so a viewer who sees only the picture would guess the title;
+  reject pictures of a related but different subject (for "voltage and current", not a random power plant);
+- is the most representative and explanatory image of that topic: a clear photo, illustration or simple labelled diagram;
+- is clean and readable on a TV: one main subject or one simple diagram, not a collage, a page of text or a screenshot;
+- any text is in {language} or in English; never text in another language or alphabet;
+- has no watermark, logo, gore or anything disturbing, and is sharp.
+If you are not sure a picture is strictly about the title, answer 0."""
+        answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
+    elif purpose == "figure":
         rules = f"""- explains or shows exactly what the narrator says (a diagram, chart, infographic or a striking photo);
 - is clean and readable on a TV: large shapes, little clutter, sharp, not a page of text or a screenshot;
 - any text is in {language} or in English and readable; never text in another language or alphabet;
@@ -114,7 +130,7 @@ def build_choice_prompt(line: str, query: str, count: int, language: str = "", p
         answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
     return f"""
 You are the picture editor of an educational YouTube channel for a general audience.
-The narrator says: "{line}"
+{said}
 We want a picture of: "{query}"
 Below are {count} candidate pictures, numbered 1 to {count} in order.
 Choose the one picture that:

@@ -382,6 +382,7 @@ class TestEditorRound3(_TempDirCase):
         narrations = [_narration(1.0, 45), _narration(24.0, 730), _narration(1.0, 45)]
         theme = fx.Theme(1280, 720, FONT, fx.parse_color(fx.DEFAULT_ACCENT))
         options.setdefault("subscribe", "none")
+        options.setdefault("openers", False)  # covered by test_list_video_round4
         return editor.Editor(editor.EditOptions(**options), theme, self.temp_dir, _segments(self.TEXT), narrations)
 
     def _found(self, n):

@@ -48,6 +48,7 @@ SCENE_MARKS = ("cross", "check")
 SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
 MIN_SCENE_SECONDS = 2.2
+MAX_SCENE_DELAY = 4.5  # a scene said under a blocked moment (an opener) may wait this long for it
 ITEM_SECONDS = 1.8
 INK = (27, 27, 47)
 WHITE = (255, 255, 255)
@@ -101,6 +102,35 @@ class Scene:
     look: str = "diagram"
     query: str = ""
     query_local: str = ""
+    enter: bool = True  # False: already on screen when the segment starts (no slide in)
+    number: int = 0  # section number of an opener
+
+
+OPENER_SECONDS = 3.2  # how long a section opener holds the screen
+
+
+def opener_scene(
+    title: str, number: int, spec: Optional[dict], pauses: Sequence[float], duration: float
+) -> Optional[Scene]:
+    """The card that opens a section: its number, its title and one picture of exactly that.
+
+    ``spec`` is the plan's {"query", "query_local", "look", "icon", "draw"};
+    without one the title itself is searched. None when the section is too short.
+    """
+    title = " ".join((title or "").split())
+    if not title or duration < OPENER_SECONDS + 4.0:
+        return None
+    spec = spec if isinstance(spec, dict) else {}
+    end = _snap(pauses, OPENER_SECONDS, OPENER_SECONDS - 0.6, OPENER_SECONDS + 1.0) + 0.25
+    query = str(spec.get("query") or "").strip()
+    query_local = str(spec.get("query_local") or "").strip() or (title if not query else "")
+    center = SceneItem(
+        label=title, icon=str(spec.get("icon") or ""), draw=str(spec.get("draw") or ""), query=query or title,
+    )
+    return Scene(
+        type="opener", start=0.0, end=end, text=title, center=center, enter=False, number=number,
+        look="photo" if spec.get("look") == "photo" else "diagram", query=query or title, query_local=query_local,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +277,16 @@ def time_scenes(
 
     kept: List[Scene] = []
     for scene in sorted(timed, key=lambda s: s.start):
+        inside = [b for a, b in blocked if a <= scene.start < b]
+        if inside and max(inside) - scene.start <= MAX_SCENE_DELAY:
+            # Said while something else holds the screen (a section opener):
+            # it waits for it, a little late rather than lost.
+            scene.start = max(inside) + 0.15
+            for number, item in enumerate(scene.items):
+                item.time = max(item.time, scene.start + SLIDE_SECONDS + 0.05 + 0.5 * number)
+            scene.items = [i for i in scene.items if i.time < scene.end - ITEM_SECONDS]
+            if scene.end - scene.start < MIN_SCENE_SECONDS or (scene.type in ITEM_SCENES and len(scene.items) < 2):
+                continue
         if kept and scene.start < kept[-1].end + 0.6:
             continue
         clash = [(a, b) for a, b in blocked if scene.start < b and scene.end > a]
@@ -707,7 +747,7 @@ class SceneRenderer:
             return "0"
         size = "H" if scene.vertical else "W"
         s, e, d = scene.start, scene.end, SLIDE_SECONDS
-        enter = f"{size}*pow(1-clip((t-{s:.3f})/{d},0,1),3)"
+        enter = f"{size}*pow(1-clip((t-{s:.3f})/{d},0,1),3)" if scene.enter else "0"
         if not scene.exit:
             return enter
         return f"{enter}-{size}*pow(clip((t-{e - d:.3f})/{d},0,1),3)"
@@ -797,7 +837,8 @@ class SceneRenderer:
                 )
             )
         sounds: List[Tuple[float, str, float]] = []
-        self._sound(sounds, scene.start - 0.1, "whoosh")
+        if scene.enter:
+            self._sound(sounds, scene.start - 0.1, "whoosh")
         if scene.exit:
             self._sound(sounds, scene.end - SLIDE_SECONDS - 0.05, "whoosh")
         builder = getattr(self, f"_build_{scene.type}")
@@ -1270,3 +1311,53 @@ class SceneRenderer:
             w, h = frames[-1].size
             pad_y = (h - pose.height) / 2
             overlays.append(self._frames(frames, folder, "host", W * 0.2 - w / 2, H + 0.1 * pose.height - pose.height - pad_y, appear, scene))
+
+    # -- section opener ---------------------------------------------------------------
+
+    def _fit_picture(self, image: Image.Image, box: Tuple[int, int]) -> Image.Image:
+        """A picture as big as ``box``: framed when it is a photo or a diagram, die-cut otherwise."""
+        picture = image.copy()
+        if image.info.get("framed"):
+            border = self.theme.px(12)
+            picture.thumbnail((box[0] - border * 2, box[1] - border * 2), Image.LANCZOS)
+            return framed_card(picture, border, self.theme.px(20))
+        picture.thumbnail(box, Image.LANCZOS)
+        return die_cut(picture, self.theme.px(8))
+
+    def _build_opener(self, scene, folder, overlays, sounds) -> None:
+        """Section title card: the number, the title and a picture of exactly that topic."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        item = scene.center or SceneItem()
+        image = self.picture(item) if (item.query or item.icon or item.draw) else None
+        title = (scene.text or item.label).upper()
+        picture = None
+        if image is not None and theme.portrait:
+            picture = self._fit_picture(image, (int(W * 0.86), int(H * 0.42)))
+            picture_center, column, middle, title_width = (W / 2, H * 0.3), W / 2, H * 0.7, int(W * 0.86)
+        elif image is not None:
+            picture = self._fit_picture(image, (int(W * 0.52), int(H * 0.76)))
+            picture_center, column, middle, title_width = (W * 0.7, H * 0.5), W * 0.25, H * 0.5, int(W * 0.4)
+        else:
+            column, middle, title_width = W / 2, H * 0.48, int(W * 0.82)
+        size = H * (0.1 if picture is not None and not theme.portrait else 0.12 if picture is None else 0.06)
+        digits = None
+        if scene.number:
+            digits = self.text.render(f"{scene.number:02d}", int(size * 2.6), int(W * 0.4), color=theme.accent, max_lines=1)
+        text = self.text.render(title, int(size), title_width, max_lines=3)
+        gap, line_gap = theme.px(8), theme.px(14)
+        block = (digits.height + gap if digits else 0) + text.height + line_gap + theme.px(10)
+        top = middle - block / 2
+        if digits is not None:
+            overlays.append(self._centered(stamp_frames(digits), folder, "number", column, top + digits.height / 2, scene.start + 0.05, scene))
+            top += digits.height + gap
+        overlays.append(self._centered(pop_frames(text), folder, "title", column, top + text.height / 2, scene.start + 0.2, scene))
+        underline_y = top + text.height + line_gap
+        half = text.width / 2
+        frames, (left, line_top) = arrow_frames(
+            (column - half, underline_y), (column + half, underline_y + 1), theme.px(7), frames=8, bend=0.03, head=False
+        )
+        overlays.append(self._frames(frames, folder, "underline", left, line_top, scene.start + 0.45, scene))
+        if picture is not None:
+            when = scene.start + 0.3
+            overlays.append(self._centered(pop_frames(picture, start_scale=0.8), folder, "picture", *picture_center, when, scene))
+            self._sound(sounds, when, "pop")

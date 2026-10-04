@@ -338,6 +338,7 @@ class TestEditorScenesAndPictures(_TempDirCase):
         theme = fx.Theme(1280, 720, FONT, fx.parse_color(fx.DEFAULT_ACCENT))
         options.setdefault("subscribe", "none")
         options.setdefault("progress_bar", False)
+        options.setdefault("openers", False)  # covered by test_list_video_round4
         return editor.Editor(editor.EditOptions(**options), theme, self.temp_dir, _segments(), narrations)
 
     def test_picture_check_picks_rejects_and_falls_back_to_icons(self):

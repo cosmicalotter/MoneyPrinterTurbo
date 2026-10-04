@@ -67,6 +67,7 @@ class EditOptions:
     reference_plan: str = ""  # edit-plan.json of the same video in another language
     sfx_volume: float = 0.65  # scales every sound effect (1.0 = the original loudness)
     host_presence: str = "low"  # low, normal or high share of the video with the host
+    openers: bool = True  # open each item with its number, title and a picture of exactly that
 
 
 @dataclass
@@ -295,6 +296,20 @@ def chip_spans(chip: fx.Overlay, covered: List[Tuple[float, float]], duration: f
     return overlays
 
 
+def _after_opener(beat: _Beat, opener_end: float) -> Optional[_Beat]:
+    """A beat said while the section opener is on screen waits for it to leave."""
+    start = opener_end + 0.2
+    if beat.start >= start:
+        return beat
+    shortest = 1.2 if beat.kind == "text" else IMAGE_BEAT_MIN
+    if beat.end - start < shortest:
+        return None
+    beat.start = start
+    for number, member in enumerate(beat.members):
+        member.start = max(member.start, start + 0.4 * number)
+    return beat
+
+
 def _before_scenes(beat: _Beat, cover: List[Tuple[float, float]]) -> Optional[_Beat]:
     """Cut a beat short before the next scene; None when it would be hidden (and heard) under one."""
     for start, end in cover:
@@ -495,11 +510,21 @@ class Editor:
                 return anchor_time(segment.text, anchor, narration.sub_maker, narration.speech_seconds)
 
             window = self._subscribe_window(index, duration)
-            timed_scenes = scenes.time_scenes(entry.get("scenes") or [], locate, pauses, duration, [window] if window else [])
+            blocked = [window] if window else []
+            opener = None
+            if self.options.openers and segment.kind == "item":
+                opener = scenes.opener_scene(segment.name or segment.chapter, segment.number, entry.get("opener"), pauses, duration)
+                if opener is not None:
+                    blocked.append((opener.start, opener.end + 0.3))
+            timed_scenes = scenes.time_scenes(entry.get("scenes") or [], locate, pauses, duration, blocked)
+            if opener is not None:
+                timed_scenes.insert(0, opener)
             self._scenes[index] = timed_scenes
             cover = [(scene.start, scene.end) for scene in timed_scenes]
             covers.append(cover)
             beats = schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
+            if opener is not None:
+                beats = [beat for beat in (_after_opener(b, opener.end) for b in beats) if beat]
             self._beats[index] = [(beat, "") for beat in (_before_scenes(b, cover) for b in beats) if beat]
             reactions = []
             for beat in entry.get("beats") or []:
@@ -523,6 +548,8 @@ class Editor:
             narration = self.narrations[index]
             entry = self._entry(index)
             for scene in self._scenes[index]:
+                if scene.type == "opener":
+                    continue
                 scene.vertical = count % 2 == 1
                 count += 1
             prepared = []
@@ -576,6 +603,9 @@ class Editor:
             for scene in timed:
                 if scene.type == "figure":
                     jobs.append(lambda sc=scene, t=text: self._figure_picture(sc, t))
+                elif scene.type == "opener":
+                    jobs.append(lambda sc=scene, t=text: self._opener_picture(sc, t))
+                    continue
                 elif scene.type == "story" and self.options.illustrations == "ai" and self._gemini:
                     jobs.append(lambda sc=scene: self._story_pictures(sc))
                 for item in scene.items + ([scene.center] if scene.center and scene.type != "figure" else []):
@@ -729,6 +759,44 @@ class Editor:
         if scene.center is None:
             scene.center = scenes.SceneItem()
         self._item_pictures[id(scene.center)] = image
+
+    def _opener_picture(self, scene: scenes.Scene, text: str) -> None:
+        """The section opener's picture, strictly about its title.
+
+        A web picture Gemini confirms shows exactly that topic; else a drawing
+        of it (Imagen, when Gemini is configured); else the plan's icon; else
+        the card shows only the number and the title.
+        """
+        item = scene.center or scenes.SceneItem(label=scene.text)
+        scene.center = item
+        image = None
+        if self.options.picture_check and self._gemini:
+            save_dir = os.path.join(self.work_dir, "pictures")
+            candidates = []
+            for query in dict.fromkeys(q for q in (scene.query_local, scene.query) if q):
+                candidates += web_images.find_candidates(query, save_dir, kind=scene.look, exclude_urls=self._used_urls, limit=3)
+            candidates = candidates[:5]
+            if candidates:
+                first = re.split(r"(?<=[.!?…])\s+", (text or "").strip())[0][:300]
+                context = f"{scene.text}. {first}".strip()
+                choice = gemini_media.choose_picture(
+                    [c.path for c in candidates], context, scene.query or scene.text, self.options.language, purpose="opener"
+                )
+                if choice is not None and choice >= 0:
+                    found = candidates[choice]
+                    self._used_urls.add(found.url)
+                    self.credits.append(found.credit())
+                    image = scenes.prepare_picture(found.path, allow_cutout=scene.look != "photo")
+                else:
+                    logger.info(f"no picture for the section {scene.text!r} passed the check")
+            if image is None:
+                path = gemini_media.illustrate(item.draw or scene.query or scene.text)
+                if path:
+                    image = scenes.prepare_picture(path)
+                    self.credits.append("Illustrations: generated with Google Imagen")
+        if image is None and (item.icon or item.draw):
+            image = self._icon_picture(item)
+        self._item_pictures[id(item)] = image
 
     def _story_pictures(self, scene: scenes.Scene) -> None:
         """The flipbook drawn by the image model so the moments match each other."""

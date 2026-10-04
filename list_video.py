@@ -337,6 +337,11 @@ for the YouTube description, and edit-plan.json.
         help="use the first picture found instead of letting Gemini choose a simple, relevant one",
     )
     edit_group.add_argument(
+        "--no-openers",
+        action="store_true",
+        help="do not open each item with its number, title and a picture of exactly that topic",
+    )
+    edit_group.add_argument(
         "--host-presence",
         choices=["low", "normal", "high"],
         default="low",
@@ -608,6 +613,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             scene_color=args.scene_color or "",
             picture_check=not args.no_picture_check,
             host_presence=args.host_presence,
+            openers=not args.no_openers,
             sfx_volume=min(2.0, max(0.0, args.sfx_volume)),
         )
 

@@ -1478,6 +1478,27 @@ def _normalize_scenes(entries, lookup: dict) -> list:
     return scenes[:MAX_EDIT_SCENES_PER_SEGMENT]
 
 
+def _normalize_opener(data) -> Optional[dict]:
+    """The picture that opens an item: what to search and what to draw if nothing fits."""
+    if not isinstance(data, dict):
+        return None
+    query = str(data.get("query") or "").strip()[:100]
+    if not query:
+        return None
+    opener = {
+        "query": query,
+        "query_local": str(data.get("query_local") or "").strip()[:100],
+        "look": "photo" if data.get("look") == "photo" else "diagram",
+    }
+    icon = str(data.get("icon") or "").strip()[:40]
+    draw = str(data.get("draw") or "").strip()[:160]
+    if icon:
+        opener["icon"] = icon
+    if draw:
+        opener["draw"] = draw
+    return opener
+
+
 def _image_beat(beat: dict, anchor: str) -> Optional[dict]:
     query = str(beat.get("query") or "").strip()[:100]
     if not query or not anchor:
@@ -1551,6 +1572,9 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
         host = str(entry.get("host") or "").strip().lower()
         if host in EDIT_HOST_MODES:
             normalized["host"] = host
+        opener = _normalize_opener(entry.get("opener"))
+        if opener:
+            normalized["opener"] = opener
         by_index[index] = normalized
     return [
         by_index.get(index, {"index": index, "expression": "", "backgrounds": [], "scenes": [], "beats": []})
