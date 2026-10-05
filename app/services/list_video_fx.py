@@ -51,8 +51,9 @@ class Overlay:
 
     ``mode`` selects how ``source`` is read: "still" (one picture held in
     memory), "frames" (an image-sequence pattern starting at ``start``),
-    "concat" (an ffconcat list covering the whole segment) or "media" (a GIF or
-    video starting at ``start``). ``x``/``y`` are ffmpeg overlay expressions.
+    "concat" (an ffconcat list covering the whole segment), "sequence" (an
+    ffconcat list starting at ``start``) or "media" (a GIF or video starting at
+    ``start``). ``x``/``y`` are ffmpeg overlay expressions.
     """
 
     source: str
@@ -64,6 +65,41 @@ class Overlay:
     fade_in: float = 0.0
     fade_out: float = 0.0
     hold: bool = False  # "frames": keep the last frame until ``end``
+
+
+def render_badge(picture: Image.Image, size: int, ring: Tuple[int, int, int]) -> Image.Image:
+    """A round channel badge: the picture in a white disc with a coloured ring."""
+    scale = 3
+    big = size * scale
+    badge = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(badge)
+    line = int(big * 0.07)
+    draw.ellipse((0, 0, big - 1, big - 1), fill=ring + (255,))
+    draw.ellipse((line, line, big - 1 - line, big - 1 - line), fill=(255, 255, 255, 255))
+    inner = big - line * 2
+    fitted = ImageOps.contain(picture.convert("RGBA"), (int(inner * 0.92), int(inner * 0.92)), Image.LANCZOS)
+    layer = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    layer.alpha_composite(fitted, ((big - fitted.width) // 2, line + inner - fitted.height))
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).ellipse((line, line, big - 1 - line, big - 1 - line), fill=255)
+    clipped = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    clipped.paste(layer, (0, 0), Image.composite(layer.getchannel("A"), Image.new("L", (big, big), 0), mask))
+    badge.alpha_composite(clipped)
+    return badge.resize((size, size), Image.LANCZOS)
+
+
+def write_ffconcat(path: str, entries) -> str:
+    """An ffconcat list playing (picture, seconds) entries one after another."""
+    lines = ["ffconcat version 1.0"]
+    for picture, seconds in entries:
+        lines.append(f"file '{os.path.abspath(picture)}'")
+        lines.append(f"duration {seconds:.4f}")
+    if entries:
+        # The concat demuxer ignores the last duration unless the file repeats.
+        lines.append(f"file '{os.path.abspath(entries[-1][0])}'")
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write("\n".join(lines) + "\n")
+    return path
 
 
 def media_duration(ffmpeg_binary: str, media_file: str) -> float:

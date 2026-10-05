@@ -337,6 +337,35 @@ for the YouTube description, and edit-plan.json.
         help="use the first picture found instead of letting Gemini choose a simple, relevant one",
     )
     edit_group.add_argument(
+        "--look",
+        choices=["footage", "doodle"],
+        default="footage",
+        help="footage: stock video with pictures and explainer scenes; doodle: the whole video drawn on a "
+        "flat colour, a new drawing for every idea (Gemini/Imagen drawings, about US$0.02-0.04 each)",
+    )
+    edit_group.add_argument(
+        "--canvas-color",
+        type=_scene_color,
+        default=None,
+        help="background of the doodle look (default: warm yellow #F4C24F)",
+    )
+    edit_group.add_argument(
+        "--no-boil",
+        action="store_true",
+        help="doodle look: keep the drawings perfectly still (no hand-drawn wobble)",
+    )
+    edit_group.add_argument(
+        "--max-drawings",
+        type=int,
+        default=160,
+        help="doodle look: most AI drawings per video; icons are used after that (default: 160)",
+    )
+    edit_group.add_argument(
+        "--logo",
+        default="",
+        help='a round channel badge in the top-right corner: "nutria" or a picture file',
+    )
+    edit_group.add_argument(
         "--no-openers",
         action="store_true",
         help="do not open each item with its number, title and a picture of exactly that topic",
@@ -505,6 +534,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         args.assets = built_in_assets_dir(args.assets)
     if args.assets and not os.path.isdir(args.assets):
         parser.error(f"--assets folder not found: {args.assets}")
+    if args.logo and args.logo != "nutria" and not os.path.isfile(args.logo):
+        parser.error(f"--logo picture not found: {args.logo}")
     if args.edit_plan and not os.path.isfile(args.edit_plan):
         parser.error(f"--edit-plan file not found: {args.edit_plan}")
     if not args.also_in and (args.also_voice or args.also_voice_style or args.also_script):
@@ -631,6 +662,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             picture_check=not args.no_picture_check,
             host_presence=args.host_presence,
             openers=not args.no_openers,
+            look=args.look,
+            canvas_color=args.canvas_color or "",
+            boil=not args.no_boil,
+            max_drawings=max(0, args.max_drawings),
+            logo=args.logo,
             sfx_volume=min(2.0, max(0.0, args.sfx_volume)),
         )
 

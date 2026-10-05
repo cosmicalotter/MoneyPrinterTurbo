@@ -18,12 +18,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
+from PIL import Image
 
 from app.services import gemini_media, icons, llm, material, web_images
 from app.services import list_video_fx as fx
@@ -69,6 +71,11 @@ class EditOptions:
     host_presence: str = "low"  # low, normal or high share of the video with the host
     openers: bool = True  # open each item with its number, title and a picture of exactly that
     fill_gaps: bool = True  # ask the LLM for pictures for sentences left with only footage
+    look: str = "footage"  # "footage" (stock video with pictures and scenes) or "doodle" (all drawn)
+    canvas_color: str = ""  # background of the doodle look; "" is a warm yellow
+    boil: bool = True  # doodle look: drawings wobble very slightly, like hand-drawn animation
+    logo: str = ""  # a corner badge: "nutria" (the bundled otter) or a picture file
+    max_drawings: int = 160  # doodle look: AI drawings per video (icons after that)
 
 
 @dataclass
@@ -429,10 +436,34 @@ def default_plan(segments, poses) -> List[dict]:
     return plan
 
 
+LOOKS = ("footage", "doodle")
+DOODLE_COLOR = (244, 194, 79)  # the warm yellow of hand-drawn explainer channels
+
+
 def load_plan_file(path: str, segment_count: int, expressions: List[str]) -> List[dict]:
     with open(path, "r", encoding="utf-8-sig") as fp:
         data = json.load(fp)
+    segments = data.get("segments") if isinstance(data, dict) else data
+    if isinstance(segments, list) and any(isinstance(e, dict) and "shots" in e for e in segments):
+        return llm.normalize_storyboard(data, segment_count, expressions)
     return llm.normalize_edit_plan(data, segment_count, expressions)
+
+
+def doodle_fallback(segments, poses) -> List[dict]:
+    """A plain storyboard when the LLM gives none: one drawing per segment."""
+    plan = default_plan(segments, poses)
+    for entry, segment in zip(plan, segments):
+        words = segment.text.split()
+        anchor = " ".join(words[:3])
+        if segment.kind == "item" and segment.image_term:
+            entry["shots"] = [{"type": "single", "at": anchor, "label": segment.name or "", "draw": segment.image_term,
+                               "icon": "", "text": ""}]
+        elif poses:
+            entry["shots"] = [{"type": "single", "at": anchor, "label": "", "pose": entry["expression"], "draw": "",
+                               "icon": "", "text": ""}]
+        else:
+            entry["shots"] = []
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +488,9 @@ class Editor:
         self.work_dir = os.path.join(task_dir, "edit")
         os.makedirs(self.work_dir, exist_ok=True)
         self.total = sum(n.frames for n in narrations) / 30.0 or 1.0
-        self.poses = fx.load_character(options.assets_dir) if options.host != "none" else {}
+        self.doodle = options.look == "doodle"
+        # The doodle look draws the otter inside its shots even without a host track.
+        self.poses = fx.load_character(options.assets_dir) if options.host != "none" or self.doodle else {}
         self.sfx = fx.resolve_sfx(options.assets_dir, self.work_dir) if options.sound_effects else {}
         self.credits: List[str] = []
         self.warnings: List[str] = []
@@ -472,6 +505,13 @@ class Editor:
         self._gemini = gemini_media.enabled()
         self.host_plan: List[host.HostSegment] = []
         self.plan: List[dict] = []
+        self._drawings = 0
+        self._drawing_lock = threading.Lock()
+
+    @property
+    def wants_footage(self) -> bool:
+        """False in the doodle look, where the drawn canvas replaces stock video."""
+        return not self.doodle
 
     # -- plan ---------------------------------------------------------------
 
@@ -488,23 +528,29 @@ class Editor:
                 for i, s in enumerate(self.segments)
             ]
             reference = self._reference_plan()
-            if reference:
+            if self.doodle:
+                plan = llm.generate_storyboard(payload, expressions, self.options.language, reference=reference)
+                if plan is None:
+                    self.warnings.append("the LLM did not return a storyboard; one drawing per segment was used")
+            elif reference:
                 plan = llm.generate_edit_plan(payload, expressions, self.options.language, reference=reference)
             else:
                 plan = llm.generate_edit_plan(payload, expressions, self.options.language)
-            if plan is None:
+            if plan is None and not self.doodle:
                 self.warnings.append(
                     "the LLM did not return an edit plan; only the base visuals were used"
                 )
-            elif not reference and self.options.fill_gaps and self.options.beats != "none":
+            elif plan is not None and not self.doodle and not reference and self.options.fill_gaps and self.options.beats != "none":
                 self._fill_gaps(plan)
-        fallback = default_plan(self.segments, self.poses)
+        fallback = doodle_fallback(self.segments, self.poses) if self.doodle else default_plan(self.segments, self.poses)
         plan = plan or fallback
         for entry, default in zip(plan, fallback):
             if not entry.get("expression"):
                 entry["expression"] = default["expression"]
             entry.setdefault("backgrounds", [])
             entry.setdefault("scenes", [])
+            if self.doodle:
+                entry.setdefault("shots", default.get("shots", []))
             if not self.options.scenes:
                 entry["scenes"] = []
             if self.options.beats == "none":
@@ -603,13 +649,17 @@ class Editor:
                 opener = scenes.opener_scene(segment.name or segment.chapter, segment.number, entry.get("opener"), pauses, duration)
                 if opener is not None:
                     blocked.append((opener.start, opener.end + 0.3))
-            timed_scenes = scenes.time_scenes(entry.get("scenes") or [], locate, pauses, duration, blocked)
+            if self.doodle:
+                # Drawn shots one after another, from the end of the opener to the cut.
+                timed_scenes = scenes.time_shots(entry.get("shots") or [], locate, duration, opener.end if opener else 0.0)
+            else:
+                timed_scenes = scenes.time_scenes(entry.get("scenes") or [], locate, pauses, duration, blocked)
             if opener is not None:
                 timed_scenes.insert(0, opener)
             self._scenes[index] = timed_scenes
             cover = [(scene.start, scene.end) for scene in timed_scenes]
             covers.append(cover)
-            beats = schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
+            beats = [] if self.doodle else schedule_beats(entry.get("beats") or [], segment.text, narration, duration)
             if opener is not None:
                 beats = [beat for beat in (_after_opener(b, opener.end) for b in beats) if beat]
             self._beats[index] = [(beat, "") for beat in (_before_scenes(b, cover) for b in beats) if beat]
@@ -667,6 +717,8 @@ class Editor:
             )
         names = sorted(self.poses)
         mode = self.options.host if self.options.host in host.HOST_MODES else "auto"
+        if self.doodle and mode != "always":
+            mode = "none"  # the otter lives inside the drawings
         seed = fx.safe_seed("".join(s.chapter for s in self.segments)) % len(host.ITEM_PATTERN)
         presence = self.options.host_presence if self.options.host_presence in host.HOST_PRESENCES else "low"
         self.host_plan = host.plan_host(infos, names, mode, seed, presence)
@@ -696,10 +748,15 @@ class Editor:
                 elif scene.type == "opener":
                     jobs.append(lambda sc=scene, t=text: self._opener_picture(sc, t))
                     continue
-                elif scene.type == "story" and self.options.illustrations == "ai" and self._gemini:
+                elif scene.type == "illustration":
+                    jobs.append(lambda sc=scene: self._illustration_picture(sc))
+                    continue
+                elif scene.type == "story" and (self.options.illustrations == "ai" or self.doodle) and self._gemini:
                     jobs.append(lambda sc=scene: self._story_pictures(sc))
                 for item in scene.items + ([scene.center] if scene.center and scene.type != "figure" else []):
-                    if item.query or item.icon or item.draw:
+                    if self.doodle and (item.draw or item.icon or item.pose):
+                        jobs.append(lambda i=item: self._doodle_picture(i))
+                    elif item.query or item.icon or item.draw:
                         jobs.append(lambda i=item, t=text: self._item_picture(i, sentence_at(t, i.at)))
         if not jobs:
             return
@@ -711,10 +768,18 @@ class Editor:
                     logger.warning(f"a picture could not be prepared: {type(exc).__name__}: {exc}")
         # Full-screen pictures that were not found leave the footage alone.
         for index, timed in self._scenes.items():
-            self._scenes[index] = [
+            kept = [
                 sc for sc in timed
-                if sc.type not in ("figure", "annotate") or self._item_pictures.get(id(sc.center)) is not None
+                if sc.type not in ("figure", "annotate", "illustration") or self._item_pictures.get(id(sc.center)) is not None
             ]
+            if self.doodle and kept and timed:
+                # Shots follow each other: the one before a dropped shot stays longer.
+                for shot, following in zip(kept, kept[1:]):
+                    if shot.type != "opener":
+                        shot.end = following.start
+                if kept[-1].type != "opener":
+                    kept[-1].end = timed[-1].end
+            self._scenes[index] = kept
 
     # -- assets -------------------------------------------------------------
 
@@ -816,7 +881,7 @@ class Editor:
             for query in (item.icon, item.draw):
                 path = icons.fetch(query) if query else ""
                 if path:
-                    image = scenes.prepare_picture(path)
+                    image = scenes.prepare_picture(path, trust_alpha=True)
                     self.credits.append(icons.CREDIT)
                     break
             self._scene_pictures[key] = image
@@ -880,6 +945,45 @@ class Editor:
         self.credits.append(found.credit())
         self._item_pictures[id(scene.center)] = image
 
+    def _mascot(self) -> str:
+        """A picture of the channel's character, as the reference for drawings of it."""
+        name = _pick(self.poses, ("explicando", "feliz", "neutral"))
+        return self.poses[name].idle if name else ""
+
+    def _drawing(self, description: str, mascot: bool = False, scene: bool = False):
+        """A Gemini/Imagen drawing for the doodle look, within the drawing budget; None otherwise."""
+        if not (self._gemini and description):
+            return None
+        with self._drawing_lock:
+            if self._drawings >= max(0, self.options.max_drawings):
+                return None
+            self._drawings += 1
+        path = gemini_media.draw(description, scene=scene, mascot=self._mascot() if mascot else "")
+        if not path:
+            return None
+        self.credits.append("Illustrations: drawn with Google Gemini / Imagen")
+        return scenes.prepare_picture(path, allow_cutout=not scene)
+
+    def _doodle_picture(self, item: scenes.SceneItem) -> None:
+        """A shot element: the otter's own pose, a drawing, or the icon."""
+        image = None
+        if item.pose and item.pose in self.poses:
+            image = scenes.prepare_picture(self.poses[item.pose].idle, trust_alpha=True)
+        if image is None and item.draw:
+            image = self._drawing(item.draw, mascot=item.otter)
+        if image is None:
+            image = self._icon_picture(item)
+        self._item_pictures[id(item)] = image
+
+    def _illustration_picture(self, scene: scenes.Scene) -> None:
+        """A whole drawn scene (16:9) for a story moment."""
+        item = scene.center or scenes.SceneItem()
+        scene.center = item
+        image = self._drawing(item.draw, mascot=item.otter, scene=True)
+        if image is not None:
+            image.info["framed"] = True
+            self._item_pictures[id(item)] = image
+
     def _opener_picture(self, scene: scenes.Scene, text: str) -> None:
         """The section opener's picture, strictly about its title.
 
@@ -890,7 +994,10 @@ class Editor:
         item = scene.center or scenes.SceneItem(label=scene.text)
         scene.center = item
         image = None
-        if self.options.picture_check and self._gemini:
+        if self.doodle:
+            # The doodle look draws the opener too, so it matches the rest.
+            image = self._drawing(item.draw or scene.query or scene.text, mascot=item.otter)
+        if image is None and self.options.picture_check and self._gemini:
             save_dir = os.path.join(self.work_dir, "pictures")
             candidates = []
             for query in dict.fromkeys(q for q in (scene.query_local, scene.query) if q):
@@ -944,13 +1051,55 @@ class Editor:
             self._scene_renderer = scenes.SceneRenderer(
                 self.theme,
                 self.work_dir,
-                scene_canvas_color(self.options.scene_color, self.theme.accent),
+                self.canvas_color(),
                 self._scene_picture,
                 self._host_still if self.poses else None,
                 self.sfx,
                 font_path=scenes.hand_font_path(texts),
+                doodle=self.doodle,
+                boil=self.options.boil,
             )
         return self._scene_renderer
+
+    def canvas_color(self) -> Tuple[int, int, int]:
+        if self.doodle:
+            if not self.options.canvas_color:
+                return DOODLE_COLOR
+            try:
+                return scene_canvas_color(self.options.canvas_color, self.theme.accent)
+            except ValueError:
+                return DOODLE_COLOR
+        return scene_canvas_color(self.options.scene_color, self.theme.accent)
+
+    def _canvas_overlay(self) -> fx.Overlay:
+        path = os.path.join(self.work_dir, "canvas.png")
+        if not os.path.isfile(path):
+            scenes.paper((self.theme.width, self.theme.height), self.canvas_color(), vignette=0.0).save(path)
+        return fx.Overlay(path, x="0", y="0")
+
+    def _logo_overlay(self) -> Optional[fx.Overlay]:
+        """The channel's badge in the top-right corner."""
+        path = os.path.join(self.work_dir, "logo.png")
+        if not os.path.isfile(path):
+            source = None
+            if self.options.logo == "nutria":
+                name = _pick(self.poses, ("feliz", "explicando", "neutral"))
+                if name:
+                    with Image.open(self.poses[name].idle) as pose:
+                        pose = pose.convert("RGBA")
+                        bbox = pose.getchannel("A").getbbox() or (0, 0, pose.width, pose.height)
+                        pose = pose.crop(bbox)
+                        side = int(pose.width * 0.82)
+                        left = (pose.width - side) // 2
+                        source = pose.crop((left, 0, left + side, side))
+            elif self.options.logo and os.path.isfile(self.options.logo):
+                with Image.open(self.options.logo) as picture:
+                    source = picture.convert("RGBA")
+            if source is None:
+                return None
+            fx.render_badge(source, self.theme.px(118), self.theme.accent).save(path)
+        margin = self.theme.px(30)
+        return fx.Overlay(path, x=f"W-w-{margin}", y=str(margin))
 
     def _host_still(self, expression: str, height: int):
         names = list(self.poses)
@@ -981,7 +1130,9 @@ class Editor:
         planned = self.host_plan[index] if index < len(self.host_plan) else host.HostSegment("off")
         has_character = bool(self.poses)
 
-        if index > 0:
+        if self.doodle:
+            edit.overlays.append(self._canvas_overlay())
+        elif index > 0:
             # Centred on the cut, so the whoosh carries the transition.
             self._sound(edit, -0.2, "whoosh")
 
@@ -1070,6 +1221,11 @@ class Editor:
                 edit.sounds.append((subscribe_window[0], self._subscribe["sound"], _SFX_GAIN["subscribe"]))
             else:
                 self._sound(edit, click, "click")
+
+        if self.options.logo:
+            logo = self._logo_overlay()
+            if logo is not None:
+                edit.overlays.append(logo)
 
         volume = max(0.0, float(self.options.sfx_volume))
         edit.sounds = [(time, path, gain * volume) for time, path, gain in edit.sounds if gain * volume > 0]

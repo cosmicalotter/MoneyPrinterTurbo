@@ -41,13 +41,15 @@ SCENE_TYPES = (
     "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
     "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
     "definition", "equation", "annotate", "chain", "branch",
+    "single", "speech", "illustration",
 )
 # Scenes whose elements are anchored one by one to the narration.
 ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "formula", "timeline", "chain", "branch")
 # Scenes shown at one anchor whose parts follow by themselves (or at their own anchors).
-PART_SCENES = ("equation", "annotate")
+PART_SCENES = ("equation", "annotate", "speech")
+PART_KEYS = {"equation": "terms", "annotate": "labels", "speech": "items"}
 # Scenes rendered as a full-frame video clip (a slow zoom) instead of layers.
-CLIP_SCENES = ("figure", "zoom")
+CLIP_SCENES = ("figure", "zoom", "illustration")
 SCENE_MARKS = ("cross", "check")
 SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
@@ -68,8 +70,8 @@ _SFX = {"pop": 0.5, "stamp": 0.8, "scribble": 0.45, "whoosh": 0.5, "tick": 0.6}
 # Seconds a scene stays after its last element, by type.
 _TAILS = {"statement": 2.6, "stat": 3.0, "bars": 3.0, "grid": 3.4, "gauge": 3.2, "zoom": 3.4,
           "question": 2.8, "story": 2.8, "figure": 5.0, "definition": 5.2, "equation": 2.8, "annotate": 2.6,
-          "chain": 2.8, "branch": 2.8}
-PART_FIRST = {"equation": 1.2, "annotate": 1.0}  # seconds from the anchor to the first part
+          "chain": 2.8, "branch": 2.8, "single": 2.6, "speech": 3.0, "illustration": 3.5}
+PART_FIRST = {"equation": 1.2, "annotate": 1.0, "speech": 0.0}  # seconds from the anchor to the first part
 PART_STEP = 0.9  # parts without their own anchor follow each other this far apart
 
 
@@ -90,6 +92,8 @@ class SceneItem:
     unit: str = ""  # an equation term's unit ("voltios")
     link: str = ""  # chain: the verb written on the arrow to the next item
     point: Optional[Tuple[float, float]] = None  # annotate: where the part is (0-1, 0-1 of the picture)
+    otter: bool = False  # draw the channel's otter in this picture
+    pose: str = ""  # use one of the host's own poses as the picture
 
 
 @dataclass
@@ -119,6 +123,7 @@ class Scene:
     number: int = 0  # section number of an opener
     symbol: str = ""  # definition: the quantity's symbol
     example: str = ""  # equation: a worked example ("12 V = 2 A × 6 Ω")
+    still: bool = False  # never slides in or out (the shots of the doodle look)
 
 
 OPENER_SECONDS = 3.2  # how long a section opener holds the screen
@@ -172,6 +177,8 @@ def _item(data: dict) -> SceneItem:
         symbol=str(data.get("symbol") or ""),
         unit=str(data.get("unit") or ""),
         link=str(data.get("link") or ""),
+        otter=bool(data.get("otter")),
+        pose=str(data.get("pose") or ""),
     )
 
 
@@ -220,6 +227,9 @@ def _scene_from(spec: dict, kind: str, start: float, end: float, items: List[Sce
         scene.center = SceneItem(label=str(spec.get("name") or spec.get("label") or ""))
     elif kind == "annotate":
         scene.center = SceneItem(query=scene.query, at=str(spec.get("at") or ""))
+    elif kind in ("single", "illustration"):
+        item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
+        scene.center = _item(dict(item, at=spec.get("at") or ""))
     if kind in ("stat", "grid", "gauge", "zoom", "figure"):
         item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
         scene.center = scene.center or SceneItem(
@@ -243,6 +253,96 @@ def _delay(scene: Scene, start: float, duration: float) -> bool:
     return scene.end - scene.start >= MIN_SCENE_SECONDS and not (scene.type in ITEM_SCENES and len(scene.items) < 2)
 
 
+def _spec_times(
+    spec: dict, kind: str, locate: Callable[[str], Optional[float]], min_items: int = 2
+) -> Optional[Tuple[List[SceneItem], List[float]]]:
+    """The timed elements of a plan scene and every moment it shows something; None if it cannot be placed."""
+    items: List[SceneItem] = []
+    if kind not in ITEM_SCENES:
+        time = locate(spec.get("at", ""))
+        if time is None:
+            return None
+        times = [time]
+        if kind in PART_SCENES:
+            # Each part appears when it is explained, or after the previous one.
+            previous = time + PART_FIRST[kind] - PART_STEP
+            for data in spec.get(PART_KEYS[kind]) or []:
+                if not isinstance(data, dict):
+                    continue
+                item = _item(data)
+                said = locate(item.at) if item.at else None
+                item.time = max(previous + PART_STEP, said if said is not None and said < previous + 4.0 else 0.0)
+                previous = item.time
+                items.append(item)
+            times += [i.time for i in items]
+        return items, times
+    source = list(spec.get("items") or spec.get("frames") or [])
+    if kind == "formula" and isinstance(spec.get("result"), dict):
+        source.append(dict(spec["result"], role="result"))
+    for data in source:
+        if not isinstance(data, dict):
+            continue
+        item = _item(data)
+        time = locate(item.at)
+        if time is not None:
+            item.time = time
+            items.append(item)
+    items.sort(key=lambda i: i.time)
+    # Items said in the same breath would pop in on top of each other.
+    spaced: List[SceneItem] = []
+    for item in items:
+        if spaced and item.time - spaced[-1].time < 0.5:
+            item.time = spaced[-1].time + 0.5
+        spaced.append(item)
+    if len(spaced) < min_items:
+        return None
+    return spaced, [i.time for i in spaced]
+
+
+MIN_SHOT_SECONDS = 1.6
+
+
+def time_shots(
+    specs: List[dict], locate: Callable[[str], Optional[float]], duration: float, start: float = 0.0
+) -> List[Scene]:
+    """Shots of the doodle look: drawn compositions that follow each other with no gap.
+
+    Each shot starts when its first words are said and lasts until the next
+    one; the first fills the screen from ``start`` (the end of an opener) and
+    the last until the end of the segment. Shots too close to the previous one
+    are dropped.
+    """
+    placed = []
+    for spec in specs:
+        kind = spec.get("type")
+        if kind not in SCENE_TYPES:
+            continue
+        found = _spec_times(spec, kind, locate, min_items=1)
+        if found is None:
+            continue
+        items, times = found
+        placed.append((max(start, min(times) - 0.15), spec, kind, items))
+    placed.sort(key=lambda entry: entry[0])
+    kept = []
+    for at, spec, kind, items in placed:
+        if kept and at - kept[-1][0] < MIN_SHOT_SECONDS:
+            continue
+        if duration - at < MIN_SHOT_SECONDS:
+            continue
+        kept.append((at, spec, kind, items))
+    shots: List[Scene] = []
+    for number, (at, spec, kind, items) in enumerate(kept):
+        begin = start if number == 0 else at
+        end = kept[number + 1][0] if number + 1 < len(kept) else duration
+        visible = [i for i in items if i.time < end - 0.8]
+        for item in visible:
+            item.time = max(item.time, begin + 0.12)
+        scene = _scene_from(spec, kind, begin, end, visible)
+        scene.exit = False
+        shots.append(scene)
+    return shots
+
+
 def time_scenes(
     specs: List[dict],
     locate: Callable[[str], Optional[float]],
@@ -260,47 +360,10 @@ def time_scenes(
         kind = spec.get("type")
         if kind not in SCENE_TYPES:
             continue
-        items: List[SceneItem] = []
-        if kind not in ITEM_SCENES:
-            time = locate(spec.get("at", ""))
-            if time is None:
-                continue
-            times = [time]
-            if kind in PART_SCENES:
-                # Each part appears when it is explained, or after the previous one.
-                previous = time + PART_FIRST[kind] - PART_STEP
-                for data in spec.get("terms" if kind == "equation" else "labels") or []:
-                    if not isinstance(data, dict):
-                        continue
-                    item = _item(data)
-                    said = locate(item.at) if item.at else None
-                    item.time = max(previous + PART_STEP, said if said is not None and said < previous + 4.0 else 0.0)
-                    previous = item.time
-                    items.append(item)
-                times += [i.time for i in items]
-        else:
-            source = list(spec.get("items") or spec.get("frames") or [])
-            if kind == "formula" and isinstance(spec.get("result"), dict):
-                source.append(dict(spec["result"], role="result"))
-            for data in source:
-                if not isinstance(data, dict):
-                    continue
-                item = _item(data)
-                time = locate(item.at)
-                if time is not None:
-                    item.time = time
-                    items.append(item)
-            items.sort(key=lambda i: i.time)
-            # Items said in the same breath would pop in on top of each other.
-            spaced: List[SceneItem] = []
-            for item in items:
-                if spaced and item.time - spaced[-1].time < 0.5:
-                    item.time = spaced[-1].time + 0.5
-                spaced.append(item)
-            items = spaced
-            if len(items) < 2:
-                continue
-            times = [i.time for i in items]
+        found = _spec_times(spec, kind, locate)
+        if found is None:
+            continue
+        items, times = found
 
         start = max(0.0, min(times) - (0.3 if kind in ("figure", "annotate") else 0.45))
         if start < 0.5:
@@ -364,6 +427,13 @@ def time_scenes(
 # ---------------------------------------------------------------------------
 
 
+def format_number(value: float) -> str:
+    """12 -> "12", 2.5 -> "2.5", 200000000 -> "200,000,000"."""
+    if float(value).is_integer():
+        return f"{int(value):,}" if abs(value) >= 10000 else str(int(value))
+    return f"{value:g}"
+
+
 def _ease_out_back(p: float) -> float:
     p = min(1.0, max(0.0, p))
     return 1 + 2.70158 * (p - 1) ** 3 + 1.70158 * (p - 1) ** 2
@@ -383,7 +453,7 @@ def hand_font_path(texts: Sequence[str] = ()) -> str:
     return ""
 
 
-def paper(size: Tuple[int, int], color: Tuple[int, int, int], seed: int = 7) -> Image.Image:
+def paper(size: Tuple[int, int], color: Tuple[int, int, int], seed: int = 7, vignette: float = 0.07) -> Image.Image:
     """A flat colour with a little grain and a soft vignette, like a printed page."""
     width, height = size
     rng = np.random.default_rng(seed)
@@ -394,7 +464,7 @@ def paper(size: Tuple[int, int], color: Tuple[int, int, int], seed: int = 7) -> 
     base += grain[:, :, None]
     y, x = np.mgrid[0:height, 0:width].astype(np.float32)
     distance = np.sqrt(((x - width / 2) / (width / 2)) ** 2 + ((y - height / 2) / (height / 2)) ** 2)
-    base *= (1 - 0.07 * np.clip(distance - 0.35, 0, None) ** 1.5)[:, :, None]
+    base *= (1 - vignette * np.clip(distance - 0.35, 0, None) ** 1.5)[:, :, None]
     return Image.fromarray(np.clip(base, 0, 255).astype(np.uint8))
 
 
@@ -419,7 +489,7 @@ def die_cut(image: Image.Image, outline: int, shadow: bool = True) -> Image.Imag
     return out
 
 
-def prepare_picture(path: str, allow_cutout: bool = True) -> Optional[Image.Image]:
+def prepare_picture(path: str, allow_cutout: bool = True, trust_alpha: bool = False) -> Optional[Image.Image]:
     """A clean transparent cut-out of an icon or drawing, or the photo itself.
 
     Pictures that cannot be cut out cleanly (photos, dark or busy backdrops)
@@ -431,6 +501,10 @@ def prepare_picture(path: str, allow_cutout: bool = True) -> Optional[Image.Imag
             image = source.convert("RGBA")
     except Exception:
         return None
+    if trust_alpha and fx.has_transparency(image):
+        # Icons are drawn with their own transparency; use them as they are.
+        bbox = image.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
+        return image.crop(bbox) if bbox else image
     cutout = fx.cutout_or_none(image, allow_cutout)
     if cutout is None:
         photo = Image.new("RGBA", image.size, (255, 255, 255, 255))
@@ -455,6 +529,48 @@ def framed_card(image: Image.Image, border: int, radius: int) -> Image.Image:
     out.alpha_composite(shade.filter(ImageFilter.GaussianBlur(blur)))
     out.alpha_composite(card, (blur * 2, blur * 2))
     return out
+
+
+def ink_frame(image: Image.Image, border: int, radius: int) -> Image.Image:
+    """A photo or map with a hand-drawn ink border (the doodle look's frame)."""
+    card = Image.new("RGBA", (image.width + border * 2, image.height + border * 2), (0, 0, 0, 0))
+    mask = Image.new("L", image.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, image.width - 1, image.height - 1), max(1, radius - border), fill=255)
+    card.paste(image.convert("RGB"), (border, border), mask)
+    ImageDraw.Draw(card).rounded_rectangle(
+        (border // 2, border // 2, card.width - 1 - border // 2, card.height - 1 - border // 2), radius,
+        outline=INK + (255,), width=border,
+    )
+    return card
+
+
+BOIL_FRAMES = 4  # each wobble lasts this many frames (7.5 drawings per second, like hand animation)
+
+
+def boil_variants(image: Image.Image, count: int = 3, amplitude: float = 1.3, grid: int = 5, seed: int = 0) -> List[Image.Image]:
+    """The same drawing redrawn ``count`` times with tiny smooth warps ("line boil")."""
+    width, height = image.size
+    if width < 8 or height < 8:
+        return [image] * count
+    rng = np.random.default_rng(seed)
+    variants = []
+    for _ in range(count):
+        offsets = rng.uniform(-amplitude, amplitude, (grid + 1, grid + 1, 2))
+        offsets[0, :, 1] = offsets[-1, :, 1] = 0  # the edges stay put
+        offsets[:, 0, 0] = offsets[:, -1, 0] = 0
+        xs = [round(width * i / grid) for i in range(grid + 1)]
+        ys = [round(height * j / grid) for j in range(grid + 1)]
+        mesh = []
+        for j in range(grid):
+            for i in range(grid):
+
+                def corner(ci, cj):
+                    return xs[ci] + offsets[cj, ci, 0], ys[cj] + offsets[cj, ci, 1]
+
+                quad = (*corner(i, j), *corner(i, j + 1), *corner(i + 1, j + 1), *corner(i + 1, j))
+                mesh.append(((xs[i], ys[j], xs[i + 1], ys[j + 1]), quad))
+        variants.append(image.transform(image.size, Image.MESH, mesh, Image.BICUBIC))
+    return variants
 
 
 class _Text:
@@ -748,6 +864,13 @@ def ken_burns_clip(still: Image.Image, output: str, frames: int, size: Tuple[int
     return output
 
 
+def fit_inside(image: Image.Image, box: int, most: float = 2.5) -> Image.Image:
+    """``image`` as large as fits in a ``box`` square (small icons grow up to ``most`` times)."""
+    scale = min(box / max(1, image.width), box / max(1, image.height), most)
+    size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+    return image.resize(size, Image.LANCZOS) if size != image.size else image
+
+
 def fit_cover(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
     from PIL import ImageOps
 
@@ -771,7 +894,15 @@ class SceneRenderer:
         host_still: Optional[Callable[[str, int], Image.Image]] = None,
         sfx: Optional[Dict[str, str]] = None,
         font_path: str = "",
+        doodle: bool = False,
+        boil: bool = True,
     ):
+        """``doodle``: everything is drawn on one flat canvas (the doodle look):
+        no slides between scenes, no sticker borders, and with ``boil`` the
+        drawings wobble very slightly like hand-drawn animation."""
+        self.doodle = doodle
+        self.boil = boil and doodle
+        self.big = 1.3 if doodle else 1.0  # drawings are the whole picture in the doodle look
         self.theme = theme
         self.work_dir = os.path.join(work_dir, "scenes")
         os.makedirs(self.work_dir, exist_ok=True)
@@ -787,7 +918,7 @@ class SceneRenderer:
     def _background(self, color: Tuple[int, int, int]) -> str:
         if color not in self._backgrounds:
             path = os.path.join(self.work_dir, f"paper-{color[0]:02x}{color[1]:02x}{color[2]:02x}.png")
-            paper((self.theme.width, self.theme.height), color).save(path)
+            paper((self.theme.width, self.theme.height), color, vignette=0.0 if self.doodle else 0.07).save(path)
             self._backgrounds[color] = path
         return self._backgrounds[color]
 
@@ -798,6 +929,8 @@ class SceneRenderer:
     @staticmethod
     def _slide(scene: Scene, axis: str = "x") -> str:
         """Offset along ``axis`` while the scene slides in and out (0 otherwise)."""
+        if scene.still:  # shots of the doodle look never slide
+            return "0"
         if (axis == "y") != scene.vertical:
             return "0"
         size = "H" if scene.vertical else "W"
@@ -814,6 +947,8 @@ class SceneRenderer:
         os.makedirs(folder, exist_ok=True)
         for number, frame in enumerate(frames):
             frame.save(os.path.join(folder, f"{name}_{number:03d}.png"), compress_level=1)
+        if self.boil:
+            return self._boiling(frames, folder, name, x, y, start, scene)
         return fx.Overlay(
             os.path.join(folder, f"{name}_%03d.png"),
             x=f"{int(x)}+{self._slide(scene)}",
@@ -822,6 +957,27 @@ class SceneRenderer:
             end=scene.end,
             mode="frames",
             hold=True,
+        )
+
+    def _boiling(self, frames, folder, name, x, y, start, scene) -> fx.Overlay:
+        """The entrance, then the last frame redrawn with tiny wobbles (line boil) until the end."""
+        variants = boil_variants(frames[-1], seed=sum(map(ord, name)) + int(start * 10))
+        paths = [os.path.join(folder, f"{name}_{number:03d}.png") for number in range(len(frames))]
+        for number, variant in enumerate(variants):
+            path = os.path.join(folder, f"{name}_boil{number}.png")
+            variant.save(path, compress_level=1)
+            paths.append(path)
+        entries = [(path, 1 / FPS) for path in paths[: len(frames)]]
+        remaining = max(0.0, scene.end - start - len(frames) / FPS)
+        cycle = paths[len(frames):]
+        step = BOIL_FRAMES / FPS
+        for count in range(int(remaining / step) + 1):
+            entries.append((cycle[count % len(cycle)], step))
+        listing = os.path.join(folder, f"{name}.ffconcat")
+        fx.write_ffconcat(listing, entries)
+        return fx.Overlay(
+            listing, x=f"{int(x)}+{self._slide(scene)}", y=f"{int(y)}+{self._slide(scene, 'y')}",
+            start=start, end=scene.end, mode="sequence", hold=True,
         )
 
     def _centered(self, frames, folder, name, cx, cy, start, scene) -> fx.Overlay:
@@ -834,12 +990,16 @@ class SceneRenderer:
             return None
         framed = bool(image.info.get("framed"))
         image = image.copy()
+        if self.doodle:
+            # Drawn straight on the canvas: no sticker border; photos get an ink frame.
+            if framed:
+                border = self.theme.px(5)
+                return ink_frame(fit_inside(image, box - border * 2), border, self.theme.px(14))
+            return fit_inside(image, box)
         if framed:
             border = self.theme.px(10)
-            image.thumbnail((box - border * 2, box - border * 2), Image.LANCZOS)
-            return framed_card(image, border, self.theme.px(22))
-        image.thumbnail((box, box), Image.LANCZOS)
-        return die_cut(image, self.theme.px(8))
+            return framed_card(fit_inside(image, box - border * 2), border, self.theme.px(22))
+        return die_cut(fit_inside(image, box), self.theme.px(8))
 
     def _card(
         self, item: SceneItem, box: int, label_size: int, label_width: int, label_on_top: bool, beside: bool = False
@@ -884,7 +1044,9 @@ class SceneRenderer:
         os.makedirs(folder, exist_ok=True)
         color = self.theme.accent if scene.type in ("statement", "question") else self.canvas_color
         overlays = []
-        if scene.type not in CLIP_SCENES:
+        if self.doodle:
+            scene.still, scene.vertical = True, False
+        if scene.type not in CLIP_SCENES and not self.doodle:
             overlays.append(
                 fx.Overlay(
                     self._background(color), x=self._slide(scene), y=self._slide(scene, "y"),
@@ -892,12 +1054,18 @@ class SceneRenderer:
                 )
             )
         sounds: List[Tuple[float, str, float]] = []
-        if scene.enter:
+        if scene.enter and not self.doodle:
             self._sound(sounds, scene.start - 0.1, "whoosh")
-        if scene.exit:
+        if scene.exit and not self.doodle:
             self._sound(sounds, scene.end - SLIDE_SECONDS - 0.05, "whoosh")
         builder = getattr(self, f"_build_{scene.type}")
         builder(scene, folder, overlays, sounds)
+        if self.doodle:
+            # Each drawing leaves with a quick fade when the next shot begins.
+            for overlay in overlays:
+                if not overlay.end or overlay.end >= scene.end - 0.02:
+                    overlay.end = scene.end
+                    overlay.fade_out = max(overlay.fade_out, 0.12)
         return overlays, sounds
 
     def _build_statement(self, scene, folder, overlays, sounds) -> None:
@@ -927,7 +1095,7 @@ class SceneRenderer:
         theme, W, H = self.theme, self.theme.width, self.theme.height
         appear = scene.start + SLIDE_SECONDS + 0.05
         value = scene.value
-        number = f"{value:g}{scene.unit}"
+        number = format_number(value) + scene.unit
         label = scene.center.label if scene.center else ""
         if theme.portrait:
             chart_center, number_center, label_y = (W * 0.5, H * 0.36), (W * 0.5, H * 0.64), H * 0.73
@@ -949,7 +1117,7 @@ class SceneRenderer:
         digits = []
         for frame in range(1, count + 1):
             shown = value * _ease_out_cubic(frame / count)
-            text = f"{round(shown):g}{scene.unit}" if float(value).is_integer() else f"{shown:.1f}{scene.unit}"
+            text = (format_number(round(shown)) if float(value).is_integer() else f"{shown:.1f}") + scene.unit
             image = self.text.render(text, size, int(W * 0.5), max_lines=1)
             canvas = Image.new("RGBA", (widest.width + 8, widest.height + 8), (0, 0, 0, 0))
             canvas.alpha_composite(image, ((canvas.width - image.width) // 2, (canvas.height - image.height) // 2))
@@ -979,7 +1147,7 @@ class SceneRenderer:
             box = int(min(H * 0.16, H * 0.5 / len(items)))
             label_width = int(W * 0.5)
         else:
-            box = int(min(H * 0.42, W * 0.78 / len(items)))
+            box = int(min(H * 0.42 * self.big, W * 0.78 / len(items)))
             label_width = int(W * 0.9 / len(items))
         label_size = int(H * 0.075)
         if divider and len(items) == 2 and not theme.portrait:
@@ -1018,7 +1186,7 @@ class SceneRenderer:
         center = (W * 0.5, H * 0.53)
         appear = scene.start + SLIDE_SECONDS + 0.05
         hub = scene.center or SceneItem(label="")
-        hub_box = int(H * (0.34 if not theme.portrait else 0.22))
+        hub_box = int(H * (0.34 if not theme.portrait else 0.22) * self.big)
         card, _ = self._card(hub, hub_box, int(H * 0.06), int(W * 0.3), label_on_top=False)
         overlays.append(self._centered(pop_frames(card), folder, "hub", *center, appear, scene))
         self._sound(sounds, appear, "pop")
@@ -1031,7 +1199,7 @@ class SceneRenderer:
         for number, (item, angle) in enumerate(zip(items, angles)):
             a = math.radians(angle)
             nx, ny = center[0] + rx * math.cos(a), center[1] + ry * math.sin(a)
-            node_box = int(H * (0.16 if not theme.portrait else 0.08))
+            node_box = int(H * (0.16 if not theme.portrait else 0.08) * self.big)
             node_label = int(H * (0.064 if not theme.portrait else 0.034))
             node, _ = self._card(item, node_box, node_label, int(W * (0.26 if not theme.portrait else 0.4)), label_on_top=False)
             overlays.append(self._centered(pop_frames(node), folder, f"node{number}", nx, ny, item.time, scene))
@@ -1187,7 +1355,7 @@ class SceneRenderer:
             box = int(min(H * 0.13, H * 0.5 / n))
         else:
             centers = [(W * 0.06 + W * 0.88 * (k + 0.5) / n, H * 0.54) for k in range(n)]
-            box = int(min(H * 0.3, W * 0.62 / n))
+            box = int(min(H * 0.3 * self.big, W * 0.62 / n))
         cards = []
         for number, (item, (cx, cy)) in enumerate(zip(items, centers)):
             card, _ = self._card(item, box, int(H * 0.06), int(W * 0.8 / n) if not theme.portrait else int(W * 0.7), label_on_top=False, beside=theme.portrait)
@@ -1281,7 +1449,7 @@ class SceneRenderer:
             length = max(thickness, int(longest * abs(item.value) / top_value))
             frames = bar_frames(length, thickness, theme.px(5), self.theme.accent if highlight else TEAL)
             overlays.append(self._frames(frames, folder, f"bar{number}", bar_left, cy - frames[-1].height / 2, item.time + 0.1, scene))
-            value = self.text.render(f"{item.value:g}{scene.unit}", int(thickness * 0.95), int(W * 0.16), max_lines=1)
+            value = self.text.render(f"{format_number(item.value)}{scene.unit}", int(thickness * 0.95), int(W * 0.16), max_lines=1)
             overlays.append(self._frames(pop_frames(value), folder, f"value{number}", bar_left + length + theme.px(18), cy - value.height * 0.6, item.time + 0.5, scene))
             self._sound(sounds, item.time + 0.1, "scribble")
 
@@ -1605,7 +1773,7 @@ class SceneRenderer:
             box = int(min(H * 0.12, H * 0.44 / n))
         else:
             centers = [(W * 0.04 + W * 0.92 * (k + 0.5) / n, H * 0.5) for k in range(n)]
-            box = int(min(H * 0.4, W * 0.62 / n))
+            box = int(min(H * 0.4 * self.big, W * 0.7 / n))
         cards = []
         for number, (item, (cx, cy)) in enumerate(zip(items, centers)):
             card, _ = self._card(item, box, int(H * 0.058), int(W * 0.8 / n) if not theme.portrait else int(W * 0.5), label_on_top=False, beside=theme.portrait)
@@ -1664,3 +1832,104 @@ class SceneRenderer:
                 p1 = (cx - card.width / 2 - theme.px(10), cy)
             frames, (left, top) = arrow_frames(p0, p1, theme.px(6), frames=8, bend=0.12 if cy < origin[1] else -0.12 if cy > origin[1] else 0.0)
             overlays.append(self._frames(frames, folder, f"arrow{number}", left, top, item.time - 0.2, scene))
+
+    # -- doodle shots -------------------------------------------------------------------
+
+    def _title(self, scene, folder, overlays, sounds, text: str, when: float) -> float:
+        """A hand-lettered title at the top of a shot; returns where the space below it starts."""
+        W, H = self.theme.width, self.theme.height
+        if not text:
+            return H * 0.06
+        image = self.text.render(text.upper(), int(H * (0.072 if not self.theme.portrait else 0.04)), int(W * 0.86), max_lines=2)
+        top = H * 0.07
+        overlays.append(self._frames(pop_frames(image), folder, "title", (W - image.width) / 2, top, when, scene))
+        return top + image.height + H * 0.03
+
+    def _build_single(self, scene, folder, overlays, sounds) -> None:
+        """One drawing, big, with its label (and an optional title above)."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        appear = scene.start + 0.12
+        item = scene.center or SceneItem()
+        top = self._title(scene, folder, overlays, sounds, scene.text, appear + 0.25)
+        room = H * 0.95 - top
+        box = int(min(room * (0.78 if item.label else 0.95), W * (0.62 if not theme.portrait else 0.86)))
+        card, _ = self._card(item, box, int(H * (0.075 if not theme.portrait else 0.04)), int(W * 0.8), label_on_top=False)
+        cy = top + room / 2
+        overlays.append(self._centered(pop_frames(card), folder, "single", W / 2, cy, appear, scene))
+        self._sound(sounds, appear, "pop")
+
+    def _bubble(self, text: str, width: int, tail_left: bool = True) -> Image.Image:
+        """A comic speech bubble (empty when ``text`` is empty) with its tail at the bottom."""
+        theme, H = self.theme, self.theme.height
+        label = self.text.render(text, int(H * (0.065 if not theme.portrait else 0.034)), int(width * 0.8), max_lines=4) if text else None
+        inner_w = width
+        inner_h = max(int(H * 0.24 if not theme.portrait else H * 0.12), (label.height if label else 0) + theme.px(70))
+        tail = int(inner_h * 0.35)
+        line = theme.px(5)
+
+        def paint(draw: ImageDraw.ImageDraw, s: float) -> None:
+            w, h, r = inner_w * s, inner_h * s, min(inner_w, inner_h) * 0.35 * s
+            fill, ink = (255, 249, 236, 255), INK + (255,)
+            base_x = w * (0.18 if tail_left else 0.82)
+            tip = (base_x - (0.1 * w if tail_left else -0.1 * w), h + tail * s)
+            draw.polygon([(base_x - 0.06 * w, h - line * s * 2), tip, (base_x + 0.06 * w, h - line * s * 2)], fill=fill, outline=ink)
+            draw.rounded_rectangle((line * s, line * s, w - line * s, h - line * s), r, fill=fill, outline=ink, width=int(line * s))
+            draw.polygon([(base_x - 0.06 * w + line * s, h - line * s * 1.6), tip, (base_x + 0.06 * w - line * s, h - line * s * 1.6)], fill=fill)
+            draw.line([(base_x - 0.06 * w, h - line * s), tip, (base_x + 0.06 * w, h - line * s)], fill=ink, width=int(line * s), joint="curve")
+
+        bubble = _supersampled((inner_w, inner_h + tail), paint, scale=2)
+        if label is not None:
+            bubble.alpha_composite(label, ((inner_w - label.width) // 2, (inner_h - label.height) // 2))
+        return bubble
+
+    def _build_speech(self, scene, folder, overlays, sounds) -> None:
+        """Someone talking: the speaker, a speech bubble and maybe who listens."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        people = scene.items[:2]
+        if not people:
+            return
+        speaker = people[0]
+        portrait = theme.portrait
+        box = int(H * (0.56 if not portrait else 0.3))
+        card, where = self._card(speaker, box, int(H * (0.06 if not portrait else 0.032)), int(W * 0.4), label_on_top=False)
+        spot = (W * (0.22 if not portrait else 0.32), H * (0.62 if not portrait else 0.66))
+        overlays.append(self._centered(pop_frames(card), folder, "speaker", *spot, speaker.time, scene))
+        self._sound(sounds, speaker.time, "pop")
+        bubble = self._bubble(scene.text, int(W * (0.34 if not portrait else 0.7)))
+        bubble_spot = (W * (0.52 if not portrait else 0.5), H * (0.3 if not portrait else 0.32))
+        when = speaker.time + 0.45
+        overlays.append(self._centered(pop_frames(bubble, start_scale=0.6), folder, "bubble", *bubble_spot, when, scene))
+        self._sound(sounds, when, "pop")
+        if len(people) > 1:
+            other = people[1]
+            card, _ = self._card(other, box, int(H * (0.06 if not portrait else 0.032)), int(W * 0.4), label_on_top=False)
+            other_spot = (W * (0.8 if not portrait else 0.72), H * (0.62 if not portrait else 0.74))
+            overlays.append(self._centered(pop_frames(card), folder, "listener", *other_spot, other.time, scene))
+            self._sound(sounds, other.time, "pop")
+
+    def _outlined(self, text: str, size: int, width: int) -> Image.Image:
+        """Big white letters with a thick ink outline, like a title card over a scene."""
+        font = self.text.font(size)
+        while font.getlength(text) > width and size > 20:
+            size = int(size * 0.9)
+            font = self.text.font(size)
+        stroke = max(3, size // 9)
+        bbox = font.getbbox(text, stroke_width=stroke)
+        image = Image.new("RGBA", (bbox[2] - bbox[0] + 8, bbox[3] - bbox[1] + 8), (0, 0, 0, 0))
+        ImageDraw.Draw(image).text((4 - bbox[0], 4 - bbox[1]), text, font=font, fill=WHITE + (255,), stroke_width=stroke, stroke_fill=INK + (255,))
+        return image
+
+    def _build_illustration(self, scene, folder, overlays, sounds) -> None:
+        """A whole illustrated scene filling the screen, the camera drifting in, with an optional big caption."""
+        W, H = self.theme.width, self.theme.height
+        image = self.picture(scene.center or SceneItem())
+        if image is None:
+            raise ValueError("the illustration was not drawn")
+        canvas = fit_cover(image, (W, H)).convert("RGBA")
+        clip = self._clip(scene, canvas, folder, 1.0, 1.08)
+        overlays.append(clip)
+        if scene.text:
+            text = self._outlined(scene.text.upper(), int(H * 0.14), int(W * 0.8))
+            when = scene.start + 0.35
+            overlays.append(self._centered(stamp_frames(text), folder, "caption", W / 2, H * 0.5, when, scene))
+            self._sound(sounds, when, "stamp")

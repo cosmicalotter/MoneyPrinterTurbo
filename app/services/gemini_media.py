@@ -390,3 +390,98 @@ def locate_parts(path: str, labels: List[str], app_config=None) -> List[Optional
         found.setdefault(label, (x, y))
         found.setdefault(position, (x, y))
     return [found.get(label.strip().lower(), found.get(position)) for position, label in enumerate(labels)]
+
+
+# ---------------------------------------------------------------------------
+# The doodle look: every picture is drawn
+# ---------------------------------------------------------------------------
+
+DOODLE_PROMPT = (
+    "Hand-drawn cartoon doodle for a calm educational YouTube animation: {subject}. "
+    "Black ink line art with natural, slightly uneven pen strokes and a little cross-hatching for shading, "
+    "flat muted colours (cream, warm grey, dusty blue, brick red, mustard), simple, friendly and expressive, "
+    "like a hand-made editorial illustration. One subject, centred, with generous empty space around it, "
+    "on a plain pure white background. No text, no letters, no numbers, no frame, no ground shadow, "
+    "not photorealistic, not 3D, no gradients."
+)
+SCENE_PROMPT = (
+    "Wide 16:9 hand-drawn cartoon scene for a calm educational YouTube animation: {subject}. "
+    "Clean black ink outlines, flat muted colours, simple characters with round heads and expressive faces, "
+    "an uncluttered composition with one clear focal point, soft light, a hand-made look. "
+    "No text, no letters, no numbers, no watermark, not photorealistic, not 3D."
+)
+MASCOT_NOTE = (
+    "The reference picture shows the channel's mascot, an otter with round glasses, a teal sweater and a pencil "
+    "behind its ear. Draw this same otter, keeping its design and colours, in the style described. "
+)
+
+
+def _reference_bytes(path: str) -> bytes:
+    with Image.open(path) as image:
+        image = image.convert("RGBA")
+        canvas = Image.new("RGB", image.size, (255, 255, 255))
+        canvas.paste(image, mask=image.getchannel("A"))
+    canvas.thumbnail((768, 768), Image.LANCZOS)
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def draw(subject: str, scene: bool = False, mascot: str = "", app_config=None) -> str:
+    """A drawing for the doodle look: one subject on white, or a whole 16:9 scene.
+
+    ``mascot`` is a picture of the channel's character; when given, a Gemini
+    image model (which can follow a reference) draws that same character.
+    Drawings are cached by their prompt. Returns "" when drawing fails.
+    """
+    subject = " ".join((subject or "").split())
+    if not subject:
+        return ""
+    app_config = _app(app_config)
+    configured = str(app_config.get("gemini_image_model", "") or "").strip() or IMAGE_DEFAULT_MODEL
+    model = configured
+    if mascot and model.startswith("imagen"):
+        model = SEQUENCE_DEFAULT_MODEL  # Imagen cannot follow a reference picture
+    prompt = (SCENE_PROMPT if scene else DOODLE_PROMPT).format(subject=subject)
+    reference = b""
+    if mascot and os.path.isfile(mascot):
+        reference = _reference_bytes(mascot)
+        prompt = MASCOT_NOTE + prompt
+    key = prompt + ("\n#ref" + hashlib.sha1(reference).hexdigest()[:12] if reference else "")
+    path = _cache_path(model, key)
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        return path
+    aspect = "16:9" if scene else "1:1"
+    try:
+        from google import genai
+        from google.genai import types
+
+        with genai.Client(**_client_kwargs(app_config)) as client:
+            if model.startswith("imagen"):
+                response = client.models.generate_images(
+                    model=model,
+                    prompt=prompt,
+                    config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio=aspect, output_mime_type="image/png"),
+                )
+                data = response.generated_images[0].image.image_bytes
+            else:
+                contents: list = [types.Part.from_bytes(data=reference, mime_type="image/png"), prompt] if reference else [prompt]
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["IMAGE"], image_config=types.ImageConfig(aspect_ratio=aspect)
+                    ),
+                )
+                data = next(
+                    part.inline_data.data
+                    for part in response.candidates[0].content.parts
+                    if getattr(part, "inline_data", None) and part.inline_data.data
+                )
+        with Image.open(io.BytesIO(data)) as image:
+            image.convert("RGB").save(path)
+        logger.info(f"drawn: {subject!r}")
+        return path
+    except Exception as exc:
+        logger.warning(f"drawing failed for {subject!r}: {type(exc).__name__}: {exc}")
+        return ""

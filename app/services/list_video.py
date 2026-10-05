@@ -573,7 +573,7 @@ def _still_filter() -> str:
 def _overlay_input(overlay: fx.Overlay) -> List[str]:
     if overlay.mode == "frames":
         return ["-framerate", str(FPS), "-i", overlay.source]
-    if overlay.mode == "concat":
+    if overlay.mode in ("concat", "sequence"):
         return ["-f", "concat", "-safe", "0", "-i", overlay.source]
     if overlay.mode == "media" and overlay.source.lower().endswith(".webm"):
         # libvpx keeps the alpha channel of transparent WebM animations.
@@ -692,7 +692,7 @@ def render_segment_video(
             options.append(
                 f"enable='between(t,{overlay.start:.3f},{(overlay.end or duration):.3f})'"
             )
-        if overlay.mode in ("frames", "media"):
+        if overlay.mode in ("frames", "media", "sequence"):
             options.append("eof_action=repeat" if overlay.hold else "eof_action=pass")
         filters.append(f"[{current}][o{number}]overlay={':'.join(options)}[m{number}]")
         current = f"m{number}"
@@ -1023,15 +1023,18 @@ def generate_list_video(
             logger.info(f"list video segment {step}")
             measured = narrations[index]
             target_frames = measured.frames
-            visual = _prepare_visual(
-                task_id,
-                segment,
-                params,
-                target_frames / FPS,
-                material_sources,
-                warnings,
-                shots=editor.background_shots(index) if editor is not None else None,
-            )
+            if editor is not None and not editor.wants_footage:
+                visual = _Visual("none")  # the doodle look draws its own canvas
+            else:
+                visual = _prepare_visual(
+                    task_id,
+                    segment,
+                    params,
+                    target_frames / FPS,
+                    material_sources,
+                    warnings,
+                    shots=editor.background_shots(index) if editor is not None else None,
+                )
             overlays: List[fx.Overlay] = []
             if editor is not None:
                 segment_edit = editor.segment_edit(index, offset, show_item_titles)
