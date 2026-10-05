@@ -483,7 +483,14 @@ uv run python list_video.py --script hormones.json --video-source openai_image
 设计一个新画面：大幅插画、对话气泡、计数、柱状图、饼图、逐项划掉的清单、流程以及带大字幕的
 全屏插画场景。插画由 Gemini/Imagen 以墨线涂鸦风格绘制（每张约 0.02–0.04 美元，可缓存，
 `--max-drawings` 限制数量），水獭吉祥物会按其原图出现在画中；画面元素随旁白出现并轻微抖动，
-模拟手绘动画（`--no-boil` 关闭），`--logo nutria` 在角落显示频道徽标，不使用素材视频。
+模拟手绘动画（`--no-boil` 关闭），`--logo nutria` 在角落显示频道徽标。
+**动态分镜节奏（第 6 轮）：**画面每 2–4 秒切换一次（`--shot-seconds`，默认 3）；长视频按段并行规划，
+并通过第二次简短的 LLM 补充为停留过久的画面加镜头。约一半镜头是全屏卡通插画（`--drawing-style
+cartoon`，`ink` 保留墨线风格），带缓慢的镜头运动并相互叠化；标记 `"continue": true` 的插画会在上一帧
+基础上只改变一处重新绘制，如同动画的下一帧。`--clips some|more` 偶尔在画布上的胶带相框中播放真实
+素材视频（Pexels/Pixabay，经 Gemini 检查）；`--memes otter` 在笑点处加入约 2 秒的水獭夸张反应，
+`--memes folder` 使用 `resource/memes`（或 `--memes-dir`）中按情绪分类的图片和视频。Imagen 失败时
+自动改用 Gemini 图像模型并重试繁忙请求；图标仅作后备，并由 Gemini 确认其确实表示该事物。
 **配音音质：**旁白全程保持 48 kHz，并经过录音棚式处理（高通、均衡、激励器、去齿音、轻度压缩、
 两遍线性响度标准化到 -14 LUFS 与真峰值限幅，`--no-voice-polish` 跳过处理）；没有逐词时间的
 音色会在句间加入平稳的停顿（`--pause`），并根据停顿定位每句话，使画面与旁白精确同步。

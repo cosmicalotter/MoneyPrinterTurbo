@@ -40,7 +40,8 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
   ```
   uv run python list_video.py --subject "Por qué los call centers están desapareciendo" --format story \
     --items 6 --video-language es-CO --look doodle --logo nutria \
-    --voice-name gemini:Schedar-Even --voice-style calmado --assets nutria
+    --voice-name gemini:Schedar-Even --voice-style calmado --assets nutria \
+    --shot-seconds 3 --clips some --memes otter
   ```
   - Con `--script-only` solo escribe el guion (JSON) para revisarlo; luego se renderiza con `--script archivo.json`.
 - **Laboratorio de voces:** `python voice_lab.py` compara varias voces con el mismo texto.
@@ -77,6 +78,7 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
 | `app/services/studio.py` + `studio/Studio.py` | Lógica y páginas de Streamlit del Studio. `studio.sh` es el lanzador. |
 | `app/services/icons.py` | Iconos OpenMoji (CC BY-SA, se acredita), búsqueda y alternativas. |
 | `app/services/web_images.py` | Imágenes de Wikimedia, Pexels y Pixabay con atribución. |
+| `resource/memes/` | Tu carpeta de memes por emoción (`--memes folder`); su contenido no se sube a git. |
 | `resource/characters/nutria/` | La nutria: SVG, script que la dibuja y `personaje/*.png` con 12 expresiones más sus versiones `_habla`. |
 
 ## Lo construido, ronda por ronda
@@ -129,16 +131,28 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
 - **Imágenes flotantes mucho más grandes**, y sin repetir imágenes, iconos ni dibujos.
 - **El Studio** tiene por defecto el estilo dibujado, el formato historia, Schedar-Even con "calmado", pausa de 0,5 s y masterización activada.
 
+### Ronda 6: estilo animatic, videos reales enmarcados, reacciones y dibujos más sólidos
+- **Diagnóstico del video de prueba ("La electricidad explicada"):** solo la primera escena fue una ilustración de IA; el resto fueron íconos OpenMoji sueltos (a veces equivocados: 😘 para "onda de energía", 🀄 para "primer contacto"), tomas de hasta 21 s sin cambios y comparaciones con la mitad vacía durante ~12 s.
+- **Ritmo de animatic (`--shot-seconds`, por defecto 3):** el storyboard cambia de imagen cada 2–4 s. A cada segmento se le dice cuánto dura y cuántas tomas necesita; los videos largos se planifican por grupos de segmentos en paralelo; un segundo pase rellena los tramos donde una imagen se quedaría demasiado.
+- **Ilustraciones a pantalla completa como base (~55 %):** estilo caricatura animada pulida (`--drawing-style cartoon`; `ink` mantiene el garabato a tinta), con movimiento de cámara (acercar, alejar, paneo izquierda/derecha) y fundido entre ellas. Una ilustración con `"continue": true` se redibuja a partir de la anterior cambiando solo una cosa: así se cuenta una acción como fotogramas de animación. Los subtítulos grandes van en el tercio inferior.
+- **Composiciones explicativas más trabajadas:** el dibujo único aparece "dibujándose" sobre una mancha de papel; la comparación ya no muestra la línea divisoria vacía; el primer elemento de una composición se ve desde el inicio.
+- **Videos reales dentro del dibujo (`--clips none|some|more`):** clips de Pexels (luego Pixabay) en un marco a tinta con cinta adhesiva sobre el fondo, o a pantalla completa; Gemini revisa un fotograma; si no hay clip, se dibuja la escena; se acreditan en `credits.txt`.
+- **Reacciones tipo meme (`--memes off|otter|folder`, por defecto off):** cortes de ~2 s en los remates, como mucho uno cada 40 s, con rayos de cómic y un "boom" suave. `otter` dibuja a la nutria reaccionando (sin problemas de derechos); `folder` usa tus imágenes/videos por emoción en `resource/memes/` o `--memes-dir` (ver su README sobre derechos de autor). Después del meme vuelve la imagen que interrumpió.
+- **Dibujo más robusto:** si Imagen falla (región, proyecto o prompt filtrado) dibuja `gemini-2.5-flash-image` y no se vuelve a pedir a Imagen; los modelos ocupados (429/503) se reintentan; las advertencias del render dicen cuántos dibujos fallaron y por qué, y si se acabó `--max-drawings`.
+- **Íconos solo como respaldo, y revisados:** Gemini elige entre varios candidatos el que de verdad representa la cosa; si ninguno sirve, se muestra solo la etiqueta.
+- **Studio:** en Estilo → dibujado: "Cambio de imagen cada (s)", "Videos reales dentro del dibujo", "Estilo de dibujo" y "Reacciones tipo meme".
+
 ## Tipos de escena y de toma disponibles
 
 - **Escenas clásicas:** statement, stat, sequence, compare, diagram, figure, zoom, story, steps, bars, grid, formula, timeline, gauge, question.
 - **Escenas científicas:** definition, equation, annotate, chain, branch.
-- **Tomas del estilo dibujado:** single, speech, illustration.
+- **Tomas del estilo dibujado:** single, speech, illustration (con `continue` y `camera`), clip (video real enmarcado o a pantalla completa) y meme (reacción por emoción: shock, mindblown, laugh, facepalm, confused, scared, sad, proud, suspicious, panic).
 - **Uso interno:** opener (portada de sección).
 
 ## Pendiente o ideas para seguir
 
-- Probar en mi PC el estilo dibujado con Gemini real y ajustar el prompt de dibujo (`DOODLE_PROMPT` y `SCENE_PROMPT` en `gemini_media.py`) hasta que se parezca a Cápsula.
+- Probar en mi PC la ronda 6 con Gemini real: revisar en el log si aparece "Imagen failed" (entonces todo lo dibuja `gemini-2.5-flash-image`) y ajustar los prompts de estilo (`CARTOON_PROMPT`, `CARTOON_SCENE_PROMPT` y `NEXT_FRAME_PROMPT` en `gemini_media.py`).
+- Costo aproximado por video de ~5 min con la ronda 6: 110–160 dibujos ≈ US$3–6 (se guardan en caché; re-renderizar o hacer otro idioma no los vuelve a cobrar).
 - Escuchar la voz masterizada y ajustar la cadena (`polish_chain` en `voice_polish.py`) y la pausa.
 - Ideas:
   - una voz propia del canal con voz clonada (ElevenLabs o Fish Audio);

@@ -434,7 +434,7 @@ class TestEditorScenesAndPictures(_TempDirCase):
             self.assertIs(ed._scene_picture(item), ed._scene_picture(item))  # prepared once
         illustrate.assert_called_once_with("a lit candle")
         fetch.assert_not_called()
-        icons_only = self._editor()
+        icons_only = self._editor(picture_check=False)
         with patch.object(editor.icons, "fetch", side_effect=["", ""]) as fetch:
             self.assertIsNone(icons_only._scene_picture(scenes.SceneItem(icon="🛸", draw="ufo")))
         self.assertEqual([c.args[0] for c in fetch.call_args_list], ["🛸", "ufo"])

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 from typing import List, Optional
 
@@ -1264,9 +1265,15 @@ EDIT_SCENE_TYPES = (
     "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
     "definition", "equation", "annotate", "chain", "branch",
 )
-# Shots of the doodle look: everything above plus drawn compositions.
-SHOT_TYPES = EDIT_SCENE_TYPES + ("single", "speech", "illustration")
-MAX_SHOTS_PER_SEGMENT = 24
+# Shots of the doodle look: everything above plus drawn compositions, real
+# video clips in a frame and comic reaction cut-ins.
+SHOT_TYPES = EDIT_SCENE_TYPES + ("single", "speech", "illustration", "clip", "meme")
+MAX_SHOTS_PER_SEGMENT = 80
+CAMERA_MOVES = ("in", "out", "left", "right")
+CLIP_FRAMES = ("card", "full")
+CLIP_AMOUNTS = ("none", "some", "more")
+# Reactions of a meme cut-in (the folder of memes uses the same names).
+MEME_MOODS = ("shock", "mindblown", "laugh", "facepalm", "confused", "scared", "sad", "proud", "suspicious", "panic")
 EDIT_SCENE_MARKS = ("cross", "check")
 MAX_EDIT_BEATS_PER_SEGMENT = 8
 MAX_EDIT_REACTIONS_PER_SEGMENT = 2
@@ -1551,7 +1558,34 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
         if item is None or (kind == "illustration" and not item.get("draw")):
             return None
         item.update(type=kind, text=_text(entry, "text", 16 if kind == "illustration" else MAX_STATEMENT_LENGTH))
+        if kind == "illustration":
+            if entry.get("continue") is True or str(entry.get("continue")).lower() == "true":
+                item["continue"] = True
+            camera = str(entry.get("camera") or "").strip().lower()
+            if camera in CAMERA_MOVES:
+                item["camera"] = camera
         return item
+    if kind == "clip":
+        query = _text(entry, "query", 80)
+        if not anchor or not query:
+            return None
+        clip = {
+            "type": kind, "at": anchor, "query": query, "label": label,
+            "frame": entry.get("frame") if entry.get("frame") in CLIP_FRAMES else "card",
+        }
+        draw = _text(entry, "draw", 160)
+        if draw:
+            clip["draw"] = draw
+        return clip
+    if kind == "meme":
+        if not anchor:
+            return None
+        mood = str(entry.get("mood") or "").strip().lower()
+        meme = {"type": kind, "at": anchor, "mood": mood if mood in MEME_MOODS else "shock", "text": _text(entry, "text", 40)}
+        draw = _text(entry, "draw", 160)
+        if draw:
+            meme["draw"] = draw
+        return meme
     if kind == "speech":
         people = [p for p in (_scene_item(d, needs_anchor=False, lookup=lookup) for d in entry.get("items") or []) if p][:2]
         if not anchor or not people:
@@ -1754,13 +1788,15 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
     ]
 
 
-def _storyboard_example(expressions: list) -> dict:
+def _storyboard_example(expressions: list, clips: bool = True, memes: bool = False) -> dict:
     pose = expressions[0] if expressions else ""
-    return {"segments": [{"index": 1, "shots": [
-        {"type": "speech", "at": "imagine you call your bank", "text": "", "items": [
-            {"label": "", "pose": pose, "draw": "the otter talking on a phone, sitting on a stool", "otter": True},
-            {"at": "but the voice is a robot", "label": "almost human robot", "draw": "a friendly humanoid robot with a headset", "icon": "🤖"},
-        ]},
+    shots = [
+        {"type": "illustration", "at": "imagine you call your bank", "otter": True, "camera": "in", "text": "",
+         "draw": "medium shot of the otter at home on a sofa, holding a phone to its ear, evening light"},
+        {"type": "illustration", "at": "but the voice is a robot", "otter": True, "continue": True, "camera": "right",
+         "draw": "a small friendly robot appears inside a speech bubble coming out of the phone, the otter frowns"},
+        {"type": "illustration", "at": "a call center in Manila", "camera": "out", "text": "MANILA",
+         "draw": "wide shot of a huge open-plan call center at night, rows of tiny desks with glowing screens"},
         {"type": "single", "at": "the most common job in the world", "text": "the most common job in the world",
          "label": "", "draw": "a cracked call-center headset with small pieces falling off", "icon": "🎧"},
         {"type": "stat", "at": "two hundred million people", "value": 200000000, "unit": "", "label": "tens of millions of people",
@@ -1769,15 +1805,35 @@ def _storyboard_example(expressions: list) -> dict:
             {"at": "no holidays", "label": "holidays", "draw": "a beach umbrella and a deck chair", "mark": "cross", "icon": "🏖️"},
             {"at": "no salary", "label": "salary", "draw": "a pay cheque", "mark": "cross", "icon": "💵"},
         ]},
-        {"type": "illustration", "at": "at five thirty in the morning", "text": "05:30", "otter": True,
-         "draw": "the otter waking up in a dark small bedroom, an alarm clock glowing on the night table"},
-    ]}]}
+        {"type": "speech", "at": "the robot never gets tired", "text": "", "items": [
+            {"label": "", "pose": pose, "draw": "the otter yawning at a desk", "otter": True},
+            {"at": "and never sleeps", "label": "", "draw": "a smiling robot with a headset, wide awake", "icon": "🤖"},
+        ]},
+    ]
+    if clips:
+        shots.append({"type": "clip", "at": "thousands of servers humming", "query": "data center servers", "label": "",
+                      "frame": "card", "draw": "rows of blinking servers in a dark data center"})
+    if memes:
+        shots.append({"type": "meme", "at": "it costs ten cents an hour", "mood": "shock", "text": "TEN CENTS?!",
+                      "draw": "the otter dropping its coffee cup, eyes wide open in shock"})
+    return {"segments": [{"index": 1, "shots": shots}]}
+
+
+def storyboard_shot_target(seconds: float, shot_seconds: float = 3.0) -> int:
+    """How many shots a segment of ``seconds`` needs to change picture every ``shot_seconds``."""
+    return max(1, int(round(max(0.0, seconds) / max(1.5, shot_seconds))))
 
 
 def build_storyboard_prompt(
-    segments: list, expressions: list, language: str = "", reference: Optional[list] = None, openers: bool = True
+    segments: list, expressions: list, language: str = "", reference: Optional[list] = None, openers: bool = True,
+    clips: str = "some", memes: bool = False,
 ) -> str:
-    """The director of the doodle look: one drawn composition after another, covering every sentence."""
+    """The director of the doodle look: an animatic of short drawn moments that never stops moving.
+
+    Segments may carry their spoken length ("seconds") and how many shots
+    they need ("shots"). ``clips`` is how often a real video clip appears
+    ("none", "some", "more"); ``memes`` allows comic reaction cut-ins.
+    """
     language_name = language or "the language of the narration"
     pose_rule = (
         '"pose": one of ' + json.dumps(expressions, ensure_ascii=False) + " to use the channel's otter in that mood "
@@ -1785,58 +1841,94 @@ def build_storyboard_prompt(
         if expressions else '"pose": always "" (the channel has no character poses)'
     )
     opener_rule = (
-        '9. each item opens with a 3-second card (its number and title with one drawing): give items an "opener": '
+        '11. each item opens with a 3-second card (its number and title with one drawing): give items an "opener": '
         '{"draw": an English description of one drawing strictly about the item TITLE, "icon": one emoji}, and start '
         "its first shot after its first sentence."
-        if openers else "9. the segments flow into each other like one continuous story: keep the visual thread going across them."
+        if openers else "11. the segments flow into each other like one continuous story: keep the visual thread going across them."
     )
+    clips = clips if clips in CLIP_AMOUNTS else "some"
+    clip_goal = clip_mix = clip_type = ""
+    if clips != "none":
+        clip_goal = (
+            " Now and then a short real video clip, in a frame on the drawn background, shows something real "
+            "(a storm, a power plant, a city at night) to give the video texture."
+        )
+        clip_mix = f", about {8 if clips == 'some' else 15}% \"clip\""
+        clip_type = (
+            '\n- {"type": "clip", "at": ..., "query": an English stock-video search of 2 to 4 words for something a camera can '
+            "really film (a thunderstorm at night, a power plant chimney, a city skyline at night, hands plugging in a charger), "
+            '"label": an optional caption of at most 4 words, "frame": "card" (a framed video on the drawn background) or "full" '
+            '(filling the screen), "draw": an illustration to draw instead if no video is found}: a short real video for real '
+            "places, nature, machines and everyday actions; never for abstract ideas, close-ups of faces or anything that needs the mascot."
+        )
+    meme_mix = meme_rule = meme_type = ""
+    if memes:
+        meme_mix = ", and now and then a \"meme\""
+        meme_rule = (
+            '12. "meme" shots are comic reaction cut-ins of about two seconds: only on a real punchline, a shocking number '
+            "or an absurd fact, at most one every 40 seconds, never two segments in a row."
+        )
+        meme_type = (
+            '\n- {"type": "meme", "at": ..., "mood": one of ' + json.dumps(list(MEME_MOODS)) + ', "text": a punchy caption of '
+            f'at most 5 words in {language_name} or "", "draw": an English description of the otter\'s exaggerated reaction '
+            '(eyes popping, jaw on the floor, head exploding into confetti)}: a comic reaction to what was just said.'
+        )
     reference_rule = ""
     if reference:
         reference_rule = f"""
 ## Reference storyboard:
 The same video was already drawn in another language. Keep, shot by shot, the same types, drawings ("draw"),
-icons, poses and numbers, so the same drawings are reused; only translate texts and labels into
-{language_name} and pick new "at" anchors from this version's text.
+icons, poses, queries, moods and numbers, so the same drawings and clips are reused; only translate texts and
+labels into {language_name} and pick new "at" anchors from this version's text.
 {json.dumps(reference, ensure_ascii=False)}
 """
     return f"""
-# Role: Storyboard artist of a calm, hand-drawn educational YouTube channel
+# Role: Storyboard artist and animator of a calm, professional educational YouTube channel
 
 ## Goal:
-The whole video is drawn on one flat warm-coloured background, like the channel "Cápsula Mental":
-simple cartoon drawings appear one by one exactly as the narrator names them, with short hand-lettered
-labels, so that every idea is SEEN while it is heard. Plan the shots for each segment below.
+The video is an animatic: a continuous flow of drawn moments over one warm-coloured background, changing
+every 2 to 4 seconds, so the viewer always SEES what is being said and the story keeps moving, like the hand-drawn
+explainers of "Cápsula Mental". Most moments are full-screen cartoon illustrations that tell the story like frames of
+an animated film (the mascot living the situation, the object being explained, a close-up of a detail, a cutaway
+that shows what happens inside). Between them, minimalist explainer compositions make an idea crystal clear (a chain
+of causes, a comparison, a number, a formula, things named one after the other), built from drawings that appear
+one by one exactly as the narrator names them, with short hand-lettered labels.{clip_goal}
 
 ## Constrains:
 1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index" and "shots"; no markdown.
-2. cover EVERY sentence: a new shot every one or two sentences (every 4 to 9 seconds of speech), in narration order; never leave a sentence without a visual change. A shot lasts until the next one starts.
-3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text; the shot (or element) appears when they are spoken.
-4. think like an animator, not like a stock photo search: show the idea with a clear visual metaphor or a tiny situation
-   (the end of call centres -> a cracked headset falling apart; a scam call -> the otter on the phone with a robot in a speech bubble),
-   build compositions progressively (first one element, then a second one, then cross one out), and use numbers, bars and pies when the narration gives numbers.
-5. at most 3 drawings per shot; drawings are simple single subjects. Each drawing in the whole video must be DIFFERENT: never repeat the same "draw" or "icon".
-6. labels: at most 4 words in {language_name}, written as they will appear (they are hand-lettered in capitals); titles ("text" of a single shot) at most 7 words.
-7. the channel's mascot is an otter with round glasses and a teal sweater: it is the protagonist of human situations (use "otter": true in a drawing to draw it doing something, or a {pose_rule}).
-8. vary the shot types and keep the tone calm and clear; never add facts that the narration does not state.
+2. pace: cover EVERY sentence. Each segment gives its spoken length in "seconds" and the shots it needs in "shots": plan that many (never fewer than 80% of it), one every 2 to 4 seconds of speech, in narration order. A sentence usually gets 2 or 3 shots: change the picture whenever the narration moves to a new object, action, place, number or idea. Never leave more than 5 seconds without a new shot or a new element appearing.
+3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text (same spelling and accents); the shot (or element) appears when they are spoken. The anchors of a segment are all different and follow the order of the text.
+4. mix of shots across the video: about 55% "illustration", about 35% explainer compositions (single, sequence, compare, chain, steps, branch, diagram, stat, bars, grid, equation, definition, timeline, speech, question, statement){clip_mix}{meme_mix}. Never three compositions in a row, never the same composition type twice in a row.
+5. illustrations are frames of one continuous animated story:
+   - when the next illustration happens in the same place with the same characters, set "continue": true and describe ONLY what changes ("the otter flips the switch and the bulb lights up"): it is redrawn from the previous frame, like the next frame of an animation. Chains of 2 to 4 continued frames show an action unfolding;
+   - start fresh (no "continue") for a new place, object or idea;
+   - vary the framing like a film: wide shot, medium shot, close-up of a detail, a cutaway that shows the inside of something (a wire cut open with electrons flowing), a top view, a tiny world at the scale of an atom;
+   - "camera" is the slow camera move over the frame: "in", "out", "left" or "right"; vary it.
+6. the elements of one composition are named within about 6 seconds of each other; a composition never waits for words said much later.
+7. labels have at most 4 words in {language_name}, titles ("text" of a single shot) at most 7 words, illustration captions at most 3 words (most illustrations need none); they are hand-lettered in capitals.
+8. "draw" is an English description of what is drawn (subject, action, place, mood, and the framing of an illustration), concrete and visual, with no text or letters in the drawing and no style words. Each "draw" and "icon" in the whole video is DIFFERENT.
+9. the channel's mascot is an otter with round glasses, a teal sweater and a pencil behind its ear: it is the protagonist of the human situations of the story (use "otter": true in an illustration or drawing that shows it, or a {pose_rule}).
+10. keep the tone calm and clear; never add facts that the narration does not state.
 {opener_rule}
+{meme_rule}
 
 ## Shot types:
-- {{"type": "single", "at": ..., "text": title or "", "label": ..., "draw": ..., "icon": ..., "otter": false, "pose": ""}}: one big drawing (with an optional title above it).
+- {{"type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": ""}}: a full-screen cartoon frame of the story (the main shot type); "text" is an optional big caption of at most 3 words, such as a time "05:30", a place or a name.
+- {{"type": "single", "at": ..., "text": title or "", "label": ..., "draw": ..., "icon": ..., "otter": false, "pose": ""}}: one big drawing on the background (with an optional title above it).
 - {{"type": "speech", "at": ..., "text": words in the bubble or "" for an empty bubble, "items": [speaker, optional listener with its own "at"]}}: someone talking or calling.
-- {{"type": "illustration", "at": ..., "draw": an English description of a whole scene (place, characters, action, mood), "text": an optional big caption of at most 3 words such as a time "05:30" or a name, "otter": true when the mascot is in it}}: a full-screen drawn scene for story moments (a place, a situation, a character's day).
 - {{"type": "sequence", "items": [1 to 4 items]}}: things that appear left to right as each is named ("mark": "cross" to cross one out, "check" to tick it).
-- {{"type": "compare", "items": [left, right]}}: two things side by side.
+- {{"type": "compare", "items": [left, right]}}: two things side by side, named close together.
 - {{"type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "pie" or "number", "icon": ...}}: a number that counts up, or a pie.
 - {{"type": "bars", "unit": ..., "items": [2 to 5 items with "value"]}}: quantities as bars, each with its drawing and label.
 - {{"type": "grid", "at": ..., "value": 7, "total": 10, "label": ..., "icon": ...}}: "7 out of 10".
 - {{"type": "steps", "items": [2 to 5 items]}}, {{"type": "chain", "items": [2 to 4 items with "link"]}}, {{"type": "branch", "center": item, "items": [2 to 4]}}, {{"type": "diagram", "center": item, "items": [3 to 5]}}, {{"type": "timeline", "items": [2 to 5 with "date"]}}: processes, causes and effects, parts of a whole, dates.
-- {{"type": "definition", ...}}, {{"type": "equation", ...}}: a term with its symbol and unit, or a formula (as in the classic plan).
+- {{"type": "definition", "at": ..., "term": ..., "text": ..., "symbol": ..., "unit": ..., "draw": ...}}, {{"type": "equation", "at": ..., "name": ..., "formula": ..., "terms": [{{"symbol": ..., "label": ..., "unit": ...}}]}}: a term with its symbol and unit, or a formula.
 - {{"type": "statement", "at": ..., "text": ..., "expression": ...}} and {{"type": "question", "at": ..., "text": ..., "expression": ...}}: a punchline or a question with the otter.
-- {{"type": "figure", "at": ..., "query": ..., "query_local": ..., "look": "diagram" or "photo", "seconds": ..., "label": ...}}: only when a REAL picture is essential (a map, a famous place, a real organ); shown in an ink frame.
-   An item is {{"at": ..., "label": ..., "draw": ..., "icon": ..., "otter": false, "pose": ""}}: "draw" is an English description of 4 to 14 words of ONE simple subject for the illustrator (what it is and what it is doing, no style words, no text); "icon" is one emoji used if the drawing fails.
+- {{"type": "figure", "at": ..., "query": ..., "query_local": ..., "look": "diagram" or "photo", "seconds": ..., "label": ...}}: only when a REAL picture is essential (a map, a famous place, a real organ); shown in an ink frame.{clip_type}{meme_type}
+   An item is {{"at": ..., "label": ..., "draw": ..., "icon": ..., "otter": false, "pose": ""}}: "draw" is an English description of 4 to 14 words of ONE simple subject for the illustrator (what it is and what it is doing); "icon" is one emoji that depicts the thing literally, used only if the drawing fails.
 {reference_rule}
 ## Output Example:
-{json.dumps(_storyboard_example(expressions), ensure_ascii=False)}
+{json.dumps(_storyboard_example(expressions, clips != "none", memes), ensure_ascii=False)}
 
 ## Segments:
 {json.dumps(segments, ensure_ascii=False)}
@@ -1877,26 +1969,154 @@ def normalize_storyboard(data, segment_count: int, expressions: list) -> list:
     ]
 
 
-def generate_storyboard(
-    segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None,
-    openers: bool = True,
-):
-    """Ask the model for the doodle storyboard; None when it keeps failing."""
-    prompt = build_storyboard_prompt(segments, expressions, language, reference, openers)
+STORYBOARD_CHUNK_SHOTS = 45  # shots asked in one request at most (long answers get cut or rushed)
+
+
+def storyboard_chunks(segments: list, most: int = STORYBOARD_CHUNK_SHOTS) -> List[list]:
+    """Consecutive groups of segments planned in one request each."""
+    chunks: List[list] = []
+    current: list = []
+    planned = 0
+    for segment in segments:
+        shots = segment.get("shots", 0) if isinstance(segment, dict) else 0
+        shots = shots if isinstance(shots, int) else 0
+        if current and planned + shots > most:
+            chunks.append(current)
+            current, planned = [], 0
+        current.append(segment)
+        planned += shots
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _storyboard_request(prompt: str, count: int, expressions: list, app_config=None) -> Optional[list]:
     for i in range(_max_retries):
         try:
             response = _generate_response(prompt) if app_config is None else _generate_response(prompt, app_config=app_config)
             if response.startswith("Error: "):
                 logger.error(f"failed to generate the storyboard: {response}")
                 return None
-            board = normalize_storyboard(_parse_list_script_response(response), len(segments), expressions)
-            logger.success(f"storyboard generated: {sum(len(s['shots']) for s in board)} shots")
-            return board
+            return normalize_storyboard(_parse_list_script_response(response), count, expressions)
         except Exception as e:
             logger.warning(f"failed to parse the storyboard: {type(e).__name__}: {e}")
         if i < _max_retries - 1:
             logger.warning(f"failed to generate the storyboard, trying again... {i + 1}")
     return None
+
+
+def generate_storyboard(
+    segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None,
+    openers: bool = True, clips: str = "some", memes: bool = False,
+):
+    """Ask the model for the doodle storyboard; None when it keeps failing.
+
+    Long videos are planned a few segments at a time, in parallel, so every
+    answer stays short enough to be complete. Segments whose request failed
+    come back without "shots" (the caller draws them its own simple way).
+    """
+    count = len(segments)
+    chunks = storyboard_chunks(segments) if any(isinstance(s, dict) and s.get("shots") for s in segments) else [segments]
+
+    def plan(chunk: list) -> Optional[list]:
+        indexes = [s.get("index", n) if isinstance(s, dict) else n for n, s in enumerate(chunk)]
+        wanted = set(indexes) if len(chunks) > 1 else None
+        part = [e for e in reference or [] if not wanted or (isinstance(e, dict) and e.get("index") in wanted)]
+        prompt = build_storyboard_prompt(chunk, expressions, language, part or None, openers, clips, memes)
+        return _storyboard_request(prompt, count, expressions, app_config)
+
+    if len(chunks) == 1:
+        boards = [plan(chunks[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            boards = list(pool.map(plan, chunks))
+    if not any(boards):
+        return None
+    merged = []
+    for index in range(count):
+        position = next((n for n, chunk in enumerate(chunks) if any(isinstance(s, dict) and s.get("index") == index for s in chunk)), 0)
+        board = boards[position] if len(chunks) > 1 else boards[0]
+        if board is None:
+            merged.append({"index": index, "expression": "", "backgrounds": [], "scenes": [], "beats": []})
+        else:
+            merged.append(board[index])
+    logger.success(f"storyboard generated: {sum(len(s.get('shots') or []) for s in merged)} shots")
+    return merged
+
+
+def build_storyboard_gaps_prompt(
+    gaps: list, expressions: list, language: str = "", clips: str = "some", memes: bool = False
+) -> str:
+    """Extra shots for stretches of narration where the picture stays the same for too long."""
+    language_name = language or "the language of the narration"
+    types = ["illustration", "single", "sequence", "compare", "chain", "stat"]
+    if clips in ("some", "more"):
+        types.append("clip")
+    pose_rule = (
+        'or "pose": one of ' + json.dumps(expressions, ensure_ascii=False) if expressions else ""
+    )
+    return f"""
+# Role: Storyboard artist of a calm, professional educational YouTube channel
+
+## Goal:
+In these stretches of the narration ({language_name}) the screen shows the same picture for too long.
+Add new shots so the picture changes every 2 to 4 seconds, following exactly what is said.
+
+## Constrains:
+1. return only a JSON object {{"shots": [...]}}; no markdown.
+2. each gap gives its segment "index", the words said during it ("text"), what is on screen now ("showing")
+   and how many new shots it needs ("shots"); add that many shots for the gap, each with that "index".
+3. every "at" is 2 to 6 consecutive words copied exactly from that gap's "text", all different, in order;
+   never on its first 3 words (the current picture stays a moment).
+4. shot types: {", ".join(types)}, in the same format as the main storyboard (below). Mostly "illustration":
+   when the current picture is an illustration and the story stays in the same place, set "continue": true and
+   describe only what changes, like the next frame of an animation; vary "camera" ("in", "out", "left", "right").
+5. "draw" is an English description of what is drawn, concrete and visual, never text in it; the channel's
+   mascot is an otter with round glasses and a teal sweater ("otter": true when it is in the drawing {pose_rule}).
+6. labels at most 4 words in {language_name}; never add facts the narration does not state.
+
+## Formats:
+{{"index": 2, "type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": ""}}
+{{"index": 2, "type": "single", "at": ..., "text": "", "label": ..., "draw": ..., "icon": ...}}
+{{"index": 2, "type": "sequence", "items": [{{"at": ..., "label": ..., "draw": ..., "icon": ...}}]}}
+{{"index": 2, "type": "compare", "items": [left item, right item]}}
+{{"index": 2, "type": "chain", "items": [2 to 4 items with "link"]}}
+{{"index": 2, "type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "number", "icon": ...}}
+{{"index": 2, "type": "clip", "at": ..., "query": English stock video search, "label": "", "frame": "card", "draw": fallback illustration}}
+
+## Gaps:
+{json.dumps(gaps, ensure_ascii=False)}
+""".strip()
+
+
+def generate_storyboard_gaps(
+    gaps: list, expressions: list, language: str = "", app_config=None, clips: str = "some", memes: bool = False
+) -> dict:
+    """{segment index: [extra shots]} for stretches without a new picture ({} when it fails)."""
+    if not gaps:
+        return {}
+    prompt = build_storyboard_gaps_prompt(gaps, expressions, language, clips, memes)
+    indexes = {gap["index"] for gap in gaps}
+    lookup = {expression.lower(): expression for expression in expressions}
+    allowed = set(SHOT_TYPES) - ({"clip"} if clips == "none" else set()) - ({"meme"} if not memes else set())
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt) if app_config is None else _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                logger.error(f"failed to fill the storyboard gaps: {response}")
+                return {}
+            data = _parse_list_script_response(response)
+            shots: dict = {}
+            for entry in data.get("shots") or []:
+                if not isinstance(entry, dict) or entry.get("index") not in indexes or entry.get("type") not in allowed:
+                    continue
+                shot = _normalize_scene(entry, lookup, shot=True)
+                if shot is not None:
+                    shots.setdefault(entry["index"], []).append(shot)
+            return shots
+        except Exception as e:
+            logger.warning(f"failed to parse the storyboard gaps: {type(e).__name__}: {e}")
+    return {}
 
 
 def build_gap_beats_prompt(gaps: list, language: str = "") -> str:

@@ -34,6 +34,9 @@ ILLUSTRATIONS = ("icons", "ai")
 STYLE_PRESETS = ("divulgador", "entusiasta", "profe", "calmado", "sereno", "narrador")
 LOOKS = ("doodle", "footage")
 FORMATS = ("story", "list")
+CLIPS = ("none", "some", "more")
+MEMES = ("off", "otter", "folder")
+DRAWING_STYLES = ("cartoon", "ink")
 
 
 def studio_dir(*parts: str) -> Path:
@@ -69,6 +72,11 @@ class RenderSettings:
     boil: bool = True
     logo: str = "nutria"
     max_drawings: int = 160
+    shot_seconds: float = 3.0  # a new picture about this often (the animatic pace)
+    clips: str = "some"  # real video clips in a frame now and then
+    memes: str = "off"  # comic reactions: off, otter or folder
+    memes_dir: str = ""
+    drawing_style: str = "cartoon"
     aspect: str = "16:9"
     assets: str = "nutria"
     accent: str = "#FF4F5E"
@@ -154,6 +162,12 @@ def build_argv(
         if not s.boil:
             argv.append("--no-boil")
         argv += ["--max-drawings", str(int(s.max_drawings))]
+        argv += ["--shot-seconds", _number(s.shot_seconds), "--clips", s.clips if s.clips in CLIPS else "some"]
+        argv += ["--drawing-style", s.drawing_style if s.drawing_style in DRAWING_STYLES else "cartoon"]
+    if s.memes in MEMES and s.memes != "off":
+        argv += ["--memes", s.memes]
+        if s.memes == "folder" and s.memes_dir:
+            argv += ["--memes-dir", s.memes_dir]
     if s.logo:
         argv += ["--logo", s.logo]
     argv += ["--gap", _number(s.gap), "--zoom", _number(s.zoom)]

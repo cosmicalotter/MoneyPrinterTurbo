@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 from PIL import Image
 
+from app.models.schema import VideoAspect
 from app.services import gemini_media, icons, llm, material, web_images
 from app.services import list_video_fx as fx
 from app.services import list_video_host as host
@@ -77,6 +78,11 @@ class EditOptions:
     logo: str = ""  # a corner badge: "nutria" (the bundled otter) or a picture file
     max_drawings: int = 160  # doodle look: AI drawings per video (icons after that)
     seamless: bool = False  # story format: segments flow into each other (no whoosh at the cuts)
+    shot_seconds: float = 3.0  # doodle look: a new picture about this often
+    clips: str = "some"  # doodle look: real video clips in a frame now and then ("none", "some", "more")
+    memes: str = "off"  # comic reaction cut-ins: "off", "otter" (drawn otter reactions) or "folder" (your memes)
+    memes_dir: str = ""  # folder of reaction pictures and videos, by mood ("" is resource/memes)
+    drawing_style: str = "cartoon"  # doodle look: "cartoon" (polished 2D animation) or "ink" (pen doodles)
 
 
 @dataclass
@@ -168,7 +174,13 @@ def anchor_time(
         index = next((words.index(w) for w in target if len(w) > 3 and w in words), -1)
     if index < 0:
         return None
+    return _word_time(index, words, text, sub_maker, speech_seconds, spans)
 
+
+def _word_time(
+    index: int, words: List[str], text: str, sub_maker, speech_seconds: float, spans: Optional[List[Tuple[float, float]]]
+) -> float:
+    """When the ``index``-th normalized word of ``text`` is said."""
     times = cue_word_times(sub_maker)
     if times and len(times) >= len(words) * 0.6:
         position = min(len(times) - 1, round(index * len(times) / len(words)))
@@ -439,6 +451,77 @@ def default_plan(segments, poses) -> List[dict]:
 
 LOOKS = ("footage", "doodle")
 DOODLE_COLOR = (244, 194, 79)  # the warm yellow of hand-drawn explainer channels
+HOLD_FACTOR = 1.8  # a picture held longer than this many shot lengths gets more shots
+MEME_POSES = {
+    "shock": "sorprendido", "mindblown": "sin_palabras", "laugh": "riendo", "facepalm": "preocupado",
+    "confused": "pensando", "scared": "preocupado", "sad": "triste", "proud": "feliz", "suspicious": "pensando",
+    "panic": "preocupado",
+}
+# Folder and file names of the memes folder (Spanish or English) and the mood they mean.
+MOOD_ALIASES = {
+    "shock": "shock", "sorpresa": "shock", "sorprendido": "shock", "asombro": "shock",
+    "mindblown": "mindblown", "mente": "mindblown", "explota": "mindblown", "wow": "mindblown",
+    "laugh": "laugh", "risa": "laugh", "riendo": "laugh", "jaja": "laugh",
+    "facepalm": "facepalm", "verguenza": "facepalm", "palma": "facepalm",
+    "confused": "confused", "confundido": "confused", "confusion": "confused",
+    "scared": "scared", "miedo": "scared", "susto": "scared",
+    "sad": "sad", "triste": "sad", "tristeza": "sad",
+    "proud": "proud", "orgullo": "proud", "orgulloso": "proud",
+    "suspicious": "suspicious", "sospecha": "suspicious", "sospechoso": "suspicious",
+    "panic": "panic", "panico": "panic",
+}
+MEME_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp") + scenes.VIDEO_EXTENSIONS
+
+
+def meme_library(folder: str) -> Dict[str, List[str]]:
+    """{mood: [files]} of a memes folder: files in a folder named after the mood, or named "<mood>-...".
+
+    Moods and their Spanish names are in ``MOOD_ALIASES``; other files are ignored.
+    """
+    library: Dict[str, List[str]] = {}
+    if not folder or not os.path.isdir(folder):
+        return library
+    for root, _, files in os.walk(folder):
+        relative = os.path.relpath(root, folder)
+        parent = "" if relative == "." else normalize_words(relative.split(os.sep)[0])
+        for name in sorted(files):
+            stem, extension = os.path.splitext(name)
+            if extension.lower() not in MEME_EXTENSIONS:
+                continue
+            words = normalize_words(stem)
+            mood = MOOD_ALIASES.get(parent[0] if parent else "") or (MOOD_ALIASES.get(words[0]) if words else None)
+            if mood:
+                library.setdefault(mood, []).append(os.path.join(root, name))
+    return library
+
+
+def _clip_credit(info) -> str:
+    """Attribution line of a stock video (the providers ask for credit when possible)."""
+    source = getattr(info, "source_info", None) or {}
+    provider = str(source.get("provider") or getattr(info, "provider", "") or "stock").capitalize()
+    creator = source.get("creator") if isinstance(source.get("creator"), dict) else {}
+    name = str(creator.get("name") or "").strip()
+    page = str(source.get("source_page") or "").strip()
+    line = f"Video: {name + ' / ' if name else ''}{provider}"
+    return f"{line} ({page})" if page else line
+
+
+def word_times(text: str, sub_maker, speech_seconds: float, spans=None) -> List[Tuple[str, float]]:
+    """Every word of ``text`` as written, with when it is said (the same estimate as the anchors)."""
+    tokens = (text or "").split()
+    words = normalize_words(text)
+    if not words:
+        return []
+    timed = []
+    position = 0
+    last = 0.0
+    for token in tokens:
+        count = len(normalize_words(token))
+        if count:
+            last = _word_time(position, words, text, sub_maker, speech_seconds, spans)
+            position += count
+        timed.append((token, last))
+    return timed
 
 
 def load_plan_file(path: str, segment_count: int, expressions: List[str]) -> List[dict]:
@@ -511,6 +594,10 @@ class Editor:
         self._drawn: Dict[str, int] = {}
         self._used_icons: set = set()
         self._icon_lock = threading.Lock()
+        self._storyboarded = False  # the doodle plan came from the LLM (its long holds can be filled)
+        self._failed_drawings = 0
+        self._memes: Optional[Dict[str, List[str]]] = None
+        self._used_memes: set = set()
 
     @property
     def wants_footage(self) -> bool:
@@ -533,10 +620,19 @@ class Editor:
             ]
             reference = self._reference_plan()
             if self.doodle:
+                for entry, segment, narration in zip(payload, self.segments, self.narrations):
+                    seconds = narration.frames / 30.0
+                    if self.options.openers and segment.kind == "item":
+                        seconds = max(0.0, seconds - scenes.OPENER_SECONDS)
+                    entry["seconds"] = round(seconds, 1)
+                    entry["shots"] = llm.storyboard_shot_target(seconds, self.options.shot_seconds)
                 plan = llm.generate_storyboard(payload, expressions, self.options.language, reference=reference,
-                                               openers=self.options.openers)
+                                               openers=self.options.openers, clips=self.options.clips,
+                                               memes=self.options.memes in ("otter", "folder"))
                 if plan is None:
                     self.warnings.append("the LLM did not return a storyboard; one drawing per segment was used")
+                else:
+                    self._storyboarded = not reference
             elif reference:
                 plan = llm.generate_edit_plan(payload, expressions, self.options.language, reference=reference,
                                               openers=self.options.openers)
@@ -639,6 +735,8 @@ class Editor:
         lines: Dict[int, object] = {}
         reactions_by_segment: List[List[Tuple[float, str]]] = []
         covers: List[List[Tuple[float, float]]] = []
+        if self.doodle and self._storyboarded and self.options.fill_gaps:
+            self._fill_shot_gaps()
         for index, segment in enumerate(self.segments):
             narration = self.narrations[index]
             duration = narration.frames / 30.0
@@ -650,11 +748,9 @@ class Editor:
 
             window = self._subscribe_window(index, duration)
             blocked = [window] if window else []
-            opener = None
-            if self.options.openers and segment.kind == "item":
-                opener = scenes.opener_scene(segment.name or segment.chapter, segment.number, entry.get("opener"), pauses, duration)
-                if opener is not None:
-                    blocked.append((opener.start, opener.end + 0.3))
+            opener = self._opener(index, pauses)
+            if opener is not None:
+                blocked.append((opener.start, opener.end + 0.3))
             if self.doodle:
                 # Drawn shots one after another, from the end of the opener to the cut.
                 timed_scenes = scenes.time_shots(entry.get("shots") or [], locate, duration, opener.end if opener else 0.0)
@@ -735,17 +831,84 @@ class Editor:
                 entry["host"] = planned.mode
             self._save_plan()
 
+    def _opener(self, index: int, pauses: Optional[List[float]] = None) -> Optional[scenes.Scene]:
+        segment = self.segments[index]
+        if not (self.options.openers and segment.kind == "item"):
+            return None
+        narration = self.narrations[index]
+        if pauses is None:
+            pauses = host.find_pauses(narration.pcm)
+        return scenes.opener_scene(
+            segment.name or segment.chapter, segment.number, self._entry(index).get("opener"), pauses, narration.frames / 30.0
+        )
+
+    def _locator(self, index: int):
+        segment, narration = self.segments[index], self.narrations[index]
+        return lambda anchor: anchor_time(segment.text, anchor, narration.sub_maker, narration.speech_seconds, narration.spans)
+
+    def _fill_shot_gaps(self) -> None:
+        """A second, short LLM pass: more shots where one picture would stay too long."""
+        limit = max(4.5, self.options.shot_seconds * HOLD_FACTOR)
+        gaps = []
+        for index, segment in enumerate(self.segments):
+            narration = self.narrations[index]
+            duration = narration.frames / 30.0
+            opener = self._opener(index)
+            begin = opener.end if opener else 0.0
+            shots = scenes.time_shots(self._entry(index).get("shots") or [], self._locator(index), duration, begin)
+            timed_words = word_times(segment.text, narration.sub_maker, narration.speech_seconds, narration.spans)
+            for start, end in scenes.long_holds(shots, duration, limit, begin):
+                said = " ".join(word for word, time in timed_words if start + 0.2 <= time < end - 0.4)
+                if len(said.split()) < 6:
+                    continue
+                showing = next((s for s in reversed(shots) if s.start <= start + 0.01), None)
+                what = ""
+                if showing is not None:
+                    center = showing.center or (showing.items[0] if showing.items else None)
+                    what = f"{showing.type}: {(center.draw or center.label) if center else showing.text}".strip()
+                gaps.append({
+                    "index": index, "text": said, "showing": what, "seconds": round(end - start, 1),
+                    "shots": max(1, int(round((end - start) / max(1.5, self.options.shot_seconds))) - 1),
+                })
+        if not gaps:
+            return
+        try:
+            extra = llm.generate_storyboard_gaps(
+                gaps[:60], sorted(self.poses), self.options.language, clips=self.options.clips,
+                memes=self.options.memes in ("otter", "folder"),
+            )
+        except Exception as exc:
+            logger.warning(f"could not fill the long shots: {type(exc).__name__}: {exc}")
+            return
+        added = 0
+        for index, shots in extra.items():
+            if 0 <= index < len(self.plan):
+                self.plan[index].setdefault("shots", [])
+                self.plan[index]["shots"] += shots
+                added += len(shots)
+        if added:
+            logger.info(f"{added} shots added where a picture stayed too long ({len(gaps)} stretches)")
+            self._save_plan()
+
     def _fetch_pictures(self, texts: Dict[int, str]) -> None:
-        """Find every picture of the video at once (searches and checks run in parallel)."""
+        """Find every picture of the video at once (searches and checks run in parallel).
+
+        The illustrations go first, so the drawing budget is spent on them; an
+        illustration that continues the one before it is drawn from it, so
+        each chain of frames is drawn in order.
+        """
         jobs = []
+        chains: List[List[scenes.Scene]] = []
         for index, beats in self._beats.items():
             text = texts[index]
             for beat, _ in beats:
                 for member in beat.members if beat.kind == "images" else [beat] if beat.kind == "image" else []:
                     jobs.append(lambda m=member, t=text: setattr(m, "picture", self._beat_picture(m, sentence_at(t, m.at))))
-        for index, timed in self._scenes.items():
+        for index in sorted(self._scenes):
             text = texts[index]
-            for scene in timed:
+            for scene in self._scenes[index]:
+                if scene.reprise:
+                    continue  # shows the picture of the shot it repeats
                 if scene.type == "figure":
                     jobs.append(lambda sc=scene, t=text: self._figure_picture(sc, t))
                 elif scene.type == "annotate":
@@ -755,7 +918,16 @@ class Editor:
                     jobs.append(lambda sc=scene, t=text: self._opener_picture(sc, t))
                     continue
                 elif scene.type == "illustration":
-                    jobs.append(lambda sc=scene: self._illustration_picture(sc))
+                    if scene.follows and chains:
+                        chains[-1].append(scene)
+                    else:
+                        chains.append([scene])
+                    continue
+                elif scene.type == "clip":
+                    jobs.append(lambda sc=scene, t=text: self._clip_media(sc, t))
+                    continue
+                elif scene.type == "meme":
+                    jobs.append(lambda sc=scene: self._meme_picture(sc))
                     continue
                 elif scene.type == "story" and (self.options.illustrations == "ai" or self.doodle) and self._gemini:
                     jobs.append(lambda sc=scene: self._story_pictures(sc))
@@ -764,6 +936,8 @@ class Editor:
                         jobs.append(lambda i=item: self._doodle_picture(i))
                     elif item.query or item.icon or item.draw:
                         jobs.append(lambda i=item, t=text: self._item_picture(i, sentence_at(t, i.at)))
+        first = [lambda c=chain: self._illustration_chain(c) for chain in chains]
+        jobs = first + jobs
         if not jobs:
             return
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -773,11 +947,10 @@ class Editor:
                 except Exception as exc:
                     logger.warning(f"a picture could not be prepared: {type(exc).__name__}: {exc}")
         # Full-screen pictures that were not found leave the footage alone.
+        dropped = 0
         for index, timed in self._scenes.items():
-            kept = [
-                sc for sc in timed
-                if sc.type not in ("figure", "annotate", "illustration") or self._item_pictures.get(id(sc.center)) is not None
-            ]
+            kept = [sc for sc in timed if self._has_picture(sc)]
+            dropped += len(timed) - len(kept)
             if self.doodle and kept and timed:
                 # Shots follow each other: the one before a dropped shot stays longer.
                 for shot, following in zip(kept, kept[1:]):
@@ -785,7 +958,50 @@ class Editor:
                         shot.end = following.start
                 if kept[-1].type != "opener":
                     kept[-1].end = timed[-1].end
+                self._crossfade(kept)
             self._scenes[index] = kept
+        if self.doodle:
+            self._report_drawings(dropped)
+
+    def _has_picture(self, scene: scenes.Scene) -> bool:
+        if scene.type in ("figure", "annotate", "illustration"):
+            return self._item_pictures.get(id(scene.center)) is not None
+        if scene.type in ("clip", "meme"):
+            return bool(scene.media) or (scene.type == "meme" and self._item_pictures.get(id(scene.center)) is not None)
+        return True
+
+    @staticmethod
+    def _crossfade(shots: List[scenes.Scene]) -> None:
+        """A shot that covers the whole frame dissolves in over the one before it."""
+        for shot in shots:
+            shot.overlap = shot.fade_in = shot.linger = 0.0
+        for shot, following in zip(shots, shots[1:]):
+            if shot.type == "opener":
+                continue
+            fade = min(scenes.CROSSFADE_SECONDS, (following.end - following.start) / 4)
+            if following.type in scenes.FULL_FRAME_SHOTS:
+                shot.overlap, following.fade_in = fade, fade
+            elif shot.type in scenes.FULL_FRAME_SHOTS:
+                # Back to the drawn canvas: the picture fades out while the first drawing appears.
+                shot.linger = fade
+
+    def _report_drawings(self, dropped: int) -> None:
+        """Warnings that say why drawings are missing, so a broken image model is noticed."""
+        failure = gemini_media.imagen_failure()
+        if failure:
+            self.warnings.append(f"Imagen failed ({failure}); the drawings were made with {gemini_media.SEQUENCE_DEFAULT_MODEL}")
+        if self._failed_drawings:
+            reason = gemini_media.last_error()
+            self.warnings.append(
+                f"{self._failed_drawings} drawings failed" + (f" (last error: {reason})" if reason else "")
+                + "; icons or the previous shot were used instead"
+            )
+        if self._gemini and self._drawings >= self.options.max_drawings > 0:
+            self.warnings.append(
+                f"the drawing budget ({self.options.max_drawings}) ran out; raise --max-drawings for more drawings"
+            )
+        if dropped:
+            logger.info(f"{dropped} shots without a picture were left out (the shot before them stays longer)")
 
     # -- assets -------------------------------------------------------------
 
@@ -885,14 +1101,55 @@ class Editor:
         key = (id(item), item.icon, item.draw)
         if key not in self._scene_pictures:
             image = None
-            for query in self._icon_queries(item):
-                path = icons.fetch(query)
-                if path:
-                    image = scenes.prepare_picture(path, trust_alpha=True)
-                    self.credits.append(icons.CREDIT)
-                    break
+            if self.options.picture_check and self._gemini:
+                image = self._checked_icon(item)
+            else:
+                for query in self._icon_queries(item):
+                    path = icons.fetch(query)
+                    if path:
+                        image = scenes.prepare_picture(path, trust_alpha=True)
+                        self.credits.append(icons.CREDIT)
+                        break
             self._scene_pictures[key] = image
         return self._scene_pictures[key]
+
+    def _checked_icon(self, item: scenes.SceneItem):
+        """The icon Gemini confirms depicts ``item`` among a few candidates; None when none does
+        (a missing icon is better than a wrong one: the label then stands alone, bigger)."""
+        wanted = [q for q in (item.icon, item.draw) if q]
+        keywords = " ".join(q for q in (item.draw, item.query, item.label) if q)
+        with self._icon_lock:
+            used = set(self._used_icons)
+        names = [q for q in wanted if q not in used]
+        if keywords:
+            try:
+                names += [e for e in icons.alternatives(keywords, exclude=used, limit=6) if e not in names]
+            except Exception as exc:
+                logger.debug(f"no other icon for {keywords!r}: {exc}")
+        names += [q for q in wanted if q not in names]
+        candidates: List[Tuple[str, str]] = []
+        for name in names:
+            path = icons.fetch(name)
+            if path and path not in [p for _, p in candidates]:
+                candidates.append((name, path))
+            if len(candidates) >= 4:
+                break
+        if not candidates:
+            return None
+        description = item.draw or item.label or item.icon
+        context = " — ".join(t for t in (item.label, item.draw) if t) or description
+        verdict = gemini_media.choose_picture(
+            [path for _, path in candidates], context, description, self.options.language, purpose="icon"
+        )
+        choice = 0 if verdict is None else verdict
+        if choice < 0:
+            logger.info(f"no icon fits {description!r}; the label stands alone")
+            return None
+        name, path = candidates[choice]
+        with self._icon_lock:
+            self._used_icons.add(name)
+        self.credits.append(icons.CREDIT)
+        return scenes.prepare_picture(path, trust_alpha=True)
 
     def _icon_queries(self, item: scenes.SceneItem) -> List[str]:
         """Icons to try for ``item``, the ones the video has not shown yet first."""
@@ -974,8 +1231,11 @@ class Editor:
         name = _pick(self.poses, ("explicando", "feliz", "neutral"))
         return self.poses[name].idle if name else ""
 
-    def _drawing(self, description: str, mascot: bool = False, scene: bool = False):
-        """A Gemini/Imagen drawing for the doodle look, within the drawing budget; None otherwise."""
+    def _drawing(self, description: str, mascot: bool = False, scene: bool = False, previous: str = ""):
+        """A Gemini/Imagen drawing for the doodle look, within the drawing budget; None otherwise.
+
+        ``previous`` is the picture file of the scene this one continues.
+        """
         if not (self._gemini and description):
             return None
         with self._drawing_lock:
@@ -988,11 +1248,21 @@ class Editor:
             self._drawn[key] = seen + 1
         if seen:
             description = f"{description}, a different moment, pose and angle from before (variation {seen + 1})"
-        path = gemini_media.draw(description, scene=scene, mascot=self._mascot() if mascot else "")
+        options = {"scene": scene, "mascot": self._mascot() if mascot else ""}
+        if previous:
+            options["previous"] = previous
+        if self.options.drawing_style != "cartoon":
+            options["style"] = self.options.drawing_style
+        path = gemini_media.draw(description, **options)
         if not path:
+            with self._drawing_lock:
+                self._failed_drawings += 1
             return None
         self.credits.append("Illustrations: drawn with Google Gemini / Imagen")
-        return scenes.prepare_picture(path, allow_cutout=not scene)
+        picture = scenes.prepare_picture(path, allow_cutout=not scene)
+        if picture is not None:
+            picture.info["source"] = path
+        return picture
 
     def _doodle_picture(self, item: scenes.SceneItem) -> None:
         """A shot element: the otter's own pose, a drawing, or the icon."""
@@ -1005,14 +1275,107 @@ class Editor:
             image = self._icon_picture(item)
         self._item_pictures[id(item)] = image
 
-    def _illustration_picture(self, scene: scenes.Scene) -> None:
-        """A whole drawn scene (16:9) for a story moment."""
+    def _illustration_picture(self, scene: scenes.Scene, previous: str = ""):
+        """A whole drawn scene (16:9) for a story moment; drawn from ``previous`` when it continues it."""
         item = scene.center or scenes.SceneItem()
         scene.center = item
-        image = self._drawing(item.draw, mascot=item.otter, scene=True)
+        image = self._drawing(item.draw, mascot=item.otter and not previous, scene=True, previous=previous)
         if image is not None:
             image.info["framed"] = True
             self._item_pictures[id(item)] = image
+        return image
+
+    def _illustration_chain(self, chain: List[scenes.Scene]) -> None:
+        """Illustrations drawn in order, each continuing frame redrawn from the one before it."""
+        previous = ""
+        for scene in chain:
+            image = self._illustration_picture(scene, previous if scene.follows else "")
+            previous = image.info.get("source", "") if image is not None else ""
+
+    def _clip_media(self, scene: scenes.Scene, text: str = "") -> None:
+        """A stock video for a clip shot (Pexels, then Pixabay); its drawing when none is found."""
+        item = scene.center or scenes.SceneItem()
+        scene.center = item
+        query = item.query
+        aspect = VideoAspect.portrait if self.theme.portrait else VideoAspect.landscape
+        seconds = max(2, int(scene.end - scene.start + 1))
+        candidates = []
+        if query:
+            for search in (material.search_videos_pexels, material.search_videos_pixabay):
+                try:
+                    found = search(query, seconds, aspect) or []
+                except Exception as exc:
+                    logger.debug(f"no {getattr(search, '__name__', 'stock video')} for {query!r}: {exc}")
+                    found = []
+                with self._icon_lock:
+                    candidates += [info for info in found if info.url not in self._used_urls]
+                if len(candidates) >= 3:
+                    break
+        check = self.options.picture_check and self._gemini
+        line = sentence_at(text, item.at) if text else query
+        for info in candidates[:3]:
+            with self._icon_lock:
+                if info.url in self._used_urls:
+                    continue
+                self._used_urls.add(info.url)
+            try:
+                path = material.save_video(info.url, save_dir=os.path.join(self.work_dir, "clips"))
+            except Exception as exc:
+                logger.warning(f"clip for {query!r} could not be downloaded: {exc}")
+                continue
+            if not path:
+                continue
+            if check:
+                frame = os.path.join(self.work_dir, "clips", f"{os.path.basename(path)}.jpg")
+                if fx.extract_frame(utils.get_ffmpeg_binary(), path, frame, 1.0):
+                    verdict = gemini_media.choose_picture([frame], line, query, self.options.language, purpose="clip")
+                    if verdict is not None and verdict < 0:
+                        logger.info(f"the clip for {query!r} did not pass the check")
+                        continue
+            scene.media = path
+            self.credits.append(_clip_credit(info))
+            return
+        if item.draw:
+            # No video fits: the moment is drawn instead.
+            logger.info(f"no clip for {query!r}; drawing it instead")
+            scene.type = "illustration"
+            self._illustration_picture(scene)
+
+    def _meme_files(self) -> Dict[str, List[str]]:
+        with self._icon_lock:
+            if self._memes is None:
+                folder = self.options.memes_dir or utils.resource_dir("memes")
+                self._memes = meme_library(folder) if self.options.memes == "folder" else {}
+            return self._memes
+
+    def _meme_picture(self, scene: scenes.Scene) -> None:
+        """The reaction of a meme shot: a file of the memes folder, the otter drawn reacting, or its pose."""
+        item = scene.center or scenes.SceneItem()
+        scene.center = item
+        mood = scene.mood if scene.mood in llm.MEME_MOODS else "shock"
+        files = self._meme_files().get(mood, [])
+        with self._icon_lock:
+            fresh = [f for f in files if f not in self._used_memes] or files
+            chosen = fresh[fx.safe_seed(f"{scene.start}{item.at}") % len(fresh)] if fresh else ""
+            if chosen:
+                self._used_memes.add(chosen)
+        if chosen:
+            if chosen.lower().endswith(scenes.VIDEO_EXTENSIONS):
+                scene.media = chosen
+                return
+            image = scenes.prepare_picture(chosen, allow_cutout=False)
+            if image is not None:
+                image.info["framed"] = True
+                self._item_pictures[id(item)] = image
+                return
+        image = self._drawing(item.draw, mascot=True) if item.draw else None
+        if image is None:
+            pose = MEME_POSES.get(mood, "sorprendido")
+            if pose not in self.poses:
+                pose = _pick(self.poses, ("sorprendido", "feliz", "explicando"))
+            if pose:
+                image = scenes.prepare_picture(self.poses[pose].idle, trust_alpha=True)
+        self._item_pictures[id(item)] = image
 
     def _opener_picture(self, scene: scenes.Scene, text: str) -> None:
         """The section opener's picture, strictly about its title.

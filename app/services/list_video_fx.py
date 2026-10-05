@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-SFX_NAMES = ("whoosh", "pop", "tick", "click", "bloop", "stamp", "scribble")
+SFX_NAMES = ("whoosh", "pop", "tick", "click", "bloop", "stamp", "scribble", "boom")
 SFX_SAMPLE_RATE = 24000
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".ogg", ".m4a", ".flac")
 IMAGE_EXTENSIONS = (".png", ".webp", ".jpg", ".jpeg")
@@ -117,6 +117,19 @@ def media_duration(ffmpeg_binary: str, media_file: str) -> float:
         return 0.0
     hours, minutes, seconds = match.groups()
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def extract_frame(ffmpeg_binary: str, video_file: str, output: str, at: float = 1.0) -> str:
+    """One frame of a video as a picture (to check a clip); "" when it cannot be read."""
+    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+    for seek in (at, 0.0):
+        result = subprocess.run(
+            [ffmpeg_binary, "-v", "error", "-y", "-ss", f"{seek:.2f}", "-i", video_file, "-frames:v", "1", "-q:v", "3", output],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if result.returncode == 0 and os.path.isfile(output) and os.path.getsize(output) > 0:
+            return output
+    return ""
 
 
 @dataclass
@@ -666,6 +679,17 @@ def synthesize_sfx(name: str, sample_rate: int = SFX_SAMPLE_RATE) -> np.ndarray:
         t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
         sound = (np.sin(2 * np.pi * 1760 * t) + 0.5 * np.sin(2 * np.pi * 2640 * t)) * np.exp(-t * 55)
         return (0.22 * sound).astype(np.float32)
+    if name == "boom":
+        # A soft cinematic hit for comic reactions: a falling sub thump and a short crack.
+        duration = 0.7
+        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+        freq = 42 + 70 * np.exp(-t * 9)
+        phase = 2 * np.pi * np.cumsum(freq) / sample_rate
+        body = np.sin(phase) * np.exp(-t * 5.5)
+        crack = np.convolve(rng.standard_normal(t.size), np.ones(4) / 4, mode="same") * np.exp(-t * 60)
+        attack = np.clip(t / 0.004, 0, 1)
+        sound = (body + 0.35 * crack) * attack
+        return (0.7 * sound / (np.abs(sound).max() or 1)).astype(np.float32)
     if name == "click":
         duration = 0.12
         samples = int(sample_rate * duration)

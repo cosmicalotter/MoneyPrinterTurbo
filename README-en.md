@@ -519,7 +519,27 @@ caps them, then OpenMoji icons are used); the otter mascot is drawn from its own
 when it acts in a drawing, or appears with its own poses. Drawings pop in as they are
 named, wobble very slightly like hand-made animation (`--no-boil` keeps them still) and
 fade out when the next shot starts; `--logo nutria` adds a round channel badge in the
-corner. No stock footage is used.
+corner.
+
+**The animatic pace (round 6):** the storyboard now changes picture every 2-4 seconds
+(`--shot-seconds`, default 3): each segment tells the LLM how long it is and how many
+shots it needs, long videos are planned a few segments at a time in parallel, and a
+second short pass adds shots wherever one picture would stay too long. About half the
+shots are full-screen cartoon frames of the story (`--drawing-style cartoon`, the
+polished 2D look; `ink` keeps the pen doodles) with a slow camera move (in, out, left,
+right) that dissolve into each other; a frame marked `"continue": true` is redrawn from
+the frame before it with only one thing changed, like the next drawing of an animation.
+Between them, explainer compositions build up drawing by drawing (a single drawing now
+appears as if drawn, over a paper blob), and `--clips some|more` puts a real stock
+video (Pexels, then Pixabay; checked by Gemini) in a taped ink frame on the canvas now
+and then (`none` for drawings only). `--memes otter` adds a two-second comic reaction on
+a punchline (the otter drawn reacting on comic rays, with a soft "boom"); `--memes
+folder` uses your own pictures and videos sorted by mood in `resource/memes` (or
+`--memes-dir`; read its README about copyright). Drawing is sturdier: when Imagen fails
+(a region or project without it, a filtered prompt) Gemini's image model draws instead,
+busy models are retried, and the render's warnings say how many drawings failed and
+why. Icons are only a fallback, and Gemini checks that the icon depicts the thing (no
+kissing face for "an energy wave"): no icon is better than a wrong one.
 
 ```shell
 uv run python list_video.py --subject "Why call centres are disappearing" --format story \

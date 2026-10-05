@@ -247,7 +247,7 @@ class TestDrawing(_TempDirCase):
         self.assertTrue(os.path.isfile(otter))
         kinds = [kind for kind, _ in calls]
         self.assertEqual(kinds, ["imagen", "gemini", "imagen"])  # cached once; the mascot needs a reference model
-        self.assertIn("ink line art", calls[0][1]["prompt"])
+        self.assertIn("cel shading", calls[0][1]["prompt"])  # the polished cartoon look by default
         self.assertEqual(calls[1][1]["model"], gemini_media.SEQUENCE_DEFAULT_MODEL)
         self.assertEqual(len(calls[1][1]["contents"]), 2)  # the reference picture and the prompt
         self.assertEqual(calls[2][1]["config"].aspect_ratio, "16:9")
@@ -351,11 +351,12 @@ class TestDoodleEditor(_TempDirCase):
         icon = _icon(self.path("icon.png"))
         drawn = []
 
-        def draw(description, scene=False, mascot="", app_config=None):
+        def draw(description, scene=False, mascot="", app_config=None, **kwargs):
             drawn.append((description, scene, bool(mascot)))
             return "" if scene else drawing
 
         with patch.object(editor.llm, "generate_storyboard", return_value=llm.normalize_storyboard(self.BOARD, 3, sorted(ed.poses))) as board, \
+                patch.object(editor.llm, "generate_storyboard_gaps", return_value={}), \
                 patch.object(editor.gemini_media, "draw", side_effect=draw), patch.object(editor.icons, "fetch", return_value=icon), \
                 patch.object(editor.web_images, "find_candidates") as find:
             ed.make_plan()
@@ -363,8 +364,8 @@ class TestDoodleEditor(_TempDirCase):
         board.assert_called_once()
         find.assert_not_called()  # no stock pictures in the doodle look
         self.assertFalse(ed.wants_footage)
-        self.assertEqual(drawn[0], ("a battery with arms", False, True))  # the otter is drawn from its own picture
-        self.assertIn(("a dark lab", True, False), drawn)
+        self.assertEqual(drawn[0], ("a dark lab", True, False))  # illustrations are drawn first (the budget goes to them)
+        self.assertIn(("a battery with arms", False, True), drawn)  # the otter is drawn from its own picture
         self.assertLessEqual(ed._drawings, 3)
         shots = ed._scenes[1]
         self.assertNotIn("illustration", [s.type for s in shots])  # not drawn: dropped, and the shot before stays longer
@@ -441,7 +442,7 @@ class TestFreshPictures(_TempDirCase):
         theme = fx.Theme(1280, 720, FONT, fx.parse_color(fx.DEFAULT_ACCENT))
         segments = list_video.build_segments(ListVideoScript(title="T", items=[ListVideoItem(name="A", text="hola")]))
         with patch.object(editor.gemini_media, "enabled", return_value=True):
-            return editor.Editor(editor.EditOptions(subscribe="none"), theme, self.temp_dir, segments, narrations)
+            return editor.Editor(editor.EditOptions(subscribe="none", picture_check=False), theme, self.temp_dir, segments, narrations)
 
     def test_icons_are_not_repeated(self):
         ed = self._editor()

@@ -15,6 +15,11 @@ crystal clear and win the viewer's attention back:
 * diagram   - one central idea and the factors around it, with arrows drawn
               towards it as each factor is named.
 
+The doodle look strings shots together like an animatic: full-screen drawn
+frames with a slow camera move that dissolve into each other, compositions
+whose drawings appear as if drawn, real video clips in a taped ink frame and
+short comic reactions (``clip`` and ``meme``).
+
 The LLM director writes the scenes in the edit plan, anchored to exact words.
 Pictures are OpenMoji icons (thick outlines and flat colours, like a doodle)
 or doodle-style AI illustrations; labels use a hand-lettered font. Animations
@@ -27,7 +32,7 @@ from __future__ import annotations
 import math
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -41,7 +46,7 @@ SCENE_TYPES = (
     "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
     "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
     "definition", "equation", "annotate", "chain", "branch",
-    "single", "speech", "illustration",
+    "single", "speech", "illustration", "clip", "meme",
 )
 # Scenes whose elements are anchored one by one to the narration.
 ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "formula", "timeline", "chain", "branch")
@@ -49,7 +54,10 @@ ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "form
 PART_SCENES = ("equation", "annotate", "speech")
 PART_KEYS = {"equation": "terms", "annotate": "labels", "speech": "items"}
 # Scenes rendered as a full-frame video clip (a slow zoom) instead of layers.
-CLIP_SCENES = ("figure", "zoom", "illustration")
+CLIP_SCENES = ("figure", "zoom", "illustration", "clip", "meme")
+# Shots that cover the whole frame: the shot before them stays underneath while they fade in.
+FULL_FRAME_SHOTS = CLIP_SCENES
+CROSSFADE_SECONDS = 0.3
 SCENE_MARKS = ("cross", "check")
 SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
@@ -66,11 +74,11 @@ CHECK = (38, 166, 91)
 AMBER = (244, 180, 50)
 GREY = (190, 190, 198)
 HAND_FONT = "PatrickHand-Regular.ttf"
-_SFX = {"pop": 0.5, "stamp": 0.8, "scribble": 0.45, "whoosh": 0.5, "tick": 0.6}
+_SFX = {"pop": 0.5, "stamp": 0.8, "scribble": 0.45, "whoosh": 0.5, "tick": 0.6, "boom": 0.75}
 # Seconds a scene stays after its last element, by type.
 _TAILS = {"statement": 2.6, "stat": 3.0, "bars": 3.0, "grid": 3.4, "gauge": 3.2, "zoom": 3.4,
           "question": 2.8, "story": 2.8, "figure": 5.0, "definition": 5.2, "equation": 2.8, "annotate": 2.6,
-          "chain": 2.8, "branch": 2.8, "single": 2.6, "speech": 3.0, "illustration": 3.5}
+          "chain": 2.8, "branch": 2.8, "single": 2.6, "speech": 3.0, "illustration": 3.5, "clip": 3.5, "meme": 2.2}
 PART_FIRST = {"equation": 1.2, "annotate": 1.0, "speech": 0.0}  # seconds from the anchor to the first part
 PART_STEP = 0.9  # parts without their own anchor follow each other this far apart
 
@@ -124,9 +132,19 @@ class Scene:
     symbol: str = ""  # definition: the quantity's symbol
     example: str = ""  # equation: a worked example ("12 V = 2 A × 6 Ω")
     still: bool = False  # never slides in or out (the shots of the doodle look)
+    camera: str = ""  # illustration: "in", "out", "left" or "right" ("" picks one)
+    follows: bool = False  # illustration: redrawn from the illustration before it (the next frame)
+    frame: str = "card"  # clip: a framed video on the canvas ("card") or the whole screen ("full")
+    mood: str = ""  # meme: the reaction ("shock", "laugh", ...)
+    media: str = ""  # clip or meme: the video file to show
+    fade_in: float = 0.0  # fades in over the shot before it
+    overlap: float = 0.0  # stays this long under the next shot while that one fades in
+    linger: float = 0.0  # fades out this long over the start of the next shot (drawn on the canvas)
+    reprise: bool = False  # the shot before a reaction, shown again after it (same picture)
 
 
 OPENER_SECONDS = 3.2  # how long a section opener holds the screen
+CAMERA_MOVES = ("in", "out", "left", "right")
 
 
 def opener_scene(
@@ -227,9 +245,17 @@ def _scene_from(spec: dict, kind: str, start: float, end: float, items: List[Sce
         scene.center = SceneItem(label=str(spec.get("name") or spec.get("label") or ""))
     elif kind == "annotate":
         scene.center = SceneItem(query=scene.query, at=str(spec.get("at") or ""))
-    elif kind in ("single", "illustration"):
+    elif kind in ("single", "illustration", "clip", "meme"):
         item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
         scene.center = _item(dict(item, at=spec.get("at") or ""))
+        if kind == "illustration":
+            scene.camera = str(spec.get("camera") or "") if spec.get("camera") in CAMERA_MOVES else ""
+            scene.follows = bool(spec.get("continue"))
+        elif kind == "clip":
+            scene.frame = "full" if spec.get("frame") == "full" else "card"
+        elif kind == "meme":
+            scene.mood = str(spec.get("mood") or "")
+            scene.text = str(spec.get("text") or "")
     if kind in ("stat", "grid", "gauge", "zoom", "figure"):
         item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
         scene.center = scene.center or SceneItem(
@@ -300,6 +326,7 @@ def _spec_times(
 
 
 MIN_SHOT_SECONDS = 1.6
+MEME_SECONDS = 2.4  # a reaction cut-in lasts this long; the shot before it comes back after
 
 
 def time_shots(
@@ -337,10 +364,30 @@ def time_shots(
         visible = [i for i in items if i.time < end - 0.8]
         for item in visible:
             item.time = max(item.time, begin + 0.12)
+        if visible and kind in ITEM_SCENES:
+            # The screen is never left empty waiting for the first element.
+            visible[0].time = begin + 0.12
         scene = _scene_from(spec, kind, begin, end, visible)
         scene.exit = False
+        previous = shots[-1] if shots else None
+        if kind == "meme" and end - begin > MEME_SECONDS + 1.0:
+            scene.end = begin + MEME_SECONDS
+            if previous is not None and previous.type in ("illustration", "single") and not previous.reprise:
+                shots.append(scene)
+                # Back to the picture the reaction interrupted (the very same drawing).
+                shots.append(replace(previous, start=scene.end, end=end, items=[], reprise=True, follows=False, camera=""))
+                continue
+            scene.end = end
         shots.append(scene)
     return shots
+
+
+def long_holds(shots: List[Scene], duration: float, limit: float, start: float = 0.0) -> List[Tuple[float, float]]:
+    """Stretches longer than ``limit`` seconds in which nothing new appears on screen."""
+    moments = {start} | {s.start for s in shots} | {i.time for s in shots for i in s.items if i.time > 0}
+    moments = sorted(m for m in moments if start <= m < duration)
+    ends = moments[1:] + [duration]
+    return [(a, b) for a, b in zip(moments, ends) if b - a > limit]
 
 
 def time_scenes(
@@ -844,24 +891,164 @@ def gauge_frames(value: float, radius: int, line: int, frames: int = 20) -> List
     return out
 
 
-def ken_burns_clip(still: Image.Image, output: str, frames: int, size: Tuple[int, int], zoom_from: float, zoom_to: float) -> str:
-    """A slow push-in (or pull-out) video of ``still`` with exactly ``frames`` frames."""
+def ken_burns_clip(
+    still: Image.Image, output: str, frames: int, size: Tuple[int, int], zoom_from: float, zoom_to: float,
+    pan: float = 0.0, zoom: str = "",
+) -> str:
+    """A slow push-in (or pull-out) video of ``still`` with exactly ``frames`` frames.
+
+    ``pan`` (-1 to 1) also drifts the camera sideways (negative: to the left);
+    ``zoom`` replaces the linear zoom with an ffmpeg expression of ``on`` (the frame).
+    """
     import subprocess
 
     width, height = size
     source = output.rsplit(".", 1)[0] + "-still.png"
     still.convert("RGB").resize((int(width * 1.5), int(height * 1.5)), Image.LANCZOS).save(source)
     frames = max(2, frames)
-    zoom = f"{zoom_from}+({zoom_to - zoom_from})*on/{frames - 1}"
+    zoom = zoom or f"{zoom_from}+({zoom_to - zoom_from})*on/{frames - 1}"
+    pan = max(-1.0, min(1.0, pan))
+    x = "iw/2-(iw/zoom/2)" if not pan else f"(iw-iw/zoom)*(0.5+{0.4 * pan:.3f}*(2*on/{frames - 1}-1))"
     command = [
         utils.get_ffmpeg_binary(), "-v", "error", "-y", "-loop", "1", "-i", source,
-        "-vf", f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={FPS},format=yuv420p",
+        "-vf", f"zoompan=z='{zoom}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={FPS},format=yuv420p",
         "-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", output,
     ]
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     if result.returncode != 0 or not os.path.isfile(output):
         raise RuntimeError(f"zoom clip failed: {(result.stderr or '').strip()[-400:]}")
     return output
+
+
+VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v", ".gif")
+
+
+def video_clip(
+    source: str, output: str, frames: int, size: Tuple[int, int], background: Optional[Image.Image] = None,
+    box: Optional[Tuple[int, int, int, int]] = None, cover: Optional[Image.Image] = None, contain: bool = False,
+    skip: float = 0.0,
+) -> str:
+    """A full-frame video of exactly ``frames`` frames playing ``source`` (looped when short).
+
+    With ``box`` (x, y, width, height) the video plays inside that box over
+    ``background`` with rounded corners, and ``cover`` (a full-frame picture
+    with a transparent window, such as an ink frame) goes on top. Without it
+    the video fills the frame, cropped or, with ``contain``, whole over a
+    blurred copy of itself.
+    """
+    import subprocess
+
+    width, height = size
+    stem = output.rsplit(".", 1)[0]
+    frames = max(2, frames)
+    gif = source.lower().endswith(".gif")
+    looping = ["-ignore_loop", "0"] if gif else ["-stream_loop", "-1"]
+    inputs = [*looping, "-ss", f"{max(0.0, skip):.2f}", "-i", source] if skip and not gif else [*looping, "-i", source]
+    grade = "eq=saturation=0.92:contrast=1.03"
+    filters = []
+    if box is not None:
+        x, y, w, h = box
+        w, h = w - w % 2, h - h % 2
+        back = f"{stem}-back.png"
+        (background or Image.new("RGB", size, (0, 0, 0))).convert("RGB").save(back)
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), max(4, int(min(w, h) * 0.04)), fill=255)
+        mask_path = f"{stem}-mask.png"
+        mask.save(mask_path)
+        inputs = ["-loop", "1", "-i", back, *inputs, "-loop", "1", "-i", mask_path]
+        filters.append(
+            f"[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps={FPS},{grade},format=rgba[v]"
+        )
+        filters.append("[2:v]format=gray[m]")
+        filters.append("[v][m]alphamerge[vm]")
+        filters.append(f"[0:v][vm]overlay={x}:{y}:shortest=0[b]")
+        last = "b"
+        if cover is not None:
+            cover_path = f"{stem}-cover.png"
+            cover.save(cover_path)
+            inputs += ["-loop", "1", "-i", cover_path]
+            filters.append("[b][3:v]overlay=0:0[c]")
+            last = "c"
+        filters.append(f"[{last}]format=yuv420p[out]")
+    elif contain:
+        filters.append(
+            f"[0:v]fps={FPS},split[a][b];"
+            f"[a]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},boxblur=24:2,eq=brightness=-0.12[bg];"
+            f"[b]scale={width}:{height}:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[out]"
+        )
+    else:
+        filters.append(
+            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={FPS},{grade},format=yuv420p[out]"
+        )
+    command = [
+        utils.get_ffmpeg_binary(), "-v", "error", "-y", *inputs, "-filter_complex", ";".join(filters),
+        "-map", "[out]", "-frames:v", str(frames), "-r", str(FPS), "-an", "-c:v", "libx264", "-preset", "veryfast",
+        "-crf", "18", "-pix_fmt", "yuv420p", output,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    if result.returncode != 0 or not os.path.isfile(output):
+        raise RuntimeError(f"video clip failed: {(result.stderr or '').strip()[-400:]}")
+    return output
+
+
+def reveal_frames(image: Image.Image, frames: int = 12) -> List[Image.Image]:
+    """``image`` appearing as if drawn: a soft diagonal wipe from the top-left."""
+    alpha = np.asarray(image.getchannel("A"), dtype=np.float32)
+    height, width = alpha.shape
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    diagonal = (x / max(1, width) * 0.75 + y / max(1, height) * 0.25)
+    soft = 0.12
+    out = []
+    for frame in range(1, frames + 1):
+        progress = _ease_out_cubic(frame / frames) * (1 + soft) - soft
+        ramp = np.clip((progress + soft - diagonal) / soft, 0, 1)
+        piece = image.copy()
+        piece.putalpha(Image.fromarray((alpha * ramp).astype(np.uint8)))
+        out.append(piece)
+    out[-1] = image.copy()
+    return out
+
+
+def lighter(color: Tuple[int, int, int], share: float = 0.35) -> Tuple[int, int, int]:
+    return tuple(int(c + (255 - c) * share) for c in color)
+
+
+def darker(color: Tuple[int, int, int], share: float = 0.12) -> Tuple[int, int, int]:
+    return tuple(int(c * (1 - share)) for c in color)
+
+
+def spot(width: int, height: int, color: Tuple[int, int, int], seed: int = 0) -> Image.Image:
+    """An organic, slightly wobbly blob, like a paper cut-out behind a drawing."""
+    rng = np.random.default_rng(seed)
+    harmonics = [(k, rng.uniform(0.015, 0.045), rng.uniform(0, 2 * math.pi)) for k in (2, 3, 5)]
+
+    def paint(draw: ImageDraw.ImageDraw, s: float) -> None:
+        cx, cy = width * s / 2, height * s / 2
+        points = []
+        for step in range(120):
+            a = 2 * math.pi * step / 120
+            r = 1 + sum(amp * math.sin(k * a + phase) for k, amp, phase in harmonics)
+            points.append((cx + cx * 0.94 * r * math.cos(a), cy + cy * 0.94 * r * math.sin(a)))
+        draw.polygon(points, fill=color + (255,))
+
+    return _supersampled((width, height), paint, scale=2)
+
+
+def sunburst(size: Tuple[int, int], color: Tuple[int, int, int], rays: int = 18) -> Image.Image:
+    """Comic rays from the centre in two tones of ``color``: the backdrop of a reaction."""
+    width, height = size
+    image = Image.new("RGB", size, color)
+    draw = ImageDraw.Draw(image)
+    cx, cy, reach = width / 2, height / 2, math.hypot(width, height)
+    shade = darker(color, 0.1)
+    for ray in range(rays):
+        a0 = 2 * math.pi * ray / rays
+        a1 = a0 + math.pi / rays
+        draw.polygon([(cx, cy), (cx + reach * math.cos(a0), cy + reach * math.sin(a0)),
+                      (cx + reach * math.cos(a1), cy + reach * math.sin(a1))], fill=shade)
+    vignette = paper(size, (0, 0, 0), vignette=0.0)
+    return Image.blend(image, vignette, 0.04)
 
 
 def fit_inside(image: Image.Image, box: int, most: float = 2.5) -> Image.Image:
@@ -968,7 +1155,8 @@ class SceneRenderer:
             variant.save(path, compress_level=1)
             paths.append(path)
         entries = [(path, 1 / FPS) for path in paths[: len(frames)]]
-        remaining = max(0.0, scene.end - start - len(frames) / FPS)
+        # Long enough to keep wobbling (and fading) while it stays over the next shot.
+        remaining = max(0.0, scene.end + max(scene.overlap, scene.linger) - start - len(frames) / FPS)
         cycle = paths[len(frames):]
         step = BOIL_FRAMES / FPS
         for count in range(int(remaining / step) + 1):
@@ -1061,11 +1249,18 @@ class SceneRenderer:
         builder = getattr(self, f"_build_{scene.type}")
         builder(scene, folder, overlays, sounds)
         if self.doodle:
-            # Each drawing leaves with a quick fade when the next shot begins.
             for overlay in overlays:
-                if not overlay.end or overlay.end >= scene.end - 0.02:
-                    overlay.end = scene.end
-                    overlay.fade_out = max(overlay.fade_out, 0.12)
+                if overlay.end and overlay.end < scene.end - 0.02:
+                    continue
+                if scene.overlap > 0:
+                    # The next shot covers the whole frame: stay underneath while it fades in.
+                    overlay.end, overlay.fade_out = scene.end + scene.overlap, 0.0
+                else:
+                    # Each drawing leaves with a quick fade when the next shot begins.
+                    overlay.end = scene.end + scene.linger
+                    overlay.fade_out = max(overlay.fade_out, 0.12, scene.linger)
+            if scene.fade_in > 0 and scene.type in FULL_FRAME_SHOTS and overlays:
+                overlays[0].fade_in = max(overlays[0].fade_in, scene.fade_in)
         return overlays, sounds
 
     def _build_statement(self, scene, folder, overlays, sounds) -> None:
@@ -1154,8 +1349,10 @@ class SceneRenderer:
             frames, (left, top) = arrow_frames(
                 (W / 2, H * 0.14), (W / 2 + 1, H * 0.88), theme.px(7), frames=8, bend=0.02, head=False
             )
-            overlays.append(self._frames(frames, folder, "divider", left, top, scene.start + SLIDE_SECONDS, scene))
-            self._sound(sounds, scene.start + SLIDE_SECONDS, "scribble")
+            # Drawn with the first element, never on an empty screen.
+            when = max(scene.start + (0.12 if self.doodle else SLIDE_SECONDS), min(i.time for i in items))
+            overlays.append(self._frames(frames, folder, "divider", left, top, when, scene))
+            self._sound(sounds, when, "scribble")
         for number, (item, (cx, cy)) in enumerate(zip(items, centers)):
             card, where = self._card(item, box, label_size, label_width, label_on_top=True, beside=theme.portrait)
             frames = pop_frames(card)
@@ -1220,10 +1417,16 @@ class SceneRenderer:
 
     # -- clip scenes ---------------------------------------------------------------
 
-    def _clip(self, scene: Scene, still: Image.Image, folder: str, zoom_from: float, zoom_to: float) -> fx.Overlay:
-        frames = int(round((scene.end - scene.start) * FPS)) + 2
+    @staticmethod
+    def _clip_frames(scene: Scene) -> int:
+        return int(round((scene.end + max(scene.overlap, scene.linger) - scene.start) * FPS)) + 2
+
+    def _clip(
+        self, scene: Scene, still: Image.Image, folder: str, zoom_from: float, zoom_to: float, pan: float = 0.0, zoom: str = ""
+    ) -> fx.Overlay:
         path = ken_burns_clip(
-            still, os.path.join(folder, "clip.mp4"), frames, (self.theme.width, self.theme.height), zoom_from, zoom_to
+            still, os.path.join(folder, "clip.mp4"), self._clip_frames(scene), (self.theme.width, self.theme.height),
+            zoom_from, zoom_to, pan=pan, zoom=zoom,
         )
         return fx.Overlay(
             path, x=self._slide(scene), y=self._slide(scene, "y"), start=scene.start, end=scene.end, mode="media"
@@ -1846,17 +2049,31 @@ class SceneRenderer:
         return top + image.height + H * 0.03
 
     def _build_single(self, scene, folder, overlays, sounds) -> None:
-        """One drawing, big, with its label (and an optional title above)."""
+        """One drawing, big, with its label (and an optional title above).
+
+        In the doodle look a soft paper blob pops in behind it and the drawing
+        appears as if it were being drawn.
+        """
         theme, W, H = self.theme, self.theme.width, self.theme.height
         appear = scene.start + 0.12
         item = scene.center or SceneItem()
         top = self._title(scene, folder, overlays, sounds, scene.text, appear + 0.25)
         room = H * 0.95 - top
         box = int(min(room * (0.78 if item.label else 0.95), W * (0.62 if not theme.portrait else 0.86)))
-        card, _ = self._card(item, box, int(H * (0.075 if not theme.portrait else 0.04)), int(W * 0.8), label_on_top=False)
+        card, where = self._card(item, box, int(H * (0.075 if not theme.portrait else 0.04)), int(W * 0.8), label_on_top=False)
         cy = top + room / 2
-        overlays.append(self._centered(pop_frames(card), folder, "single", W / 2, cy, appear, scene))
-        self._sound(sounds, appear, "pop")
+        image = self.picture(item) if self.doodle and where is not None else None
+        if image is not None and not image.info.get("framed"):
+            x0, y0, x1, y1 = where
+            side = int(max(x1 - x0, y1 - y0) * 1.12)
+            blob = spot(int(side * 1.12), side, lighter(self.canvas_color, 0.3), seed=int(scene.start * 10))
+            blob_cy = cy - card.height / 2 + (y0 + y1) / 2
+            overlays.append(self._centered(pop_frames(blob, frames=8, start_scale=0.6), folder, "spot", W / 2, blob_cy, appear, scene))
+            overlays.append(self._centered(reveal_frames(card), folder, "single", W / 2, cy, appear + 0.08, scene))
+            self._sound(sounds, appear + 0.08, "scribble")
+        else:
+            overlays.append(self._centered(pop_frames(card), folder, "single", W / 2, cy, appear, scene))
+            self._sound(sounds, appear, "pop")
 
     def _bubble(self, text: str, width: int, tail_left: bool = True) -> Image.Image:
         """A comic speech bubble (empty when ``text`` is empty) with its tail at the bottom."""
@@ -1919,17 +2136,98 @@ class SceneRenderer:
         ImageDraw.Draw(image).text((4 - bbox[0], 4 - bbox[1]), text, font=font, fill=WHITE + (255,), stroke_width=stroke, stroke_fill=INK + (255,))
         return image
 
+    _CAMERA = {"in": (1.0, 1.1, 0.0), "out": (1.1, 1.0, 0.0), "left": (1.1, 1.1, -1.0), "right": (1.1, 1.1, 1.0)}
+
     def _build_illustration(self, scene, folder, overlays, sounds) -> None:
-        """A whole illustrated scene filling the screen, the camera drifting in, with an optional big caption."""
+        """A whole illustrated scene filling the screen, the camera slowly moving, with an optional big caption."""
         W, H = self.theme.width, self.theme.height
         image = self.picture(scene.center or SceneItem())
         if image is None:
             raise ValueError("the illustration was not drawn")
         canvas = fit_cover(image, (W, H)).convert("RGBA")
-        clip = self._clip(scene, canvas, folder, 1.0, 1.08)
-        overlays.append(clip)
+        camera = scene.camera if scene.camera in self._CAMERA else CAMERA_MOVES[int(scene.start * 7) % len(CAMERA_MOVES)]
+        zoom_from, zoom_to, pan = self._CAMERA[camera]
+        overlays.append(self._clip(scene, canvas, folder, zoom_from, zoom_to, pan=pan))
         if scene.text:
-            text = self._outlined(scene.text.upper(), int(H * 0.14), int(W * 0.8))
+            text = self._outlined(scene.text.upper(), int(H * 0.13), int(W * 0.8))
             when = scene.start + 0.35
-            overlays.append(self._centered(stamp_frames(text), folder, "caption", W / 2, H * 0.5, when, scene))
+            cy = H * (0.84 if not self.theme.portrait else 0.8) - text.height / 2
+            overlays.append(self._centered(stamp_frames(text), folder, "caption", W / 2, cy, when, scene))
             self._sound(sounds, when, "stamp")
+
+    def _build_clip(self, scene, folder, overlays, sounds) -> None:
+        """A real video: in an ink frame on the drawn background, or filling the screen."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        if not scene.media:
+            raise ValueError("the clip has no video")
+        item = scene.center or SceneItem()
+        output = os.path.join(folder, "video.mp4")
+        frames = self._clip_frames(scene)
+        if scene.frame == "full":
+            video_clip(scene.media, output, frames, (W, H), skip=0.5)
+            overlays.append(fx.Overlay(output, x="0", y="0", start=scene.start, end=scene.end, mode="media"))
+            if item.label:
+                text = self._outlined(item.label.upper(), int(H * 0.1), int(W * 0.8))
+                overlays.append(self._centered(stamp_frames(text), folder, "caption", W / 2, H * 0.86 - text.height / 2, scene.start + 0.3, scene))
+                self._sound(sounds, scene.start + 0.3, "stamp")
+            return
+        label = self.text.render(item.label.upper(), int(H * (0.075 if not theme.portrait else 0.04)), int(W * 0.86)) if item.label else None
+        top = H * 0.06 + (label.height + H * 0.04 if label is not None else 0)
+        room_w, room_h = W * (0.84 if not theme.portrait else 0.9), H * 0.94 - top
+        aspect = 16 / 9 if not theme.portrait else 9 / 14
+        w = int(min(room_w, room_h * aspect))
+        h = int(w / aspect)
+        x, y = int((W - w) / 2), int(top + (room_h - h) / 2)
+        border = theme.px(7)
+        back = paper((W, H), self.canvas_color, vignette=0.0).convert("RGBA")
+        shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        offset = theme.px(10)
+        ImageDraw.Draw(shadow).rounded_rectangle((x + offset, y + offset, x + w + offset, y + h + offset), theme.px(24), fill=(0, 0, 0, 70))
+        back.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(theme.px(10))))
+        cover = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(cover)
+        draw.rounded_rectangle((x - border // 2, y - border // 2, x + w + border // 2, y + h + border // 2), theme.px(22), outline=INK + (255,), width=border)
+        for corner, angle in ((x + w * 0.08, -8), (x + w * 0.92, 8)):
+            # Two pieces of tape holding the picture to the page.
+            tape = Image.new("RGBA", (theme.px(150), theme.px(46)), (250, 240, 214, 215))
+            tape = tape.rotate(angle, resample=Image.BICUBIC, expand=True)
+            cover.alpha_composite(tape, (int(corner - tape.width / 2), int(y - tape.height / 2)))
+        video_clip(scene.media, output, frames, (W, H), background=back, box=(x, y, w, h), cover=cover, skip=0.5)
+        overlays.append(fx.Overlay(output, x="0", y="0", start=scene.start, end=scene.end, mode="media"))
+        if label is not None:
+            overlays.append(self._frames(pop_frames(label), folder, "label", (W - label.width) / 2, H * 0.06, scene.start + 0.25, scene))
+            self._sound(sounds, scene.start + 0.25, "pop")
+
+    def _build_meme(self, scene, folder, overlays, sounds) -> None:
+        """A comic reaction cut-in: a punch-in on the reaction, rays behind it and a big caption."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        frames = self._clip_frames(scene)
+        output = os.path.join(folder, "clip.mp4")
+        punch = f"1+0.16*pow(max(0,1-on/7),2)+0.04*on/{max(1, frames - 1)}"
+        if scene.media:
+            video_clip(scene.media, output, frames, (W, H), contain=True)
+            overlays.append(fx.Overlay(output, x="0", y="0", start=scene.start, end=scene.end, mode="media"))
+        else:
+            image = self.picture(scene.center or SceneItem())
+            if image is None:
+                raise ValueError("the reaction has no picture")
+            if image.info.get("framed"):
+                # A meme picture: whole, over a blurred, darker copy of itself.
+                canvas = fit_cover(image, (W, H)).filter(ImageFilter.GaussianBlur(theme.px(22))).convert("RGBA")
+                canvas.alpha_composite(Image.new("RGBA", (W, H), (0, 0, 0, 70)))
+                picture = image.copy()
+                picture.thumbnail((int(W * 0.9), int(H * 0.86)), Image.LANCZOS)
+                canvas.alpha_composite(picture.convert("RGBA"), ((W - picture.width) // 2, (H - picture.height) // 2))
+            else:
+                # The otter's reaction on comic rays.
+                canvas = sunburst((W, H), lighter(self.theme.accent, 0.25)).convert("RGBA")
+                picture = image.copy()
+                picture.thumbnail((int(W * 0.8), int(H * (0.78 if scene.text else 0.9))), Image.LANCZOS)
+                picture = die_cut(picture, theme.px(8))
+                canvas.alpha_composite(picture, ((W - picture.width) // 2, H - picture.height + theme.px(10)))
+            path = ken_burns_clip(canvas, output, frames, (W, H), 1.0, 1.0, zoom=punch)
+            overlays.append(fx.Overlay(path, x="0", y="0", start=scene.start, end=scene.end, mode="media"))
+        self._sound(sounds, scene.start, "boom")
+        if scene.text:
+            text = self._outlined(scene.text.upper(), int(H * 0.14), int(W * 0.9))
+            overlays.append(self._centered(stamp_frames(text), folder, "caption", W / 2, H * 0.06 + text.height / 2, scene.start + 0.15, scene))

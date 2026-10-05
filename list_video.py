@@ -368,6 +368,36 @@ for the YouTube description, and edit-plan.json.
         help="doodle look: most AI drawings per video; icons are used after that (default: 160)",
     )
     edit_group.add_argument(
+        "--shot-seconds",
+        type=float,
+        default=3.0,
+        help="doodle look: a new picture about every this many seconds, 2 to 6 (default: 3, like an animatic)",
+    )
+    edit_group.add_argument(
+        "--clips",
+        choices=["none", "some", "more"],
+        default="some",
+        help="doodle look: real stock video clips in a frame now and then (Pexels/Pixabay keys; default: some)",
+    )
+    edit_group.add_argument(
+        "--memes",
+        choices=["off", "otter", "folder"],
+        default="off",
+        help="comic reaction cut-ins on punchlines: off, otter (the otter drawn reacting) or folder "
+        "(pictures and videos of --memes-dir, sorted by mood; the otter when a mood has none)",
+    )
+    edit_group.add_argument(
+        "--memes-dir",
+        default="",
+        help="folder of reaction pictures/videos by mood (shock, laugh, facepalm, ...; default: resource/memes)",
+    )
+    edit_group.add_argument(
+        "--drawing-style",
+        choices=["cartoon", "ink"],
+        default="cartoon",
+        help="doodle look: polished 2D cartoon frames (default) or pen-and-ink doodles",
+    )
+    edit_group.add_argument(
         "--logo",
         default="",
         help='a round channel badge in the top-right corner: "nutria" or a picture file',
@@ -543,6 +573,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         parser.error(f"--assets folder not found: {args.assets}")
     if args.logo and args.logo != "nutria" and not os.path.isfile(args.logo):
         parser.error(f"--logo picture not found: {args.logo}")
+    if args.memes_dir and not os.path.isdir(args.memes_dir):
+        parser.error(f"--memes-dir folder not found: {args.memes_dir}")
     if args.edit_plan and not os.path.isfile(args.edit_plan):
         parser.error(f"--edit-plan file not found: {args.edit_plan}")
     if not args.also_in and (args.also_voice or args.also_voice_style or args.also_script):
@@ -678,6 +710,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             canvas_color=args.canvas_color or "",
             boil=not args.no_boil,
             max_drawings=max(0, args.max_drawings),
+            shot_seconds=min(6.0, max(2.0, args.shot_seconds)),
+            clips=args.clips,
+            memes=args.memes,
+            memes_dir=os.path.abspath(args.memes_dir) if args.memes_dir else "",
+            drawing_style=args.drawing_style,
             logo=args.logo,
             sfx_volume=min(2.0, max(0.0, args.sfx_volume)),
         )

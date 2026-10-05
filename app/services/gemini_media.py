@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import time
 from typing import List, Optional, Tuple
 
 from loguru import logger
@@ -79,7 +80,7 @@ def language_name(language: str) -> str:
     return _LANGUAGE_NAMES.get((language or "").split("-")[0].lower(), "the narration's language")
 
 
-PURPOSES = ("beat", "scene", "figure", "opener", "annotate")
+PURPOSES = ("beat", "scene", "figure", "opener", "annotate", "icon", "clip")
 
 
 def build_choice_prompt(line: str, query: str, count: int, language: str = "", purpose: str = "beat") -> str:
@@ -90,11 +91,34 @@ def build_choice_prompt(line: str, query: str, count: int, language: str = "", p
     * figure: filling the screen, long enough to read a diagram;
     * opener: big, beside the title of a new section; ``line`` is that title
       followed by the section's first sentence;
-    * annotate: big, with labels pointing at its parts; ``query`` names the parts.
+    * annotate: big, with labels pointing at its parts; ``query`` names the parts;
+    * icon: a small flat icon beside its label in a drawn scene;
+    * clip: a frame of a stock video shown for a few seconds in a drawn video.
     """
     language = language_name(language)
     said = f'The narrator says: "{line}"'
-    if purpose == "opener":
+    if purpose == "icon":
+        said = f'An icon will stand for "{query}" in a drawn explainer scene. Context: "{line}"'
+        rules = """- literally depicts that thing, so a viewer recognises it at once without reading the label;
+- reject an icon of a different thing that only shares a word (a face blowing a kiss is not "an energy wave",
+  a mahjong tile is not "first contact", a plain coloured circle is not "a thick cable");
+- a close, recognisable symbol of the idea is fine (a battery for "energy stored", a snail for "slow")."""
+        answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
+        return f"""
+You are the art director of an educational YouTube channel.
+{said}
+Below are {count} candidate icons, numbered 1 to {count} in order.
+Choose the one icon that:
+{rules}
+If no icon clearly fits, answer 0: no icon is better than a wrong one.
+Return only JSON: {answer}
+""".strip()
+    if purpose == "clip":
+        rules = f"""- clearly shows what the narrator talks about, so a viewer gets it at a glance;
+- is a clean, well-lit, sharp shot of a real scene; no text, titles, logos or watermarks;
+- nothing disturbing, no gore; any visible text is in {language} or English."""
+        answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
+    elif purpose == "opener":
         said = (
             f'This picture opens a new section of the video, shown for three seconds beside its title. '
             f'The section title and first sentence: "{line}"'
@@ -252,47 +276,115 @@ def illustrate(subject: str, app_config=None) -> str:
     if not subject:
         return ""
     app_config = _app(app_config)
-    model = str(app_config.get("gemini_image_model", "") or "").strip() or IMAGE_DEFAULT_MODEL
+    model = _usable_model(str(app_config.get("gemini_image_model", "") or "").strip() or IMAGE_DEFAULT_MODEL)
     prompt = STYLE_PROMPT.format(subject=subject)
     path = _cache_path(model, prompt)
     if os.path.isfile(path) and os.path.getsize(path) > 0:
         return path
-    try:
-        from google import genai
-        from google.genai import types
-
-        kwargs = _client_kwargs(app_config)
-        with genai.Client(**kwargs) as client:
-            if model.startswith("imagen"):
-                response = client.models.generate_images(
-                    model=model,
-                    prompt=prompt,
-                    config=types.GenerateImagesConfig(
-                        number_of_images=1, aspect_ratio="1:1", output_mime_type="image/png"
-                    ),
-                )
-                data = response.generated_images[0].image.image_bytes
-            else:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
-                )
-                data = next(
-                    part.inline_data.data
-                    for part in response.candidates[0].content.parts
-                    if getattr(part, "inline_data", None) and part.inline_data.data
-                )
-        with Image.open(io.BytesIO(data)) as image:
-            image.convert("RGB").save(path)
-        logger.info(f"illustration drawn: {subject!r}")
-        return path
-    except Exception as exc:
-        logger.warning(f"illustration failed for {subject!r}: {type(exc).__name__}: {exc}")
+    data = _generate_image(model, prompt, "1:1", [], app_config, subject)
+    if not data:
         return ""
+    with Image.open(io.BytesIO(data)) as image:
+        image.convert("RGB").save(path)
+    logger.info(f"illustration drawn: {subject!r}")
+    return path
 
 
 SEQUENCE_DEFAULT_MODEL = "gemini-2.5-flash-image"
+RETRY_SECONDS = (3.0, 8.0)  # waits before the second and third try of a busy image model
+_TRANSIENT = ("429", "resource_exhausted", "resource exhausted", "503", "unavailable", "500", "internal",
+              "deadline", "timeout", "timed out", "temporarily", "overloaded", "rate limit")
+_state = {"imagen_failed": "", "last_error": ""}
+
+
+class _NoImage(RuntimeError):
+    """The model answered without a picture (a filtered prompt, or text only)."""
+
+
+def last_error() -> str:
+    """Why the last drawing failed ("" when none did), for the render's warnings."""
+    return _state["last_error"]
+
+
+def imagen_failure() -> str:
+    """Why Imagen was given up for this session ("" while it works)."""
+    return _state["imagen_failed"]
+
+
+def _transient(exc: Exception) -> bool:
+    if getattr(exc, "code", None) in (429, 500, 502, 503, 504):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(word in text for word in _TRANSIENT)
+
+
+def _usable_model(model: str) -> str:
+    """``model``, or the Gemini image model once Imagen failed in this session."""
+    if model.startswith("imagen") and _state["imagen_failed"]:
+        return SEQUENCE_DEFAULT_MODEL
+    return model
+
+
+def _image_bytes(client, model: str, prompt: str, aspect: str, references: List[bytes]) -> bytes:
+    from google.genai import types
+
+    if model.startswith("imagen"):
+        response = client.models.generate_images(
+            model=model,
+            prompt=prompt,
+            config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio=aspect, output_mime_type="image/png"),
+        )
+        images = list(getattr(response, "generated_images", None) or [])
+        if not images:
+            raise _NoImage("Imagen returned no picture (the prompt may have been filtered)")
+        return images[0].image.image_bytes
+    contents: list = [types.Part.from_bytes(data=data, mime_type="image/png") for data in references]
+    response = client.models.generate_content(
+        model=model,
+        contents=contents + [prompt] if contents else prompt,
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"], image_config=types.ImageConfig(aspect_ratio=aspect)
+        ),
+    )
+    for candidate in getattr(response, "candidates", None) or []:
+        for part in getattr(getattr(candidate, "content", None), "parts", None) or []:
+            inline = getattr(part, "inline_data", None)
+            if inline is not None and getattr(inline, "data", None):
+                return inline.data
+    raise _NoImage(f"{model} answered without a picture")
+
+
+def _generate_image(
+    model: str, prompt: str, aspect: str, references: List[bytes], app_config, subject: str
+) -> bytes:
+    """The picture's bytes; b"" when every try failed.
+
+    Busy models (429, 503) are tried again after a short wait. When Imagen
+    fails (a region or project without it, a filtered prompt) the Gemini
+    image model draws instead, and a broken Imagen is not asked again.
+    """
+    from google import genai
+
+    attempt = 0
+    while True:
+        try:
+            with genai.Client(**_client_kwargs(app_config)) as client:
+                return _image_bytes(client, model, prompt, aspect, references)
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"[:300]
+            if model.startswith("imagen") and not _transient(exc):
+                if not isinstance(exc, _NoImage) and not _state["imagen_failed"]:
+                    _state["imagen_failed"] = reason
+                    logger.warning(f"Imagen failed ({reason}); drawing with {SEQUENCE_DEFAULT_MODEL} from now on")
+                model = SEQUENCE_DEFAULT_MODEL
+                continue
+            if attempt < len(RETRY_SECONDS) and (_transient(exc) or isinstance(exc, _NoImage)):
+                time.sleep(RETRY_SECONDS[attempt])
+                attempt += 1
+                continue
+            _state["last_error"] = reason
+            logger.warning(f"drawing failed for {subject!r}: {reason}")
+            return b""
 SEQUENCE_PROMPT = (
     "Minimalist hand-drawn doodle illustration for an educational explainer video, "
     "thick uniform dark outlines, flat soft colours, plain pure white background, no text: {subject}"
@@ -410,9 +502,32 @@ SCENE_PROMPT = (
     "an uncluttered composition with one clear focal point, soft light, a hand-made look. "
     "No text, no letters, no numbers, no watermark, not photorealistic, not 3D."
 )
+# The polished 2D animation look (the default): bold outlines, soft cel shading
+# and cinematic light, like a frame of a professional animated explainer.
+CARTOON_PROMPT = (
+    "Modern 2D cartoon illustration for a calm, professional educational YouTube animation: {subject}. "
+    "Clean bold dark outlines, soft cel shading with gentle light, a muted harmonious palette "
+    "(teal, warm brown, cream, dusty blue, soft yellow, brick red), rounded friendly shapes, expressive and simple. "
+    "One subject, whole, centred and isolated, with generous empty space around it, on a plain pure white "
+    "background. No text, no letters, no numbers, no frame, no ground shadow, not photorealistic, not 3D."
+)
+CARTOON_SCENE_PROMPT = (
+    "Wide 16:9 frame of a modern 2D cartoon animation for a calm, professional educational YouTube channel: "
+    "{subject}. Clean bold dark outlines, soft cel shading, cinematic lighting with a clear mood, a muted "
+    "harmonious palette, a simple background with depth, one clear focal point and an uncluttered composition "
+    "that reads at a glance, like a frame of a polished animated explainer. "
+    "No text, no letters, no numbers, no captions, no watermark, not photorealistic, not 3D."
+)
+DRAWING_STYLES = ("cartoon", "ink")
+_PROMPTS = {"cartoon": (CARTOON_PROMPT, CARTOON_SCENE_PROMPT), "ink": (DOODLE_PROMPT, SCENE_PROMPT)}
 MASCOT_NOTE = (
     "The reference picture shows the channel's mascot, an otter with round glasses, a teal sweater and a pencil "
     "behind its ear. Draw this same otter, keeping its design and colours, in the style described. "
+)
+NEXT_FRAME_PROMPT = (
+    "The reference picture is the previous frame of an animation. Draw the next frame: keep exactly the same "
+    "drawing style, setting, characters, colours and lighting, and change only this: {subject}. "
+    "Everything not mentioned stays as it was. Wide 16:9 frame. No text, no letters, no numbers, no captions."
 )
 
 
@@ -427,11 +542,16 @@ def _reference_bytes(path: str) -> bytes:
     return buffer.getvalue()
 
 
-def draw(subject: str, scene: bool = False, mascot: str = "", app_config=None) -> str:
+def draw(
+    subject: str, scene: bool = False, mascot: str = "", app_config=None, previous: str = "", style: str = "cartoon"
+) -> str:
     """A drawing for the doodle look: one subject on white, or a whole 16:9 scene.
 
     ``mascot`` is a picture of the channel's character; when given, a Gemini
     image model (which can follow a reference) draws that same character.
+    ``previous`` is the scene drawn just before: the new one is redrawn from it
+    with only ``subject`` changed, like the next frame of an animation.
+    ``style`` is "cartoon" (polished 2D animation) or "ink" (pen doodles).
     Drawings are cached by their prompt. Returns "" when drawing fails.
     """
     subject = " ".join((subject or "").split())
@@ -439,49 +559,33 @@ def draw(subject: str, scene: bool = False, mascot: str = "", app_config=None) -
         return ""
     app_config = _app(app_config)
     configured = str(app_config.get("gemini_image_model", "") or "").strip() or IMAGE_DEFAULT_MODEL
-    model = configured
-    if mascot and model.startswith("imagen"):
-        model = SEQUENCE_DEFAULT_MODEL  # Imagen cannot follow a reference picture
-    prompt = (SCENE_PROMPT if scene else DOODLE_PROMPT).format(subject=subject)
+    model = _usable_model(configured)
+    single, whole = _PROMPTS.get(style, _PROMPTS["cartoon"])
     reference = b""
-    if mascot and os.path.isfile(mascot):
-        reference = _reference_bytes(mascot)
-        prompt = MASCOT_NOTE + prompt
+    if previous and os.path.isfile(previous):
+        reference = _reference_bytes(previous)
+        prompt = NEXT_FRAME_PROMPT.format(subject=subject)
+        scene = True
+    else:
+        prompt = (whole if scene else single).format(subject=subject)
+        if mascot and os.path.isfile(mascot):
+            reference = _reference_bytes(mascot)
+            prompt = MASCOT_NOTE + prompt
+    if reference and model.startswith("imagen"):
+        model = SEQUENCE_DEFAULT_MODEL  # Imagen cannot follow a reference picture
     key = prompt + ("\n#ref" + hashlib.sha1(reference).hexdigest()[:12] if reference else "")
     path = _cache_path(model, key)
     if os.path.isfile(path) and os.path.getsize(path) > 0:
         return path
-    aspect = "16:9" if scene else "1:1"
+    data = _generate_image(model, prompt, "16:9" if scene else "1:1", [reference] if reference else [], app_config, subject)
+    if not data:
+        return ""
     try:
-        from google import genai
-        from google.genai import types
-
-        with genai.Client(**_client_kwargs(app_config)) as client:
-            if model.startswith("imagen"):
-                response = client.models.generate_images(
-                    model=model,
-                    prompt=prompt,
-                    config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio=aspect, output_mime_type="image/png"),
-                )
-                data = response.generated_images[0].image.image_bytes
-            else:
-                contents: list = [types.Part.from_bytes(data=reference, mime_type="image/png"), prompt] if reference else [prompt]
-                response = client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_modalities=["IMAGE"], image_config=types.ImageConfig(aspect_ratio=aspect)
-                    ),
-                )
-                data = next(
-                    part.inline_data.data
-                    for part in response.candidates[0].content.parts
-                    if getattr(part, "inline_data", None) and part.inline_data.data
-                )
         with Image.open(io.BytesIO(data)) as image:
             image.convert("RGB").save(path)
-        logger.info(f"drawn: {subject!r}")
-        return path
     except Exception as exc:
-        logger.warning(f"drawing failed for {subject!r}: {type(exc).__name__}: {exc}")
+        _state["last_error"] = f"unreadable picture: {exc}"
+        logger.warning(f"drawing for {subject!r} could not be read: {exc}")
         return ""
+    logger.info(f"drawn: {subject!r}")
+    return path

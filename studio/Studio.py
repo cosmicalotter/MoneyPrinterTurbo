@@ -349,7 +349,25 @@ def page_style() -> None:
                                          help="Cada dibujo cuesta ~US$0,02-0,04; después se usan iconos")
         logos = ["nutria", "ninguno"]
         s.logo = "" if c4.selectbox("Logo en la esquina", logos, index=0 if s.logo == "nutria" else 1) == "ninguno" else "nutria"
-        st.caption("Todo el video se dibuja: una composición nueva por cada idea, con la nutria como protagonista. Sin videos de stock.")
+        c1, c2, c3 = st.columns(3)
+        s.shot_seconds = c1.slider("Cambio de imagen cada (s)", 2.0, 6.0, float(s.shot_seconds), 0.5,
+                                   help="Como un animatic: escenas cortas y continuas que cuentan la historia")
+        s.clips = c2.selectbox("Videos reales dentro del dibujo", studio.CLIPS, index=studio.CLIPS.index(s.clips) if s.clips in studio.CLIPS else 1,
+                               format_func=lambda v: {"none": "Ninguno", "some": "Algunos (~8 %)", "more": "Más (~15 %)"}[v],
+                               help="Clips de Pexels/Pixabay en un marco sobre el fondo, para lugares, naturaleza y máquinas reales")
+        s.drawing_style = c3.selectbox("Estilo de dibujo", studio.DRAWING_STYLES,
+                                       index=studio.DRAWING_STYLES.index(s.drawing_style) if s.drawing_style in studio.DRAWING_STYLES else 0,
+                                       format_func=lambda v: {"cartoon": "Caricatura animada (pulida)", "ink": "Tinta a mano (garabato)"}[v])
+        c1, c2 = st.columns(2)
+        s.memes = c1.selectbox("Reacciones tipo meme", studio.MEMES, index=studio.MEMES.index(s.memes) if s.memes in studio.MEMES else 0,
+                               format_func=lambda v: {"off": "No", "otter": "La nutria reacciona (dibujada, sin derechos de autor)",
+                                                      "folder": "Mi carpeta de memes (por emoción)"}[v],
+                               help="Cortes de ~2 s en los remates o datos sorprendentes, como mucho uno cada 40 s")
+        if s.memes == "folder":
+            s.memes_dir = c2.text_input("Carpeta de memes", s.memes_dir, placeholder="resource/memes",
+                                        help="Subcarpetas por emoción: sorpresa, risa, facepalm, mente, confundido, miedo, triste...")
+        st.caption("Casi todo se dibuja: ilustraciones a pantalla completa que cuentan la historia, escenas explicativas "
+                   "con dibujos que aparecen al nombrarlos y, de vez en cuando, un video real enmarcado.")
     look, motion, sound, languages = st.tabs(["🎨 Imagen", "🎬 Edición", "🔊 Sonido", "🌎 Idiomas"])
     with look:
         c1, c2, c3 = st.columns(3)
