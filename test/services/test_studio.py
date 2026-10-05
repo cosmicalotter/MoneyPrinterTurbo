@@ -58,7 +58,8 @@ class TestArgv(unittest.TestCase):
             "--host-presence normal", "--no-openers", "--sfx-volume 0.5", "--bgm-type random", "--subtitle-enabled",
             "--scene-color #FFEEEE", "--lip-sync", "--edit-plan /p/plan.json", "--also-in en-US,pt-BR",
             "--also-voice en-US=gemini:Puck-Upbeat", "--progress-bar", "--no-numbers", "--no-picture-check", "--task-id 0f8fad5b-d9cb-469f-a165-70867728950e",
-            "--voice-style divulgador",
+            "--voice-style calmado", "--format story", "--look doodle", "--canvas-color #F4C24F", "--logo nutria",
+            "--pause 0.5", "--max-drawings 160",
         ):
             self.assertIn(expected, joined)
         self.assertNotIn("--items", argv)  # only for a subject
@@ -68,6 +69,14 @@ class TestArgv(unittest.TestCase):
         _, forwarded = parser.parse_known_args(argv)
         self.assertEqual(list_video_cli._find_unsupported_options(forwarded), [])
 
+        footage = studio.build_argv(studio.RenderSettings(look="footage", voice_polish=False, boil=False, logo="", script_format="list"),
+                                    script_file="/s.json")
+        self.assertIn("--no-voice-polish", footage)
+        self.assertNotIn("--canvas-color", footage)
+        self.assertNotIn("--no-boil", footage)
+        self.assertNotIn("--logo", footage)
+        self.assertEqual(footage[footage.index("--format") + 1], "list")
+        self.assertIn("--no-boil", studio.build_argv(studio.RenderSettings(boil=False), script_file="/s.json"))
         quiet = studio.build_argv(studio.RenderSettings(sound_effects=False), subject="La luz", script_only=True, output="/o.json")
         self.assertEqual(quiet[:2], ["--subject", "La luz"])
         for expected in ("--no-sfx", "--script-only", "--no-subtitle-enabled", "--words-per-item"):

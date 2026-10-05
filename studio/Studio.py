@@ -171,12 +171,18 @@ def page_script() -> None:
                 "Tema del video", placeholder="La electricidad explicada para nutrias: carga, voltaje, corriente...",
                 help="El LLM escribe un guion científico pero fácil: define términos, unidades, fórmulas y el porqué.",
             )
+            script_format = st.radio(
+                "Formato", studio.FORMATS, index=studio.FORMATS.index(settings.script_format) if settings.script_format in studio.FORMATS else 0,
+                horizontal=True, format_func=lambda v: {"story": "Historia continua (gancho y capítulos)", "list": "Lista por secciones numeradas"}[v],
+                help="Historia: empieza en una situación atrapante y avanza sin cortes; los capítulos quedan solo en la descripción.",
+            )
             c1, c2, c3 = st.columns(3)
-            items = c1.number_input("Secciones", 2, 30, int(settings.items))
-            words = c2.number_input("Palabras por sección", 60, 400, int(settings.words_per_item), step=10)
+            items = c1.number_input("Capítulos o secciones", 2, 30, int(settings.items))
+            words = c2.number_input("Palabras por capítulo", 60, 400, int(settings.words_per_item), step=10)
             language = c3.selectbox("Idioma", LANGUAGES, index=LANGUAGES.index(settings.language) if settings.language in LANGUAGES else 0)
             if st.form_submit_button("Escribir guion", type="primary") and subject.strip():
                 settings.items, settings.words_per_item, settings.language = int(items), int(words), language
+                settings.script_format = script_format
                 save_settings(slug, settings)
                 argv = studio.build_argv(settings, subject=subject.strip(), script_only=True, output=str(studio.script_path(slug)))
                 st.session_state[f"script-job::{slug}"] = studio.start_job(argv, label="Guion con IA", project=slug)
@@ -271,6 +277,11 @@ def page_voice() -> None:
         c1, c2 = st.columns(2)
         settings.voice_rate = c1.slider("Velocidad", 0.7, 1.4, float(settings.voice_rate), 0.05)
         settings.voice_volume = c2.slider("Volumen", 0.5, 1.5, float(settings.voice_volume), 0.05)
+        c1, c2 = st.columns(2)
+        settings.pause = c1.slider("Pausa entre frases (s)", 0.0, 1.2, float(settings.pause), 0.05,
+                                   help="Respiración entre frases para una narración calmada (voces Gemini, Cloud TTS y ElevenLabs)")
+        settings.voice_polish = c2.toggle("Masterizar la voz (sonido de estudio)", settings.voice_polish,
+                                          help="Ecualización, de-esser, compresión suave y volumen de YouTube en dos pasadas")
         presets = list(studio.STYLE_PRESETS) + ["personalizado"]
         style_now = settings.voice_style if settings.voice_style in studio.STYLE_PRESETS else "personalizado"
         style = st.radio("Estilo (voces Gemini)", presets, index=presets.index(style_now), horizontal=True)
@@ -326,6 +337,19 @@ def page_style() -> None:
     slug = require_project()
     s = settings_for(slug)
     st.title("Estilo y edición")
+    s.look = st.radio(
+        "Estilo visual", studio.LOOKS, index=studio.LOOKS.index(s.look) if s.look in studio.LOOKS else 0, horizontal=True,
+        format_func=lambda v: {"doodle": "✏️ Dibujado sobre color (estilo Cápsula)", "footage": "🎞️ Videos de stock + imágenes y escenas"}[v],
+    )
+    if s.look == "doodle":
+        c1, c2, c3, c4 = st.columns(4)
+        s.canvas_color = c1.color_picker("Color del fondo", s.canvas_color or "#F4C24F")
+        s.boil = c2.toggle("Trazo vivo (hecho a mano)", s.boil, help="Los dibujos tiemblan muy levemente, como animación hecha a mano")
+        s.max_drawings = c3.number_input("Máximo de dibujos IA", 0, 400, int(s.max_drawings), step=10,
+                                         help="Cada dibujo cuesta ~US$0,02-0,04; después se usan iconos")
+        logos = ["nutria", "ninguno"]
+        s.logo = "" if c4.selectbox("Logo en la esquina", logos, index=0 if s.logo == "nutria" else 1) == "ninguno" else "nutria"
+        st.caption("Todo el video se dibuja: una composición nueva por cada idea, con la nutria como protagonista. Sin videos de stock.")
     look, motion, sound, languages = st.tabs(["🎨 Imagen", "🎬 Edición", "🔊 Sonido", "🌎 Idiomas"])
     with look:
         c1, c2, c3 = st.columns(3)

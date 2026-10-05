@@ -32,6 +32,8 @@ BEAT_MODES = ("web", "ai", "none")
 SUBSCRIBE_MODES = ("both", "intro", "outro", "none")
 ILLUSTRATIONS = ("icons", "ai")
 STYLE_PRESETS = ("divulgador", "entusiasta", "profe", "calmado", "sereno", "narrador")
+LOOKS = ("doodle", "footage")
+FORMATS = ("story", "list")
 
 
 def studio_dir(*parts: str) -> Path:
@@ -51,14 +53,22 @@ def studio_dir(*parts: str) -> Path:
 class RenderSettings:
     # Content
     language: str = "es-CO"
+    script_format: str = "story"  # story (one continuous narrative) or list (numbered sections)
     items: int = 6
     words_per_item: int = 130
     # Voice
-    voice_name: str = "gemini:Puck-Upbeat"
+    voice_name: str = "gemini:Schedar-Even"
     voice_rate: float = 1.0
     voice_volume: float = 1.0
-    voice_style: str = "divulgador"
+    voice_style: str = "calmado"
+    pause: float = 0.5  # breath between sentences (Gemini, Cloud TTS, ElevenLabs)
+    voice_polish: bool = True  # studio mastering of the voice
     # Look
+    look: str = "doodle"  # doodle (everything drawn) or footage (stock video + scenes)
+    canvas_color: str = "#F4C24F"
+    boil: bool = True
+    logo: str = "nutria"
+    max_drawings: int = 160
     aspect: str = "16:9"
     assets: str = "nutria"
     accent: str = "#FF4F5E"
@@ -119,6 +129,7 @@ def build_argv(
         raise ValueError("give either a script file or a subject")
     s = settings
     argv = ["--script", script_file] if script_file else ["--subject", subject]
+    argv += ["--format", s.script_format if s.script_format in FORMATS else "list"]
     if subject:
         argv += ["--items", str(int(s.items))]
         if s.words_per_item:
@@ -133,6 +144,18 @@ def build_argv(
     argv += ["--voice-name", s.voice_name, "--voice-rate", _number(s.voice_rate), "--voice-volume", _number(s.voice_volume)]
     if s.voice_style:
         argv += ["--voice-style", s.voice_style]
+    argv += ["--pause", _number(s.pause)]
+    if not s.voice_polish:
+        argv.append("--no-voice-polish")
+    argv += ["--look", s.look if s.look in LOOKS else "footage"]
+    if s.look == "doodle":
+        if s.canvas_color:
+            argv += ["--canvas-color", s.canvas_color]
+        if not s.boil:
+            argv.append("--no-boil")
+        argv += ["--max-drawings", str(int(s.max_drawings))]
+    if s.logo:
+        argv += ["--logo", s.logo]
     argv += ["--gap", _number(s.gap), "--zoom", _number(s.zoom)]
     if not s.numbers:
         argv.append("--no-numbers")
