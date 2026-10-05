@@ -86,6 +86,10 @@ class TestConfigPersistence:
             "music_base_url": "https://api.elevenlabs.io",
             "music_model_id": "music_v2",
             "music_timeout": 600,
+            # Voice delivery read by elevenlabs_voice_settings().
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
         }
         assert example_config["whisper"]["device"] == "cpu"
 

@@ -501,6 +501,32 @@ text in another language); when none passes, the beat's emoji icon is used.
 `--no-picture-check` keeps the first result. Only pictures on a light, flat background
 that come off as one clean shape are cut out as stickers; photos become framed cards.
 
+**Two script formats:** `--format list` (default) writes an "every X explained" video
+with numbered sections; `--format story` writes one continuous narrative in chapters
+that opens inside a concrete, gripping situation ("It's 5:30 in the morning..."), flows
+from chapter to chapter in calm, short sentences with every idea finished, and is
+rendered without section numbers, titles or cards (the chapters stay in the
+description).
+
+**The doodle look (`--look doodle`):** the whole video is drawn on one flat, warm
+canvas (`--canvas-color`, default `#F4C24F`), like hand-drawn explainer channels. An
+LLM storyboard plans a new composition every one or two sentences: one big drawing with
+a hand-lettered title, someone talking with a speech bubble, a number counting up, bars,
+pies, lists crossed out item by item, processes, causes and effects, and full-screen
+illustrated scenes with a big caption ("05:30") for story moments. Drawings come from
+Gemini/Imagen in an ink-doodle style (about US$0.02-0.04 each, cached; `--max-drawings`
+caps them, then OpenMoji icons are used); the otter mascot is drawn from its own picture
+when it acts in a drawing, or appears with its own poses. Drawings pop in as they are
+named, wobble very slightly like hand-made animation (`--no-boil` keeps them still) and
+fade out when the next shot starts; `--logo nutria` adds a round channel badge in the
+corner. No stock footage is used.
+
+```shell
+uv run python list_video.py --subject "Why call centres are disappearing" --format story \
+  --items 6 --video-language es-CO --look doodle --logo nutria \
+  --voice-name gemini:Schedar-Even --voice-style calmado
+```
+
 **Scientific but easy:** the script writer is asked to define each technical term,
 explain how and why things happen, give units ("voltage is measured in volts") and
 simple laws with a worked example ("Ohm's law: voltage equals current times
@@ -577,7 +603,18 @@ example `--also-voice pt-BR=pt-BR-AntonioNeural-Male`. With `--script-only` each
 translation is saved next to the script as `<name>.<LANG>.json` for review and can be
 passed back with `--also-script`.
 Sound effects play at 65 % of their original loudness (`--sfx-volume 0` to `2`,
-`--no-sfx` removes them).
+`--no-sfx` removes them). Floating pictures are large (one picture up to 62 % x 80 % of
+the screen), and no picture, icon or drawing is repeated in a video.
+
+**Voice quality.** The narration stays at 48 kHz from the TTS file to the final mix
+and is mastered like a studio voice: high-pass, less boxiness, more presence, an
+exciter that restores the "air" of voices generated at 24 kHz (Gemini, Cloud TTS), a
+de-esser, gentle compression, then two-pass (linear) loudness normalization to -14 LUFS
+and a true-peak limiter (`--no-voice-polish` skips the EQ and compression). Voices
+without word timings (Gemini, Cloud TTS, ElevenLabs) get a calm breath between
+sentences (`--pause 0.5` seconds; 0 keeps theirs), and each sentence is located from
+those breaths so pictures land on the right words. ElevenLabs delivery
+(`stability`, `similarity_boost`, `style`) is set in `[elevenlabs]` of `config.toml`.
 
 **Voices.** Besides ElevenLabs (`elevenlabs:<voice id>`), two cheaper and very natural
 options use the same Google credentials as Gemini:
@@ -591,6 +628,9 @@ options use the same Google credentials as Gemini:
 - Google Cloud Text-to-Speech, Chirp 3 HD (`gcloud:es-US-Chirp3-HD-Charon`), about
   US$0.03 per minute with a monthly free tier; it uses Application Default Credentials
   (billed to `gemini_vertex_project`) or `gcloud_tts_api_key`.
+
+Delivery presets for Gemini voices: `divulgador`, `entusiasta`, `profe`, `calmado`,
+`sereno` (slow, warm, with pauses) and `narrador`.
 
 `uv run python voice_lab.py` narrates the same text with a shortlist of young male
 Spanish voices (or `--voices a,b,c`, `--style`, `--rate`) into `storage/voice-lab/` so
