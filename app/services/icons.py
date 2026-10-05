@@ -99,10 +99,17 @@ def find(icon: str, index: Optional[List[dict]] = None) -> Optional[dict]:
                 return entry
         return None
 
-    query = _words(icon)
+    ranked = rank(icon, index)
+    return ranked[0] if ranked else None
+
+
+def rank(text: str, index: Optional[List[dict]] = None, minimum: float = 2.4) -> List[dict]:
+    """Catalogue entries matching English keywords, best first."""
+    query = _words(text)
     if not query:
-        return None
-    best, best_score = None, 0.0
+        return []
+    index = load_index() if index is None else index
+    scored = []
     for entry in index:
         annotation = _words(entry.get("annotation", ""))
         tags = set(_words(entry.get("tags", "")))
@@ -123,9 +130,23 @@ def find(icon: str, index: Optional[List[dict]] = None) -> Optional[dict]:
         score -= 0.6 * max(0, len(annotation) - len(query))
         if entry.get("group", "").startswith("extras"):
             score -= 0.5
-        if score > best_score:
-            best, best_score = entry, score
-    return best if best_score >= 2.4 else None
+        if score >= minimum:
+            scored.append((score, entry))
+    scored.sort(key=lambda pair: -pair[0])
+    return [entry for _, entry in scored]
+
+
+def alternatives(text: str, exclude: Optional[set] = None, limit: int = 5) -> List[str]:
+    """Other emoji that fit ``text`` (English keywords), leaving out ``exclude``."""
+    exclude = {_plain(e) for e in (exclude or set())}
+    found = []
+    for entry in rank(text):
+        emoji = entry.get("emoji", "")
+        if emoji and _plain(emoji) not in exclude and emoji not in found:
+            found.append(emoji)
+        if len(found) >= limit:
+            break
+    return found
 
 
 def fetch(icon: str, size: int = 618) -> str:

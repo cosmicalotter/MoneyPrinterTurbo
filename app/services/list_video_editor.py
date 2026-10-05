@@ -508,6 +508,9 @@ class Editor:
         self.plan: List[dict] = []
         self._drawings = 0
         self._drawing_lock = threading.Lock()
+        self._drawn: Dict[str, int] = {}
+        self._used_icons: set = set()
+        self._icon_lock = threading.Lock()
 
     @property
     def wants_footage(self) -> bool:
@@ -878,17 +881,35 @@ class Editor:
         self._item_pictures.setdefault(id(item), image)
 
     def _icon_picture(self, item: scenes.SceneItem):
-        key = (item.icon, item.draw)
+        """The item's icon; when the video already showed that icon, a different one that fits."""
+        key = (id(item), item.icon, item.draw)
         if key not in self._scene_pictures:
             image = None
-            for query in (item.icon, item.draw):
-                path = icons.fetch(query) if query else ""
+            for query in self._icon_queries(item):
+                path = icons.fetch(query)
                 if path:
                     image = scenes.prepare_picture(path, trust_alpha=True)
                     self.credits.append(icons.CREDIT)
                     break
             self._scene_pictures[key] = image
         return self._scene_pictures[key]
+
+    def _icon_queries(self, item: scenes.SceneItem) -> List[str]:
+        """Icons to try for ``item``, the ones the video has not shown yet first."""
+        wanted = [q for q in (item.icon, item.draw) if q]
+        with self._icon_lock:
+            fresh = [q for q in wanted if q not in self._used_icons]
+            if not fresh and wanted:
+                # Already used: look for another icon of the same thing.
+                keywords = " ".join(q for q in (item.draw, item.query) if q) or item.icon
+                try:
+                    fresh = [e for e in icons.alternatives(keywords, exclude=self._used_icons) if e not in self._used_icons]
+                except Exception as exc:
+                    logger.debug(f"no other icon for {keywords!r}: {exc}")
+            queries = fresh + [q for q in wanted if q not in fresh]
+            if queries:
+                self._used_icons.add(queries[0])
+        return queries
 
     def _figure_picture(self, scene: scenes.Scene, text: str) -> None:
         """A full-screen picture, checked by Gemini, which also says how long to show it."""
@@ -961,6 +982,12 @@ class Editor:
             if self._drawings >= max(0, self.options.max_drawings):
                 return None
             self._drawings += 1
+            # The same description twice would give the very same drawing.
+            key = " ".join(description.lower().split())
+            seen = self._drawn.get(key, 0)
+            self._drawn[key] = seen + 1
+        if seen:
+            description = f"{description}, a different moment, pose and angle from before (variation {seen + 1})"
         path = gemini_media.draw(description, scene=scene, mascot=self._mascot() if mascot else "")
         if not path:
             return None
@@ -1250,15 +1277,15 @@ class Editor:
         width, height = self.theme.width, self.theme.height
         if self.theme.portrait:
             if count == 1:
-                return [(width * 0.5, height * 0.4, int(width * 0.84), int(height * 0.36))]
+                return [(width * 0.5, height * 0.42, int(width * 0.92), int(height * 0.46))]
             rows = [height * (0.18 + 0.56 * (k + 0.5) / count) for k in range(count)]
             return [(width * 0.5, y, int(width * 0.8), int(height * 0.56 / count)) for y in rows]
         if count == 1:
-            return [(width * 0.5, height * 0.45, int(width * 0.44), int(height * 0.62))]
-        step = min(0.3, 0.9 / count)
-        box_w = int(width * min(0.34, 0.86 / count))
+            return [(width * 0.5, height * 0.48, int(width * 0.62), int(height * 0.8))]
+        step = min(0.33, 0.94 / count)
+        box_w = int(width * min(0.4, 0.92 / count))
         return [
-            (width * (0.5 + (k - (count - 1) / 2) * step), height * 0.45, box_w, int(height * 0.5))
+            (width * (0.5 + (k - (count - 1) / 2) * step), height * 0.48, box_w, int(height * 0.66))
             for k in range(count)
         ]
 

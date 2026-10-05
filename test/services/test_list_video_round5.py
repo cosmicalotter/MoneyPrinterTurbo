@@ -435,6 +435,59 @@ class TestDoodleCli(unittest.TestCase):
         self.assertIn("--logo picture not found", stderr)
 
 
+class TestFreshPictures(_TempDirCase):
+    def _editor(self):
+        narrations = [_narration(1.0, 45)]
+        theme = fx.Theme(1280, 720, FONT, fx.parse_color(fx.DEFAULT_ACCENT))
+        segments = list_video.build_segments(ListVideoScript(title="T", items=[ListVideoItem(name="A", text="hola")]))
+        with patch.object(editor.gemini_media, "enabled", return_value=True):
+            return editor.Editor(editor.EditOptions(subscribe="none"), theme, self.temp_dir, segments, narrations)
+
+    def test_icons_are_not_repeated(self):
+        ed = self._editor()
+        fetched = []
+
+        def fetch(query):
+            fetched.append(query)
+            return _icon(self.path(f"{len(fetched)}.png"))
+
+        with patch.object(editor.icons, "fetch", side_effect=fetch), patch.object(
+            editor.icons, "alternatives", return_value=["🪫", "🔌"]
+        ) as alternatives:
+            first = scenes.SceneItem(icon="🔋", draw="a battery")
+            second = scenes.SceneItem(icon="🔋", draw="a battery")
+            self.assertIsNotNone(ed._icon_picture(first))
+            self.assertIsNotNone(ed._icon_picture(second))
+            self.assertIs(ed._icon_picture(first), ed._icon_picture(first))  # cached per element
+        self.assertEqual(fetched[0], "🔋")
+        self.assertEqual(fetched[1], "a battery")  # the description is tried before searching
+        third = scenes.SceneItem(icon="🔋", draw="a battery")
+        with patch.object(editor.icons, "fetch", side_effect=fetch), patch.object(
+            editor.icons, "alternatives", return_value=["🪫", "🔌"]
+        ) as alternatives:
+            ed._icon_picture(third)
+        alternatives.assert_called_once()
+        self.assertEqual(fetched[2], "🪫")
+
+    def test_drawings_are_not_repeated_and_floating_pictures_are_big(self):
+        ed = self._editor()
+        asked = []
+        with patch.object(editor.gemini_media, "draw", side_effect=lambda d, **k: asked.append(d) or ""):
+            ed._drawing("a robot")
+            ed._drawing("A  robot")
+        self.assertEqual(asked[0], "a robot")
+        self.assertIn("variation 2", asked[1])
+        (cx, cy, w, h), = ed._picture_slots(1)
+        self.assertGreaterEqual(w, 1280 * 0.6)
+        self.assertGreaterEqual(h, 720 * 0.75)
+        boxes = ed._picture_slots(3)
+        self.assertGreaterEqual(boxes[0][2], 1280 * 0.3)
+        small = Image.new("RGBA", (100, 100), (255, 0, 0, 255))
+        small.save(self.path("small.png"))
+        sticker = fx.make_sticker(ed.theme, self.path("small.png"), 400, 400)
+        self.assertGreater(sticker.width, 150)  # small pictures are enlarged
+
+
 class TestStoryFormat(unittest.TestCase):
     def setUp(self):
         ui_patch = patch.dict(app_config.ui, {}, clear=True)

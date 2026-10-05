@@ -1424,7 +1424,7 @@ to follow: show the real thing, its parts, how it works and why.
 - {{"type": "story", "items": [2 to 4 frames, each an item with "expression"]}}: a tiny flipbook where the host does something and something happens (plug in -> current flows -> the bulb lights up); each frame's "label" is a short caption.
    An item is {{"at": ..., "label": ..., "icon": ..., "query": ..., "draw": ...}} (plus "mark", "value", "date", "link" or "expression" where a type asks for them): "label" has at most 3 words in {language_name}; "icon" is ONE emoji that depicts the thing literally (when no emoji fits, 1 or 2 English words such as "kidney" or "stomach"); "query" is an English search of 2 to 4 words for a real picture of a concrete thing (real pictures are preferred: give one for every concrete thing, organ, device or place; leave it empty only for abstract ideas, where the emoji is clearer); "draw" is an English description of 5 to 12 words of a simple illustration of that thing.
 {opener_rule}
-7. never add facts that the narration does not state.
+7. never add facts that the narration does not state, and never show the same thing twice: every picture query, "draw" description and icon must be different across the whole video (pick another angle of the idea instead of repeating one).
 {reference_rule}
 ## Output Example:
 {json.dumps(_edit_plan_example(expressions), ensure_ascii=False)}

@@ -345,6 +345,13 @@ def cutout_or_none(image: Image.Image, allow_cutout: bool = True) -> Optional[Im
     return remove_flat_background(image)
 
 
+def _fit_box(image: Image.Image, width: int, height: int, most: float = 2.0) -> Image.Image:
+    """As large as fits in width x height; small pictures grow up to ``most`` times."""
+    scale = min(width / max(1, image.width), height / max(1, image.height), most)
+    size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+    return image.resize(size, Image.LANCZOS) if size != image.size else image
+
+
 def make_sticker(
     theme: Theme,
     image_path: str,
@@ -377,7 +384,7 @@ def make_sticker(
         if bbox:
             image = image.crop(bbox)
         outline = theme.px(9)
-        image.thumbnail((max_width - outline * 2, max_height - outline * 2), Image.LANCZOS)
+        image = _fit_box(image, max_width - outline * 2, max_height - outline * 2)
         canvas = Image.new("RGBA", (image.width + outline * 2, image.height + outline * 2), (0, 0, 0, 0))
         canvas.paste(image, (outline, outline), image)
         alpha = canvas.getchannel("A").point(lambda a: 255 if a > 40 else 0)
@@ -389,7 +396,7 @@ def make_sticker(
 
     border = theme.px(12)
     radius = theme.px(26)
-    image.thumbnail((max_width - border * 2, max_height - border * 2), Image.LANCZOS)
+    image = _fit_box(image, max_width - border * 2, max_height - border * 2)
     card = Image.new("RGBA", (image.width + border * 2, image.height + border * 2), (0, 0, 0, 0))
     ImageDraw.Draw(card).rounded_rectangle(
         (0, 0, card.width - 1, card.height - 1), radius, fill=(255, 255, 255, 255)
