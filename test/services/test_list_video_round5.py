@@ -435,6 +435,48 @@ class TestDoodleCli(unittest.TestCase):
         self.assertIn("--logo picture not found", stderr)
 
 
+class TestStoryFormat(unittest.TestCase):
+    def setUp(self):
+        ui_patch = patch.dict(app_config.ui, {}, clear=True)
+        ui_patch.start()
+        self.addCleanup(ui_patch.stop)
+        self.temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
+
+    def test_story_prompt(self):
+        prompt = llm.build_story_script_prompt("Cómo es ser cada rango de la NCIS", 5, "es-CO", 140)
+        for words in ("ONE continuous story", "exactly 5 chapters", "INSIDE a concrete scene", "never start by announcing",
+                      "about 140 words", "Short sentences", "in es-CO", "why things happen"):
+            self.assertIn(words, prompt)
+        self.assertTrue(prompt.endswith("Cómo es ser cada rango de la NCIS"))
+        reply = json.dumps({"title": "T", "intro": "Son las 5:30.", "items": [{"name": "A", "text": "B"}], "outro": "C"})
+        with patch.object(llm, "_generate_response", return_value=reply) as ask:
+            llm.generate_list_script("NCIS", 3, script_format="story")
+        self.assertIn("ONE continuous story", ask.call_args.args[0])
+        list_prompt = llm.build_list_script_prompt("X", 3)
+        self.assertIn("gripping situation", list_prompt)
+        self.assertNotIn("ONE continuous story", list_prompt)
+        self.assertIn("flow into each other", llm.build_edit_plan_prompt([], [], "es", openers=False))
+        self.assertIn('"opener"', llm.build_storyboard_prompt([], [], "es", openers=True))
+        self.assertIn("continuous story", llm.build_storyboard_prompt([], [], "es", openers=False))
+
+    def test_story_cli_hides_sections(self):
+        script = os.path.join(self.temp_dir, "s.json")
+        Path(script).write_text(json.dumps({"title": "T", "items": [{"name": "A", "text": "B"}]}), encoding="utf-8")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(list_video, "generate_list_video", return_value={}) as generate, redirect_stdout(stdout), redirect_stderr(stderr):
+            list_video_cli.run(["--script", script, "--format", "story"])
+        kwargs = generate.call_args.kwargs
+        self.assertFalse(kwargs["number_items"])
+        self.assertFalse(kwargs["show_item_titles"])
+        self.assertFalse(kwargs["edit"].openers)
+        self.assertTrue(kwargs["edit"].seamless)
+        self.assertEqual(kwargs["gap_seconds"], 0.25)
+        with patch.object(llm, "generate_list_script", return_value=None) as write, redirect_stdout(stdout), redirect_stderr(stderr):
+            list_video_cli.run(["--subject", "NCIS", "--format", "story", "--script-only"])
+        self.assertEqual(write.call_args.kwargs["script_format"], "story")
+
+
 class TestElevenLabsSettings(unittest.TestCase):
     def test_settings_come_from_config(self):
         from unittest.mock import patch

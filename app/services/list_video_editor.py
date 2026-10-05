@@ -76,6 +76,7 @@ class EditOptions:
     boil: bool = True  # doodle look: drawings wobble very slightly, like hand-drawn animation
     logo: str = ""  # a corner badge: "nutria" (the bundled otter) or a picture file
     max_drawings: int = 160  # doodle look: AI drawings per video (icons after that)
+    seamless: bool = False  # story format: segments flow into each other (no whoosh at the cuts)
 
 
 @dataclass
@@ -529,13 +530,15 @@ class Editor:
             ]
             reference = self._reference_plan()
             if self.doodle:
-                plan = llm.generate_storyboard(payload, expressions, self.options.language, reference=reference)
+                plan = llm.generate_storyboard(payload, expressions, self.options.language, reference=reference,
+                                               openers=self.options.openers)
                 if plan is None:
                     self.warnings.append("the LLM did not return a storyboard; one drawing per segment was used")
             elif reference:
-                plan = llm.generate_edit_plan(payload, expressions, self.options.language, reference=reference)
+                plan = llm.generate_edit_plan(payload, expressions, self.options.language, reference=reference,
+                                              openers=self.options.openers)
             else:
-                plan = llm.generate_edit_plan(payload, expressions, self.options.language)
+                plan = llm.generate_edit_plan(payload, expressions, self.options.language, openers=self.options.openers)
             if plan is None and not self.doodle:
                 self.warnings.append(
                     "the LLM did not return an edit plan; only the base visuals were used"
@@ -1132,7 +1135,7 @@ class Editor:
 
         if self.doodle:
             edit.overlays.append(self._canvas_overlay())
-        elif index > 0:
+        elif index > 0 and not self.options.seamless:
             # Centred on the cut, so the whoosh carries the transition.
             self._sound(edit, -0.2, "whoosh")
 

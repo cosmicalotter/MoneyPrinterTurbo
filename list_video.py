@@ -250,6 +250,13 @@ for the YouTube description, and edit-plan.json.
     source.add_argument("--subject", help="video topic used to write the script with the LLM")
     source.add_argument("--script", help="path to a reviewed list script JSON file")
     parser.add_argument(
+        "--format",
+        choices=["list", "story"],
+        default="list",
+        help="list: numbered sections (every X explained); story: one continuous narrative opened by a "
+        "gripping situation, with chapters only in the description (no numbers, titles or section cards)",
+    )
+    parser.add_argument(
         "--items",
         type=_item_count,
         default=_DEFAULT_ITEM_COUNT,
@@ -600,6 +607,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             item_count=args.items,
             language=params.video_language or "",
             words_per_item=words,
+            script_format=args.format,
         )
         if script is None:
             logger.error("the LLM did not return a valid list script")
@@ -637,7 +645,10 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(summary, ensure_ascii=False))
         return 0
 
+    story = args.format == "story"
     options = {"voice_polish_enabled": not args.no_voice_polish}
+    if story and args.gap is None:
+        options["gap_seconds"] = 0.25  # chapters flow into each other
     if args.pause is not None:
         options["pause_seconds"] = min(2.0, max(0.0, args.pause))
     if args.gap is not None:
@@ -661,7 +672,8 @@ def run(argv: Sequence[str] | None = None) -> int:
             scene_color=args.scene_color or "",
             picture_check=not args.no_picture_check,
             host_presence=args.host_presence,
-            openers=not args.no_openers,
+            openers=not args.no_openers and not story,
+            seamless=story,
             look=args.look,
             canvas_color=args.canvas_color or "",
             boil=not args.no_boil,
@@ -676,8 +688,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                 render_task_id,
                 render_script,
                 render_params,
-                number_items=not args.no_numbers,
-                show_item_titles=not args.no_item_titles,
+                number_items=not args.no_numbers and not story,
+                show_item_titles=not args.no_item_titles and not story,
                 **render_options,
             )
         except (list_video.ListVideoError, ValueError) as exc:

@@ -995,7 +995,7 @@ exactly {item_count} items, one at a time, each shown with its own picture.
 1. return only a JSON object with the keys shown in the output example; no markdown, no code fences.
 2. {language_rule}; every image_term must be in English.
 3. "title": a catchy video title, at most 70 characters.
-4. "intro": a hook of at most 60 words; do not greet the viewer or say "welcome".
+4. "intro": a hook of at most 60 words that drops the viewer into a concrete, gripping situation or a surprising fact (a place, a moment, a person, a question they cannot ignore); do not greet the viewer, say "welcome" or "in this video", and do not start with a definition.
 5. "items": exactly {item_count} objects, ordered to keep curiosity high, with the most surprising item last.
 6. each item "name": at most 5 words.
 7. each item "text": about {words_per_item} words of natural spoken narration, like a friendly science YouTuber who is also a careful teacher talking to a curious friend: scientific but easy to follow.
@@ -1010,6 +1010,62 @@ exactly {item_count} items, one at a time, each shown with its own picture.
 8. each "image_term" (including intro_image_term and outro_image_term): 3 to 8 English words describing one concrete, drawable picture, with no text in the picture.
 9. "outro": at most 40 words, closing the video with a question that invites comments.
 10. use only accurate, verifiable facts with correct scientific terminology and real numbers with their units; never invent figures; for health topics never give treatment instructions or dosages.
+
+## Output Example:
+{json.dumps(example, ensure_ascii=False)}
+
+## Video Subject:
+{video_subject}
+""".strip()
+
+
+SCRIPT_FORMATS = ("list", "story")
+
+
+def build_story_script_prompt(
+    video_subject: str,
+    item_count: int,
+    language: str = "",
+    words_per_item: int = DEFAULT_LIST_WORDS_PER_ITEM,
+) -> str:
+    """A narrative script: one continuous story told in chapters, opened by a gripping situation."""
+    language_rule = (
+        f"write title, intro, names, texts and outro in {language}"
+        if language
+        else "write title, intro, names, texts and outro in the same language as the video subject"
+    )
+    example = {
+        "title": "What It's Really Like to Work in a Call Centre",
+        "intro": "It's 5:30 in the morning. Ana is already wearing her headset...",
+        "intro_image_term": "woman with headset in a dark office at dawn",
+        "items": [
+            {"name": "The most common job in the world", "text": "Ana is not alone. ...",
+             "image_term": "rows of call centre desks"},
+        ],
+        "outro": "So the next time a friendly voice answers your call... Would you notice? Tell me in the comments.",
+        "outro_image_term": "phone on a desk at night",
+    }
+    return f"""
+# Role: Head writer of a calm, hand-drawn educational YouTube channel
+
+## Goal:
+Write the narration of ONE continuous story about the subject below, told in exactly {item_count} chapters,
+as gripping as the best "what it's really like to be..." and animated explainer channels: the viewer
+should feel they are living it, understand every idea completely and not be able to stop watching.
+
+## Constrains:
+1. return only a JSON object with the keys shown in the output example; no markdown, no code fences.
+2. {language_rule}; every image_term must be in English.
+3. "title": a curiosity-driven title of at most 70 characters (for example "What it's really like to...", "Why ... is disappearing", "What would happen if...").
+4. "intro": at most 80 words. Open INSIDE a concrete scene: a precise moment, a place and a person (the viewer as "you", or a named character) living the situation, with one or two sensory details; then a short, intriguing turn that opens a question the video will answer. Never greet, never say "in this video", never start with a definition or a statistic.
+5. "items": exactly {item_count} chapters that continue the same story in order (cause and consequence, rising stakes), each with:
+   - "name": a chapter title of at most 6 words for the YouTube chapters (it is NOT read aloud);
+   - "text": about {words_per_item} words that flow from the previous chapter (never start by announcing the chapter or its name), develop ONE main idea completely (what happens, how it works and why, with one concrete example, number or character), and end with a line that pulls into the next chapter.
+6. pacing: calm and clear, like a thoughtful narrator. Short sentences, one idea per sentence, many full stops so the voice can pause; finish every idea before starting the next; no lists, no markdown, no emojis, no hype words.
+7. explain like a great teacher: when a technical term appears, say what it means in plain words; when a number appears, make it tangible with a comparison; always say why things happen.
+8. "outro": at most 50 words: answer the question opened in the intro, leave a final thought, and ask one question for the comments.
+9. each "image_term": 3 to 8 English words describing one concrete, drawable picture of that moment, with no text in the picture.
+10. use only accurate, verifiable facts and real numbers; characters may be illustrative but must be presented as typical, not as real people; for health topics never give treatment instructions or dosages.
 
 ## Output Example:
 {json.dumps(example, ensure_ascii=False)}
@@ -1040,8 +1096,12 @@ def generate_list_script(
     language: str = "",
     words_per_item: int = DEFAULT_LIST_WORDS_PER_ITEM,
     app_config=None,
+    script_format: str = "list",
 ):
     """Generate an editable ListVideoScript for a list-format video.
+
+    ``script_format`` "story" writes one continuous narrative in chapters
+    (opened by a gripping situation) instead of an "every X explained" list.
 
     Returns None when the provider fails or keeps returning invalid JSON, so the
     caller can report the failure instead of rendering an empty video.
@@ -1056,7 +1116,8 @@ def generate_list_script(
     words_per_item = max(
         MIN_LIST_WORDS_PER_ITEM, min(int(words_per_item), MAX_LIST_WORDS_PER_ITEM)
     )
-    prompt = build_list_script_prompt(
+    build = build_story_script_prompt if script_format == "story" else build_list_script_prompt
+    prompt = build(
         video_subject=video_subject,
         item_count=item_count,
         language=language,
@@ -1272,8 +1333,13 @@ def _edit_plan_example(expressions: list) -> dict:
     }
 
 
+OPENER_RULE = (
+    '6b. "opener" (items only): the picture shown for 3 seconds beside the item\'s number and title when the item starts: {{"query": ..., "query_local": ..., "look": ..., "icon": ..., "draw": ...}} strictly about the item TITLE (not about a detail of its text): "query" an English search for the single most representative picture of that title (e.g. title "Voltaje y corriente" -> "voltage and current circuit diagram"), "query_local" the same in {language_name}, "draw" an English description of a simple illustration of the title. The first sentence of every item is said during the opener, so put no beat or scene on it.'
+)
+
+
 def build_edit_plan_prompt(
-    segments: list, expressions: list, language: str = "", reference: Optional[list] = None
+    segments: list, expressions: list, language: str = "", reference: Optional[list] = None, openers: bool = True
 ) -> str:
     language_name = language or "the language of the narration"
     if expressions:
@@ -1299,6 +1365,9 @@ def build_edit_plan_prompt(
             '- {"type": "statement", "at": ..., "text": ...}: a punchline of at most 6 words in '
             f"{language_name} on the channel colour; at most one per item."
         )
+    opener_rule = OPENER_RULE.format(language_name=language_name) if openers else (
+        "6b. the segments flow into each other like one story: do not plan an \"opener\"."
+    )
     reference_rule = ""
     if reference:
         reference_rule = f"""
@@ -1354,7 +1423,7 @@ to follow: show the real thing, its parts, how it works and why.
 - {{"type": "diagram", "center": item, "items": [3 to 5 items]}}: several factors or parts that lead to one central idea; an arrow is drawn from each item to the centre as it is named.
 - {{"type": "story", "items": [2 to 4 frames, each an item with "expression"]}}: a tiny flipbook where the host does something and something happens (plug in -> current flows -> the bulb lights up); each frame's "label" is a short caption.
    An item is {{"at": ..., "label": ..., "icon": ..., "query": ..., "draw": ...}} (plus "mark", "value", "date", "link" or "expression" where a type asks for them): "label" has at most 3 words in {language_name}; "icon" is ONE emoji that depicts the thing literally (when no emoji fits, 1 or 2 English words such as "kidney" or "stomach"); "query" is an English search of 2 to 4 words for a real picture of a concrete thing (real pictures are preferred: give one for every concrete thing, organ, device or place; leave it empty only for abstract ideas, where the emoji is clearer); "draw" is an English description of 5 to 12 words of a simple illustration of that thing.
-6b. "opener" (items only): the picture shown for 3 seconds beside the item's number and title when the item starts: {{"query": ..., "query_local": ..., "look": ..., "icon": ..., "draw": ...}} strictly about the item TITLE (not about a detail of its text): "query" an English search for the single most representative picture of that title (e.g. title "Voltaje y corriente" -> "voltage and current circuit diagram"), "query_local" the same in {language_name}, "draw" an English description of a simple illustration of the title. The first sentence of every item is said during the opener, so put no beat or scene on it.
+{opener_rule}
 7. never add facts that the narration does not state.
 {reference_rule}
 ## Output Example:
@@ -1706,7 +1775,7 @@ def _storyboard_example(expressions: list) -> dict:
 
 
 def build_storyboard_prompt(
-    segments: list, expressions: list, language: str = "", reference: Optional[list] = None
+    segments: list, expressions: list, language: str = "", reference: Optional[list] = None, openers: bool = True
 ) -> str:
     """The director of the doodle look: one drawn composition after another, covering every sentence."""
     language_name = language or "the language of the narration"
@@ -1714,6 +1783,12 @@ def build_storyboard_prompt(
         '"pose": one of ' + json.dumps(expressions, ensure_ascii=False) + " to use the channel's otter in that mood "
         "exactly as it is drawn (free and always on-model; best for the narrator explaining, reacting or thinking)"
         if expressions else '"pose": always "" (the channel has no character poses)'
+    )
+    opener_rule = (
+        '9. each item opens with a 3-second card (its number and title with one drawing): give items an "opener": '
+        '{"draw": an English description of one drawing strictly about the item TITLE, "icon": one emoji}, and start '
+        "its first shot after its first sentence."
+        if openers else "9. the segments flow into each other like one continuous story: keep the visual thread going across them."
     )
     reference_rule = ""
     if reference:
@@ -1743,6 +1818,7 @@ labels, so that every idea is SEEN while it is heard. Plan the shots for each se
 6. labels: at most 4 words in {language_name}, written as they will appear (they are hand-lettered in capitals); titles ("text" of a single shot) at most 7 words.
 7. the channel's mascot is an otter with round glasses and a teal sweater: it is the protagonist of human situations (use "otter": true in a drawing to draw it doing something, or a {pose_rule}).
 8. vary the shot types and keep the tone calm and clear; never add facts that the narration does not state.
+{opener_rule}
 
 ## Shot types:
 - {{"type": "single", "at": ..., "text": title or "", "label": ..., "draw": ..., "icon": ..., "otter": false, "pose": ""}}: one big drawing (with an optional title above it).
@@ -1802,10 +1878,11 @@ def normalize_storyboard(data, segment_count: int, expressions: list) -> list:
 
 
 def generate_storyboard(
-    segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None
+    segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None,
+    openers: bool = True,
 ):
     """Ask the model for the doodle storyboard; None when it keeps failing."""
-    prompt = build_storyboard_prompt(segments, expressions, language, reference)
+    prompt = build_storyboard_prompt(segments, expressions, language, reference, openers)
     for i in range(_max_retries):
         try:
             response = _generate_response(prompt) if app_config is None else _generate_response(prompt, app_config=app_config)
@@ -1874,7 +1951,8 @@ def generate_gap_beats(gaps: list, language: str = "", app_config=None) -> dict:
 
 
 def generate_edit_plan(
-    segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None
+    segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None,
+    openers: bool = True,
 ):
     """Ask the model for a per-segment edit plan; None when it keeps failing.
 
@@ -1882,7 +1960,7 @@ def generate_edit_plan(
     ``reference`` is the plan of the same video in another language, whose
     visuals the new plan reuses.
     """
-    prompt = build_edit_plan_prompt(segments, expressions, language, reference)
+    prompt = build_edit_plan_prompt(segments, expressions, language, reference, openers)
     for i in range(_max_retries):
         try:
             if app_config is None:
