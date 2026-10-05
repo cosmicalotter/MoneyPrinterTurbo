@@ -228,9 +228,35 @@ def validate_script(data: dict) -> Tuple[Optional[dict], str]:
     """(clean script, "") or (None, what is wrong)."""
     from app.models.schema import ListVideoScript
 
+    if not isinstance(data, dict):
+        return None, "el archivo debe ser un objeto JSON con title, intro, items y outro"
+    data = dict(data)
+    items = data.get("items")
+    if isinstance(items, list):
+        # A section left completely blank (the editor's placeholder) is skipped.
+        data["items"] = [
+            item for item in items
+            if not isinstance(item, dict) or any(str(v or "").strip() for v in item.values())
+        ]
+    problems = []
+    if not str(data.get("title") or "").strip():
+        problems.append('falta el título ("title")')
+    if not isinstance(data.get("items"), list) or not data["items"]:
+        problems.append('no hay secciones ("items")')
+    else:
+        for number, item in enumerate(data["items"], 1):
+            if not isinstance(item, dict):
+                problems.append(f"la sección {number} no es un objeto")
+                continue
+            missing = [label for key, label in (("name", 'nombre ("name")'), ("text", 'narración ("text")'))
+                       if not str(item.get(key) or "").strip()]
+            if missing:
+                problems.append(f"la sección {number} no tiene {' ni '.join(missing)}")
+    if problems:
+        return None, "; ".join(problems)
     try:
         return ListVideoScript.model_validate(data).model_dump(), ""
-    except Exception as exc:  # pydantic.ValidationError
+    except Exception as exc:  # pydantic.ValidationError: unknown keys, texts too long...
         return None, str(exc)
 
 

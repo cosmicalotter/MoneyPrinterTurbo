@@ -93,6 +93,14 @@ class TestProjects(_StudioCase):
         self.assertEqual(studio.load_script(slug)["items"][1]["name"], "Voltaje y corriente")
         with self.assertRaises(ValueError):
             studio.save_script(slug, {"title": "", "items": []})
+        # The editor's blank placeholder section is skipped; half-written ones are explained.
+        blank = dict(SCRIPT, items=[{"name": "", "text": "", "image_term": ""}] + SCRIPT["items"])
+        self.assertEqual(len(studio.validate_script(blank)[0]["items"]), 2)
+        clean, error = studio.validate_script(dict(SCRIPT, items=[{"name": "Voltaje", "text": " "}]))
+        self.assertIsNone(clean)
+        self.assertEqual(error, 'la sección 1 no tiene narración ("text")')
+        self.assertIn('no hay secciones ("items")', studio.validate_script(dict(SCRIPT, items=[{"name": "", "text": ""}]))[1])
+        self.assertIn("objeto JSON", studio.validate_script([1])[1])
         settings = studio.load_settings(slug)
         settings.aspect = "9:16"
         studio.save_settings(slug, settings)
