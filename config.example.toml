@@ -595,6 +595,11 @@ pitch = 0
 api_key = ""
 # Available models include eleven_multilingual_v2, eleven_flash_v2_5, and eleven_v3.
 model_id = "eleven_multilingual_v2"
+# Delivery: higher stability is calmer and more even, lower is more expressive;
+# style above 0 exaggerates the voice's character (slower, costs latency).
+stability = 0.5
+similarity_boost = 0.75
+style = 0.0
 # Video-to-Music uses a separate model family while sharing the same API key.
 # music_base_url only configures the Video-to-Music endpoint, so it can point at
 # a proxy or a self-hosted gateway while the voice API keeps the default host.

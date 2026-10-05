@@ -385,6 +385,18 @@ for the YouTube description, and edit-plan.json.
         ),
     )
     edit_group.add_argument(
+        "--pause",
+        type=float,
+        default=None,
+        help="seconds of breath between sentences for Gemini, Cloud TTS and ElevenLabs voices, "
+        "0 keeps the voice's own (default: 0.5)",
+    )
+    edit_group.add_argument(
+        "--no-voice-polish",
+        action="store_true",
+        help="skip the studio mastering of the voice (EQ, de-esser, compression); loudness is still normalized",
+    )
+    edit_group.add_argument(
         "--also-in",
         metavar="LANGS",
         type=_languages,
@@ -594,7 +606,9 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(summary, ensure_ascii=False))
         return 0
 
-    options = {}
+    options = {"voice_polish_enabled": not args.no_voice_polish}
+    if args.pause is not None:
+        options["pause_seconds"] = min(2.0, max(0.0, args.pause))
     if args.gap is not None:
         options["gap_seconds"] = args.gap
     if args.zoom is not None:

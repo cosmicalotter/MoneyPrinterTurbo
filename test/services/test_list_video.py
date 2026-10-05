@@ -286,8 +286,9 @@ class TestGenerateListVideo(unittest.TestCase):
         actual_frames = [frames + 1 for _, frames, _ in rendered]
         with wave.open(result["audio_file"], "rb") as narration:
             self.assertEqual(
-                narration.getnframes(), sum(actual_frames) * list_video.SAMPLES_PER_FRAME
+                narration.getnframes(), sum(actual_frames) * list_video.voice_polish.HQ_RATE // list_video.FPS
             )
+            self.assertEqual(narration.getframerate(), 48000)  # the voice keeps its highs
         self.assertAlmostEqual(result["audio_duration"], sum(actual_frames) / list_video.FPS, places=3)
 
         starts = [0.0]
@@ -304,7 +305,7 @@ class TestGenerateListVideo(unittest.TestCase):
 
         # Burned-in subtitles go through generate_video with loudness-normalized audio.
         kwargs = generate_video.call_args.kwargs
-        self.assertTrue(kwargs["audio_path"].endswith("narration-mix.wav"))
+        self.assertTrue(kwargs["audio_path"].endswith("narration-master.wav"))
         self.assertTrue(os.path.isfile(kwargs["audio_path"]))
         self.assertEqual(result["warnings"], [])
         self.assertFalse(os.path.exists(os.path.join(utils.task_dir(self.task_id), "combined-1.mp4")))

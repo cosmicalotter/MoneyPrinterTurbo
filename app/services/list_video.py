@@ -51,7 +51,7 @@ from app.models.schema import (
 from app.services import bgm as bgm_service
 from app.services import list_video_editor as editor_service
 from app.services import list_video_fx as fx
-from app.services import material, subtitle, task_artifacts, video, voice
+from app.services import material, subtitle, task_artifacts, video, voice, voice_polish
 from app.utils import file_security, utils
 
 LIST_VIDEO_SOURCES = ("pexels", "pixabay", "coverr", "openai_image", "local")
@@ -238,14 +238,14 @@ def write_srt(entries: List[tuple[float, float, str]], subtitle_file: str) -> bo
     return True
 
 
-def pad_pcm_to_frames(pcm: bytes, frames: int) -> tuple[bytes, float]:
-    """Pad or trim 16-bit mono PCM to exactly ``frames`` video frames.
+def pad_pcm_to_frames(pcm: bytes, frames: int, rate: int = PCM_SAMPLE_RATE) -> tuple[bytes, float]:
+    """Pad or trim 16-bit mono PCM at ``rate`` to exactly ``frames`` video frames.
 
     Returns the adjusted PCM and how many seconds of it were cut off.
     """
-    target_bytes = frames * SAMPLES_PER_FRAME * 2
+    target_bytes = frames * (rate // FPS) * 2
     if len(pcm) >= target_bytes:
-        trimmed = (len(pcm) - target_bytes) / 2 / PCM_SAMPLE_RATE
+        trimmed = (len(pcm) - target_bytes) / 2 / rate
         return pcm[:target_bytes], trimmed
     return pcm + b"\x00" * (target_bytes - len(pcm)), 0.0
 
@@ -790,6 +790,7 @@ def _resolve_font_path(params: VideoParams) -> str:
 
 DESIGN_FONT = "BeVietnamPro-Bold.ttf"
 LOUDNESS_TARGET = "loudnorm=I=-14:TP=-1.5:LRA=11"
+DEFAULT_PAUSE_SECONDS = 0.5  # breath between sentences for voices without word timings
 
 
 def _design_font(params: VideoParams, texts: List[str]) -> str:
@@ -806,24 +807,26 @@ def mix_sound_effects(
 ) -> str:
     """Add (time, file, gain) sound effects onto the narration."""
     with wave.open(narration_file, "rb") as source:
+        rate = source.getframerate()
         voice_samples = np.frombuffer(source.readframes(source.getnframes()), dtype=np.int16)
     mix = voice_samples.astype(np.float32) / 32768
     cache = {}
     for time, path, gain in events:
         if path not in cache:
-            cache[path] = np.frombuffer(_decode_pcm(path), dtype=np.int16).astype(np.float32) / 32768
+            cache[path] = voice_polish.decode(path, rate).astype(np.float32) / 32768
         effect = cache[path]
-        begin = max(0, int(round(time * PCM_SAMPLE_RATE)))
+        begin = max(0, int(round(time * rate)))
         if begin >= len(mix):
             continue
         piece = effect[: len(mix) - begin]
         mix[begin : begin + len(piece)] += piece * gain
-    # Soft-limit the rare peaks where an effect lands on loud speech.
-    mix = np.tanh(mix * 1.1) / np.tanh(1.1)
+    # Round off only the rare peaks where an effect lands on loud speech; the
+    # voice itself is never pushed through a saturating curve.
+    mix = voice_polish.soft_limit(mix)
     with wave.open(output_file, "wb") as target:
         target.setnchannels(1)
         target.setsampwidth(2)
-        target.setframerate(PCM_SAMPLE_RATE)
+        target.setframerate(rate)
         target.writeframes((np.clip(mix, -1, 1) * 32767).astype(np.int16).tobytes())
     return output_file
 
@@ -855,12 +858,15 @@ def mux_final_video(
     duration: float,
     bgm_file: str = "",
     bgm_volume: float = 0.2,
+    mastered: bool = False,
 ) -> str:
     """Attach the audio without re-encoding the picture.
 
     Background music is looped, ducked under the voice with a sidechain
-    compressor and faded out; the mix is normalized to -14 LUFS.
+    compressor and faded out; the mix is normalized to -14 LUFS (a mastered
+    narration already is, so it only gets a peak limiter).
     """
+    finish = "alimiter=limit=0.84:level=false" if mastered else LOUDNESS_TARGET
     inputs = ["-i", video_file, "-i", audio_file]
     if bgm_file:
         inputs += ["-stream_loop", "-1", "-i", bgm_file]
@@ -870,15 +876,15 @@ def mux_final_video(
             f"[2:a]aformat=channel_layouts=stereo,volume={bgm_volume:.3f},"
             f"atrim=0:{duration:.3f},afade=t=out:st={fade_start:.3f}:d=3[music];"
             "[music][key]sidechaincompress=threshold=0.03:ratio=6:attack=15:release=350[ducked];"
-            f"[voice][ducked]amix=inputs=2:duration=first:normalize=0,{LOUDNESS_TARGET}[a]"
+            f"[voice][ducked]amix=inputs=2:duration=first:normalize=0,{finish}[a]"
         )
     else:
-        graph = f"[1:a]{LOUDNESS_TARGET},aformat=channel_layouts=stereo[a]"
+        graph = f"[1:a]{finish},aformat=channel_layouts=stereo[a]"
     _run_ffmpeg(
         [
             utils.get_ffmpeg_binary(), "-v", "error", "-y", *inputs,
             "-filter_complex", graph, "-map", "0:v", "-map", "[a]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-ar", "48000",
             "-movflags", "+faststart", output_file,
         ],
         "write the final video",
@@ -909,8 +915,14 @@ def generate_list_video(
     show_item_titles: bool = True,
     zoom: float = DEFAULT_ZOOM,
     edit: Optional[editor_service.EditOptions] = None,
+    voice_polish_enabled: bool = True,
+    pause_seconds: float = DEFAULT_PAUSE_SECONDS,
 ) -> dict:
     """Render a list-format video and return its files and chapters.
+
+    The narration stays at 48 kHz, is mastered like a studio voice
+    (``voice_polish_enabled``) and, for voices without word timings, its
+    breaths between sentences are lengthened to ``pause_seconds``.
 
     With ``edit`` the video is edited automatically: chapter labels, a host
     character, pictures and key facts timed to the narration, a subscribe
@@ -955,16 +967,28 @@ def generate_list_video(
         )
         if sub_maker is None:
             raise ListVideoError(f"failed to synthesize narration for {step}")
-        pcm = _decode_pcm(audio_file)
-        speech_seconds = len(pcm) / 2 / PCM_SAMPLE_RATE
-        if speech_seconds <= 0:
+        try:
+            hq = voice_polish.decode(audio_file, voice_polish.HQ_RATE)
+        except RuntimeError as exc:
+            raise ListVideoError(f"failed to decode narration {audio_file}: {exc}") from exc
+        if len(hq) == 0:
             raise ListVideoError(f"narration for {step} is empty")
+        timed_words = bool(editor_service.cue_word_times(sub_maker))
+        if not timed_words and pause_seconds > 0:
+            # Voices without word timings (Gemini, Cloud TTS, ElevenLabs)
+            # get calmer breaths; Edge voices keep theirs so their word
+            # timings stay right.
+            hq, _ = voice_polish.stretch_pauses(hq, voice_polish.HQ_RATE, pause_seconds)
+        analysis = voice_polish.half_rate(hq)
+        speech_seconds = len(hq) / voice_polish.HQ_RATE
         narrations.append(
             editor_service.Narration(
-                pcm=pcm,
+                pcm=analysis.tobytes(),
                 speech_seconds=speech_seconds,
                 frames=math.ceil((speech_seconds + max(0.0, gap_seconds)) * FPS),
                 sub_maker=sub_maker,
+                hq_pcm=hq.tobytes(),
+                spans=[] if timed_words else voice_polish.align_sentences(segment.text, analysis, PCM_SAMPLE_RATE),
             )
         )
 
@@ -992,7 +1016,7 @@ def generate_list_video(
     with wave.open(narration_file, "wb") as narration:
         narration.setnchannels(1)
         narration.setsampwidth(2)
-        narration.setframerate(PCM_SAMPLE_RATE)
+        narration.setframerate(voice_polish.HQ_RATE)
 
         for index, segment in enumerate(segments):
             step = f"[{index + 1}/{len(segments)}] {segment.chapter}"
@@ -1033,7 +1057,8 @@ def generate_list_video(
             # Pad the narration to the frames actually written, so an encoder
             # that rounds a frame differently cannot shift later segments.
             frames = count_video_frames(segment_video) or target_frames
-            pcm, trimmed = pad_pcm_to_frames(measured.pcm, frames)
+            pcm, trimmed = pad_pcm_to_frames(measured.hq_pcm or measured.pcm, frames,
+                                              voice_polish.HQ_RATE if measured.hq_pcm else PCM_SAMPLE_RATE)
             if trimmed > gap_seconds + 1 / FPS:
                 warnings.append(f"narration for {step} was cut by {trimmed:.2f}s")
             narration.writeframes(pcm)
@@ -1083,10 +1108,20 @@ def generate_list_video(
             subtitle_path = ""
 
     final_video = os.path.join(task_dir, "final-1.mp4")
+    # The voice is mastered (EQ, de-esser, gentle compression) and brought to
+    # -14 LUFS in two passes before anything else touches it.
+    mastered = True
+    try:
+        audio_file = voice_polish.master_voice(
+            audio_file, os.path.join(task_dir, "narration-master.wav"), polish=voice_polish_enabled
+        )
+    except RuntimeError as exc:
+        warnings.append(f"the voice could not be mastered, plain loudness normalization used: {exc}")
+        mastered = False
     if subtitle_path:
         # Burned-in subtitles need the MoviePy compositor, which also mixes
         # the background music; hand it narration already at -14 LUFS.
-        normalized = normalize_loudness(audio_file, os.path.join(task_dir, "narration-mix.wav"))
+        normalized = audio_file if mastered else normalize_loudness(audio_file, os.path.join(task_dir, "narration-mix.wav"))
         bgm_ok = video.generate_video(
             video_path=combined_video,
             audio_path=normalized,
@@ -1104,6 +1139,7 @@ def generate_list_video(
             offset,
             bgm_file=_list_bgm_file(params, warnings),
             bgm_volume=params.bgm_volume if params.bgm_volume is not None else 0.2,
+            mastered=mastered,
         )
 
     chapters_text = format_chapters(chapters, offset)

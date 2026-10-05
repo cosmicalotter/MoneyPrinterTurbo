@@ -31,7 +31,7 @@ PRESENCES = ("low", "normal", "high")
 BEAT_MODES = ("web", "ai", "none")
 SUBSCRIBE_MODES = ("both", "intro", "outro", "none")
 ILLUSTRATIONS = ("icons", "ai")
-STYLE_PRESETS = ("divulgador", "entusiasta", "profe", "calmado", "narrador")
+STYLE_PRESETS = ("divulgador", "entusiasta", "profe", "calmado", "sereno", "narrador")
 
 
 def studio_dir(*parts: str) -> Path:

@@ -60,8 +60,13 @@ VOICE_STYLE_PRESETS: Dict[str, str] = {
         "remarca los términos técnicos y las unidades para que se entiendan"
     ),
     "calmado": (
-        "Habla con calma y cercanía, como un narrador de documental joven: voz suave, ritmo tranquilo y fluido, "
-        "sin dramatizar"
+        "Habla con calma y cercanía, como un narrador de documental joven que conversa en voz baja: voz cálida, "
+        "suave y natural, ritmo tranquilo, una pausa clara al terminar cada idea, sin prisa y sin dramatizar"
+    ),
+    "sereno": (
+        "Narra como un divulgador sereno de un canal de animación educativa: voz cálida y un poco grave, muy natural, "
+        "ritmo lento y pausado, silencios breves entre frases para que cada idea se asiente, tono amable y seguro, "
+        "como si le explicaras algo importante a un amigo en una noche tranquila"
     ),
     "narrador": (
         "Narra como un documental de ciencia: voz profunda y segura, ritmo medido, misterio y asombro en las preguntas"
@@ -326,7 +331,7 @@ def gcloud_tts(
             audio += AudioSegment.silent(duration=250, frame_rate=piece.frame_rate)
         audio += piece
     voice_service.ensure_file_path_exists(voice_file)
-    exported = audio.export(voice_file, format="mp3")
+    exported = audio.export(voice_file, format="mp3", bitrate="160k")
     exported.close()
     logger.info(f"Google Cloud TTS completed: {voice_file}")
     sub_maker = voice_service.ensure_legacy_submaker_fields(voice_service.SubMaker())

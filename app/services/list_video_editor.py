@@ -82,10 +82,12 @@ class SoundEvent:
 class Narration:
     """What the renderer measured for one segment before drawing it."""
 
-    pcm: bytes
+    pcm: bytes  # 24 kHz mono, for timing analysis
     speech_seconds: float
     frames: int
     sub_maker: object = None
+    hq_pcm: bytes = b""  # the same narration at 48 kHz, for the final mix
+    spans: List[Tuple[float, float]] = field(default_factory=list)  # when each sentence is said
 
 
 @dataclass
@@ -138,8 +140,15 @@ def cue_word_times(sub_maker) -> List[float]:
     return times
 
 
-def anchor_time(text: str, anchor: str, sub_maker, speech_seconds: float) -> Optional[float]:
-    """Seconds into the segment when ``anchor`` is spoken, or None."""
+def anchor_time(
+    text: str, anchor: str, sub_maker, speech_seconds: float, spans: Optional[List[Tuple[float, float]]] = None
+) -> Optional[float]:
+    """Seconds into the segment when ``anchor`` is spoken, or None.
+
+    Word timings (Edge voices) are used when there are; else ``spans``, when
+    each sentence is said (found from the pauses of the audio), with the
+    words spread over their sentence; else the text's proportions.
+    """
     words = normalize_words(text)
     target = normalize_words(anchor)
     if not words or not target:
@@ -156,6 +165,17 @@ def anchor_time(text: str, anchor: str, sub_maker, speech_seconds: float) -> Opt
     if times and len(times) >= len(words) * 0.6:
         position = min(len(times) - 1, round(index * len(times) / len(words)))
         return max(0.0, min(times[position], speech_seconds))
+
+    if spans:
+        sentence_words = [normalize_words(s) for s in re.split(r"(?<=[.!?…])\s+", text or "") if s.strip()]
+        if len(sentence_words) == len(spans) and sum(map(len, sentence_words)) == len(words):
+            first = 0
+            for (start, end), sentence in zip(spans, sentence_words):
+                if index < first + len(sentence):
+                    lengths = [len(word) + 1 for word in sentence]
+                    inside = index - first
+                    return start + (end - start) * sum(lengths[:inside]) / max(1, sum(lengths))
+                first += len(sentence)
 
     lengths = [len(word) + 1 for word in words]
     return speech_seconds * sum(lengths[:index]) / sum(lengths)
@@ -177,7 +197,7 @@ def schedule_beats(beats: List[dict], text: str, narration: Narration, duration:
     """Give plan beats start/end times that never overlap the same zone."""
 
     def locate(anchor):
-        return anchor_time(text, anchor, narration.sub_maker, narration.speech_seconds)
+        return anchor_time(text, anchor, narration.sub_maker, narration.speech_seconds, narration.spans)
 
     def picture(data, start) -> _Beat:
         return _Beat(
@@ -546,7 +566,7 @@ class Editor:
         duration = narration.frames / 30.0
         timed = []
         for position, background in enumerate(self._entry(index).get("backgrounds") or []):
-            start = anchor_time(segment.text, background.get("at", ""), narration.sub_maker, narration.speech_seconds)
+            start = anchor_time(segment.text, background.get("at", ""), narration.sub_maker, narration.speech_seconds, narration.spans)
             if start is None:
                 if position > 0:
                     continue
@@ -574,7 +594,7 @@ class Editor:
             pauses = host.find_pauses(narration.pcm)
 
             def locate(anchor, segment=segment, narration=narration):
-                return anchor_time(segment.text, anchor, narration.sub_maker, narration.speech_seconds)
+                return anchor_time(segment.text, anchor, narration.sub_maker, narration.speech_seconds, narration.spans)
 
             window = self._subscribe_window(index, duration)
             blocked = [window] if window else []

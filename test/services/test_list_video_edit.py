@@ -548,7 +548,9 @@ class TestEditedGeneration(unittest.TestCase):
             )
         generate_video.assert_not_called()
         audio = mux.call_args.args[1]
-        self.assertTrue(audio.endswith("narration-sfx.wav"))
+        self.assertTrue(audio.endswith("narration-master.wav"))  # effects mixed, then the voice mastered
+        self.assertTrue(mux.call_args.kwargs["mastered"])
+        self.assertTrue(os.path.isfile(os.path.join(utils.task_dir(self.task_id), "narration-sfx.wav")))
         self.assertEqual(rendered[0]["fade_in"], 0.5)
         self.assertEqual(rendered[-1]["fade_out"], 0.6)
         self.assertEqual(rendered[1]["title"], "")

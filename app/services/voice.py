@@ -1727,7 +1727,8 @@ def gemini_tts(
 
         # pydub 会返回打开的输出文件对象。批量生成时若不主动关闭，文件描述符
         # 会持续累积，并在 Windows 上增加后续覆盖或删除音频文件失败的概率。
-        exported_audio = audio_segment.export(voice_file, format="mp3")
+        # The highest MP3 bitrate for 24 kHz audio, so nothing is lost before mastering.
+        exported_audio = audio_segment.export(voice_file, format="mp3", bitrate="160k")
         exported_audio.close()
         
         logger.info(f"completed, output file: {voice_file}")
@@ -2082,6 +2083,35 @@ def minimax_tts(text: str, voice_id: str, voice_rate: float, voice_file: str, vo
     return None
 
 
+def elevenlabs_voice_settings(voice_rate: float = 1.0) -> dict:
+    """ElevenLabs delivery from [elevenlabs] in config.toml (stability, similarity_boost, style, speed).
+
+    Lower stability sounds more expressive, higher more even and calm; the
+    voice rate becomes ElevenLabs' speed (0.7 to 1.2) when it is not 1.0.
+    """
+
+    def number(key: str, default: float, low: float, high: float) -> float:
+        try:
+            value = float(config.elevenlabs.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return min(high, max(low, value if math.isfinite(value) else default))
+
+    settings = {
+        "stability": number("stability", 0.5, 0.0, 1.0),
+        "similarity_boost": number("similarity_boost", 0.75, 0.0, 1.0),
+        "style": number("style", 0.0, 0.0, 1.0),
+        "use_speaker_boost": True,
+    }
+    try:
+        rate = float(voice_rate)
+    except (TypeError, ValueError):
+        rate = 1.0
+    if math.isfinite(rate) and rate > 0 and abs(rate - 1.0) > 1e-3:
+        settings["speed"] = round(min(1.2, max(0.7, rate)), 2)
+    return settings
+
+
 def elevenlabs_tts(
     text: str,
     voice_id: str,
@@ -2111,12 +2141,7 @@ def elevenlabs_tts(
     payload = {
         "text": text,
         "model_id": model_id,
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-            "style": 0.0,
-            "use_speaker_boost": True,
-        },
+        "voice_settings": elevenlabs_voice_settings(voice_rate),
     }
 
     # Errors where retrying will never help (auth/access/validation failures).
