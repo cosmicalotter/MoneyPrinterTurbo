@@ -10,9 +10,32 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import io
+import json
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
+
+from PIL import Image, ImageDraw
+
+import list_video as list_video_cli
+from app.config import config as app_config
+from app.models.schema import ListVideoItem, ListVideoScript
+from app.services import gemini_media, list_video, llm
 from app.services import list_video_editor as editor
 from app.services import list_video_fx as fx
+from app.services import list_video_scenes as scenes
 from app.services import voice_polish as vp
+from app.utils import utils
+
+FONT = str(Path(utils.font_dir()) / "BeVietnamPro-Bold.ttf")
+NUTRIA = utils.resource_dir(os.path.join("characters", "nutria"))
+
+
+def _icon(path, color=(220, 60, 60, 255), size=120):
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    ImageDraw.Draw(image).ellipse((10, 10, size - 10, size - 10), fill=color, outline=(0, 0, 0, 255), width=6)
+    image.save(path)
+    return path
 
 
 def _speech(pattern, rate=24000, level=0.3):
@@ -116,6 +139,300 @@ class TestMastering(_TempDirCase):
         np.testing.assert_allclose(limited[:3], mix[:3])
         self.assertTrue(np.all(np.abs(limited) < 1.0))
         self.assertGreater(limited[3], 0.92)
+
+
+class TestShotTiming(unittest.TestCase):
+    TIMES = {"uno": 1.0, "dos": 4.0, "tres": 4.8, "cuatro": 9.0, "cinco": 9.6, "seis": 12.0}
+
+    def test_shots_follow_each_other_without_gaps(self):
+        specs = [
+            {"type": "single", "at": "uno", "label": "a", "draw": "x"},
+            {"type": "sequence", "items": [{"at": "dos", "label": "b"}, {"at": "tres", "label": "c"}]},
+            {"type": "single", "at": "cinco", "label": "too close"},  # 0.6 s after the next one
+            {"type": "stat", "at": "cuatro", "value": 7, "label": "d"},
+            {"type": "speech", "at": "seis", "text": "hola", "items": [{"label": "e"}, {"label": "f", "at": "seis"}]},
+            {"type": "bogus", "at": "uno"},
+            {"type": "single", "at": "missing", "label": "x"},
+        ]
+        shots = scenes.time_shots(specs, self.TIMES.get, 15.0, start=0.5)
+        self.assertEqual([s.type for s in shots], ["single", "sequence", "stat", "speech"])
+        self.assertEqual(shots[0].start, 0.5)
+        for shot, following in zip(shots, shots[1:]):
+            self.assertAlmostEqual(shot.end, following.start)
+        self.assertEqual(shots[-1].end, 15.0)
+        self.assertTrue(all(not s.exit for s in shots))
+        self.assertEqual([i.label for i in shots[1].items], ["b", "c"])
+        speaker, listener = shots[-1].items
+        self.assertAlmostEqual(speaker.time, 12.0)
+        self.assertAlmostEqual(listener.time, 12.0 + scenes.PART_STEP)
+        # A single item is enough for a list shot; a shot at the very end is dropped.
+        one = scenes.time_shots([{"type": "sequence", "items": [{"at": "uno", "label": "b"}]}], self.TIMES.get, 5.0)
+        self.assertEqual(len(one[0].items), 1)
+        self.assertEqual(scenes.time_shots([{"type": "single", "at": "seis", "label": "x"}], self.TIMES.get, 13.0), [])
+
+
+class TestStoryboardPlan(unittest.TestCase):
+    def test_normalize_storyboard(self):
+        data = {"segments": [{"index": 0, "opener": {"query": "call center"}, "shots": [
+            {"type": "single", "at": "a", "label": "Robot", "draw": "a robot", "otter": 1, "text": "Título"},
+            {"type": "single", "at": "b", "pose": "FELIZ"},
+            {"type": "speech", "at": "c", "text": "hola", "items": [{"pose": "explicando"}, {"label": "voz", "draw": "a voice", "at": "d"}]},
+            {"type": "speech", "at": "c", "items": []},
+            {"type": "illustration", "at": "e", "draw": "the otter waking up at dawn", "text": "05:30 de la mañana", "otter": True},
+            {"type": "illustration", "at": "e", "text": "sin dibujo"},
+            {"type": "sequence", "items": [{"at": "f", "label": "solo"}]},
+            {"type": "stat", "at": "g", "value": 17000000, "label": "personas"},
+            {"type": "nope"},
+        ]}]}
+        board = llm.normalize_storyboard(data, 2, ["feliz", "explicando"])
+        shots = board[0]["shots"]
+        self.assertEqual([s["type"] for s in shots], ["single", "single", "speech", "illustration", "sequence", "stat"])
+        self.assertEqual((shots[0]["otter"], shots[0]["text"]), (True, "Título"))
+        self.assertEqual(shots[1]["pose"], "feliz")
+        self.assertEqual(shots[2]["items"][0]["pose"], "explicando")
+        self.assertEqual(shots[3]["text"], "05:30 de la maña"[:16])
+        self.assertEqual(board[0]["opener"]["query"], "call center")
+        self.assertEqual(board[1]["shots"], [])
+        prompt = llm.build_storyboard_prompt([{"index": 0, "kind": "item", "title": "t", "text": "hola"}], ["feliz"], "es-CO")
+        for words in ("Cápsula Mental", "EVERY sentence", "DIFFERENT", '"illustration"', '"speech"', "otter", "es-CO"):
+            self.assertIn(words, prompt)
+        reply = json.dumps(data)
+        with patch.object(llm, "_generate_response", return_value=reply):
+            self.assertEqual(len(llm.generate_storyboard([{}, {}], ["feliz"])[0]["shots"]), 6)
+        with patch.object(llm, "_generate_response", return_value="Error: no"):
+            self.assertIsNone(llm.generate_storyboard([{}], []))
+
+
+class TestDrawing(_TempDirCase):
+    def test_draw_uses_imagen_or_a_reference_model_and_caches(self):
+        calls = []
+
+        class Models:
+            def generate_images(self, **kwargs):
+                calls.append(("imagen", kwargs))
+                buffer = io.BytesIO()
+                Image.new("RGB", (64, 64), "white").save(buffer, format="PNG")
+                image = type("I", (), {"image_bytes": buffer.getvalue()})
+                return type("R", (), {"generated_images": [type("G", (), {"image": image})]})
+
+            def generate_content(self, **kwargs):
+                calls.append(("gemini", kwargs))
+                buffer = io.BytesIO()
+                Image.new("RGB", (64, 36), "white").save(buffer, format="PNG")
+                part = type("P", (), {"inline_data": type("D", (), {"data": buffer.getvalue()})})
+                content = type("C", (), {"parts": [part]})
+                return type("R", (), {"candidates": [type("Ca", (), {"content": content})]})
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.models = Models()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        mascot = _icon(self.path("otter.png"))
+        with patch("google.genai.Client", Client), patch.object(gemini_media, "_client_kwargs", return_value={}), patch.object(
+            gemini_media, "_cache_path", side_effect=lambda model, key: self.path(f"{abs(hash((model, key)))}.png")
+        ):
+            first = gemini_media.draw("a robot with a headset", app_config={})
+            again = gemini_media.draw("a robot with a headset", app_config={})
+            otter = gemini_media.draw("the otter on the phone", mascot=mascot, app_config={})
+            scene = gemini_media.draw("a dark bedroom at dawn", scene=True, app_config={})
+            self.assertTrue(os.path.isfile(scene))
+            self.assertEqual(gemini_media.draw("  ", app_config={}), "")
+        self.assertEqual(first, again)
+        self.assertTrue(os.path.isfile(otter))
+        kinds = [kind for kind, _ in calls]
+        self.assertEqual(kinds, ["imagen", "gemini", "imagen"])  # cached once; the mascot needs a reference model
+        self.assertIn("ink line art", calls[0][1]["prompt"])
+        self.assertEqual(calls[1][1]["model"], gemini_media.SEQUENCE_DEFAULT_MODEL)
+        self.assertEqual(len(calls[1][1]["contents"]), 2)  # the reference picture and the prompt
+        self.assertEqual(calls[2][1]["config"].aspect_ratio, "16:9")
+        self.assertIn("16:9", calls[2][1]["prompt"])
+
+
+class TestDoodleRenderer(_TempDirCase):
+    def _renderer(self, portrait=False):
+        theme = fx.Theme(360, 640, FONT, (255, 79, 94)) if portrait else fx.Theme(640, 360, FONT, (255, 79, 94))
+        icon = scenes.prepare_picture(_icon(self.path("icon.png")))
+        photo_path = self.path("photo.jpg")
+        Image.new("RGB", (320, 180), (90, 120, 160)).save(photo_path)
+        photo = scenes.prepare_picture(photo_path, allow_cutout=False)
+
+        def picture(item):
+            return photo if item.query == "photo" else icon
+
+        host_still = lambda expression, height: Image.new("RGBA", (height // 2, height), (40, 160, 140, 255))  # noqa: E731
+        return scenes.SceneRenderer(theme, self.path(f"r{portrait}"), editor.DOODLE_COLOR, picture, host_still,
+                                    {"pop": "p.wav", "whoosh": "w.wav"}, font_path=scenes.hand_font_path(), doodle=True)
+
+    def test_shots_pop_and_boil_on_one_canvas(self):
+        Item = scenes.SceneItem
+        for portrait in (False, True):
+            renderer = self._renderer(portrait)
+            for number, scene in enumerate([
+                scenes.Scene("single", 0, 4, text="la profesión más común", center=Item(label="call center", icon="x")),
+                scenes.Scene("speech", 0, 4, text="hola", items=[Item(label="", time=0.2), Item(label="robot", time=1.0)]),
+                scenes.Scene("illustration", 0, 4, text="05:30", center=Item(query="photo")),
+                scenes.Scene("sequence", 0, 4, items=[Item(label="a", icon="x", mark="cross", time=0.3)]),
+                scenes.Scene("figure", 0, 4, look="photo", center=Item(query="photo")),
+            ]):
+                overlays, sounds = renderer.build(scene, f"s{number}{portrait}")
+                self.assertTrue(overlays)
+                self.assertFalse(any(os.path.basename(o.source).startswith("paper-") for o in overlays))  # no own background
+                self.assertNotIn("w.wav", [path for _, path, _ in sounds])  # no whooshes between shots
+                self.assertTrue(all(o.x.split("+")[-1] in ("0", o.x) for o in overlays))  # nothing slides
+                self.assertTrue(all(o.end == 4 and o.fade_out >= 0.12 for o in overlays))
+                drawn = [o for o in overlays if o.mode == "sequence"]
+                if scene.type != "illustration" and scene.type != "figure":
+                    self.assertTrue(drawn, scene.type)
+                    listing = Path(drawn[0].source).read_text(encoding="utf-8")
+                    self.assertIn("_boil", listing)
+                    self.assertTrue(listing.startswith("ffconcat version 1.0"))
+
+    def test_boil_variants_and_helpers(self):
+        image = Image.new("RGBA", (100, 80), (0, 0, 0, 0))
+        ImageDraw.Draw(image).rectangle((20, 20, 80, 60), outline=(0, 0, 0, 255), width=4)
+        variants = scenes.boil_variants(image, seed=3)
+        self.assertEqual(len(variants), 3)
+        self.assertTrue(all(v.size == image.size for v in variants))
+        self.assertNotEqual(variants[0].tobytes(), image.tobytes())
+        self.assertEqual(len(scenes.boil_variants(Image.new("RGBA", (4, 4)))), 3)
+        small = Image.new("RGBA", (50, 40))
+        self.assertEqual(scenes.fit_inside(small, 200).size, (125, 100))  # grows at most 2.5 times
+        self.assertEqual(scenes.fit_inside(Image.new("RGBA", (400, 200)), 100).size, (100, 50))
+        self.assertEqual(scenes.format_number(17000000), "17,000,000")
+        self.assertEqual(scenes.format_number(2.5), "2.5")
+        self.assertEqual(scenes.format_number(7), "7")
+        listing = fx.write_ffconcat(self.path("a.ffconcat"), [(self.path("x.png"), 0.1), (self.path("y.png"), 0.2)])
+        lines = Path(listing).read_text().splitlines()
+        self.assertEqual(lines[-1], f"file '{self.path('y.png')}'")  # the last picture repeats
+        badge = fx.render_badge(Image.new("RGBA", (80, 120), (200, 100, 50, 255)), 60, (255, 79, 94))
+        self.assertEqual(badge.size, (60, 60))
+        self.assertEqual(badge.getpixel((0, 0))[3], 0)  # round
+
+
+def _narration(seconds, frames):
+    return editor.Narration(pcm=b"", speech_seconds=seconds, frames=frames)
+
+
+class TestDoodleEditor(_TempDirCase):
+    TEXT = " ".join(f"palabra{i}" for i in range(60))
+
+    def _editor(self, gemini=True, **options):
+        patcher = patch.object(editor.gemini_media, "enabled", return_value=gemini)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        segments = list_video.build_segments(ListVideoScript(
+            title="T", intro="Hola nutrias.", items=[ListVideoItem(name="Voltaje", text=self.TEXT, image_term="battery")], outro="Chao."))
+        narrations = [_narration(1.0, 45), _narration(24.0, 730), _narration(1.0, 45)]
+        theme = fx.Theme(640, 360, FONT, fx.parse_color(fx.DEFAULT_ACCENT))
+        options.setdefault("subscribe", "none")
+        options.setdefault("look", "doodle")
+        return editor.Editor(editor.EditOptions(assets_dir=NUTRIA, **options), theme, self.temp_dir, segments, narrations)
+
+    BOARD = {"segments": [
+        {"index": 0, "shots": []},
+        {"index": 1, "shots": [
+            {"type": "single", "at": "palabra3", "label": "a", "draw": "a battery with arms", "otter": True},
+            {"type": "illustration", "at": "palabra12", "draw": "a dark lab", "text": "05:30"},
+            {"type": "speech", "at": "palabra20", "text": "hola", "items": [{"pose": "feliz"}, {"label": "robot", "draw": "a robot", "icon": "🤖"}]},
+            {"type": "sequence", "items": [{"at": "palabra40", "label": "x", "icon": "🔋"}, {"at": "palabra44", "label": "y", "draw": "a plug"}]},
+        ]},
+        {"index": 2, "shots": []},
+    ]}
+
+    def test_storyboard_drawings_and_canvas(self):
+        ed = self._editor(openers=False, logo="nutria", max_drawings=3)
+        drawing = _icon(self.path("drawing.png"), color=(30, 160, 90, 255))
+        icon = _icon(self.path("icon.png"))
+        drawn = []
+
+        def draw(description, scene=False, mascot="", app_config=None):
+            drawn.append((description, scene, bool(mascot)))
+            return "" if scene else drawing
+
+        with patch.object(editor.llm, "generate_storyboard", return_value=llm.normalize_storyboard(self.BOARD, 3, sorted(ed.poses))) as board, \
+                patch.object(editor.gemini_media, "draw", side_effect=draw), patch.object(editor.icons, "fetch", return_value=icon), \
+                patch.object(editor.web_images, "find_candidates") as find:
+            ed.make_plan()
+            edit = ed.segment_edit(1, 1.5, show_titles=True)
+        board.assert_called_once()
+        find.assert_not_called()  # no stock pictures in the doodle look
+        self.assertFalse(ed.wants_footage)
+        self.assertEqual(drawn[0], ("a battery with arms", False, True))  # the otter is drawn from its own picture
+        self.assertIn(("a dark lab", True, False), drawn)
+        self.assertLessEqual(ed._drawings, 3)
+        shots = ed._scenes[1]
+        self.assertNotIn("illustration", [s.type for s in shots])  # not drawn: dropped, and the shot before stays longer
+        self.assertEqual(shots[0].start, 0.0)
+        for shot, following in zip(shots, shots[1:]):
+            self.assertAlmostEqual(shot.end, following.start)
+        speech = next(s for s in shots if s.type == "speech")
+        self.assertIsNotNone(ed._scene_picture(speech.items[0]))  # the feliz pose
+        self.assertEqual(os.path.basename(edit.overlays[0].source), "canvas.png")
+        self.assertEqual(os.path.basename(edit.overlays[-1].source), "logo.png")
+        self.assertEqual(ed.host_plan[1].windows, [])  # the otter lives inside the drawings
+        self.assertFalse(any(os.path.basename(o.source).startswith("chip-") for o in edit.overlays))
+        self.assertEqual(ed.canvas_color(), editor.DOODLE_COLOR)
+
+    def test_fallback_storyboard_and_plan_files(self):
+        ed = self._editor(gemini=False, canvas_color="white")
+        with patch.object(editor.llm, "generate_storyboard", return_value=None):
+            plan = ed.make_plan()
+        self.assertEqual(plan[1]["shots"][0]["draw"], "battery")
+        self.assertTrue(plan[0]["shots"][0]["pose"])
+        self.assertTrue(any("storyboard" in w for w in ed.warnings))
+        self.assertEqual(ed.canvas_color(), (250, 247, 242))
+        path = self.path("board.json")
+        Path(path).write_text(json.dumps(self.BOARD), encoding="utf-8")
+        self.assertEqual(len(editor.load_plan_file(path, 3, [])[1]["shots"]), 4)
+
+    def test_no_footage_is_downloaded(self):
+        ed = self._editor(gemini=False)
+        self.assertFalse(ed.wants_footage)
+        footage = self._editor(gemini=False, look="footage")
+        self.assertTrue(footage.wants_footage)
+
+
+class TestDoodleCli(unittest.TestCase):
+    def setUp(self):
+        ui_patch = patch.dict(app_config.ui, {}, clear=True)
+        ui_patch.start()
+        self.addCleanup(ui_patch.stop)
+        self.temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
+        self.script = os.path.join(self.temp_dir, "s.json")
+        Path(self.script).write_text(json.dumps({"title": "T", "items": [{"name": "A", "text": "B"}]}), encoding="utf-8")
+
+    def _run(self, *args):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(list_video, "generate_list_video", return_value={}) as generate, redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                code = list_video_cli.run(["--script", self.script, *args])
+            except SystemExit as exc:
+                code = exc.code
+        return code, generate, stderr.getvalue()
+
+    def test_flags(self):
+        _, generate, _ = self._run()
+        options = generate.call_args.kwargs
+        self.assertEqual((options["edit"].look, options["edit"].boil, options["edit"].logo), ("footage", True, ""))
+        self.assertTrue(options["voice_polish_enabled"])
+        self.assertNotIn("pause_seconds", options)
+        _, generate, _ = self._run("--look", "doodle", "--canvas-color", "#112233", "--no-boil", "--logo", "nutria",
+                                   "--max-drawings", "20", "--pause", "5", "--no-voice-polish")
+        options = generate.call_args.kwargs
+        edit = options["edit"]
+        self.assertEqual((edit.look, edit.canvas_color, edit.boil, edit.logo, edit.max_drawings), ("doodle", "#112233", False, "nutria", 20))
+        self.assertEqual(options["pause_seconds"], 2.0)
+        self.assertFalse(options["voice_polish_enabled"])
+        code, _, stderr = self._run("--logo", "/missing.png")
+        self.assertEqual(code, 2)
+        self.assertIn("--logo picture not found", stderr)
 
 
 class TestElevenLabsSettings(unittest.TestCase):
