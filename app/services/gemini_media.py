@@ -864,8 +864,10 @@ def check_drawing(
 
 # Veo 3.1 models by quality, best first; the "-001" names are Vertex AI's, the "-preview" ones the Gemini API's.
 VIDEO_MODELS = {
-    "economy": ("veo-3.1-lite-generate-001", "veo-3.1-fast-generate-001", "veo-3.1-fast-generate-preview"),
-    "standard": ("veo-3.1-fast-generate-001", "veo-3.1-fast-generate-preview", "veo-3.1-lite-generate-001"),
+    "economy": ("veo-3.1-lite-generate-001", "veo-3.1-lite-generate-preview", "veo-3.1-fast-generate-001",
+                "veo-3.1-fast-generate-preview"),
+    "standard": ("veo-3.1-fast-generate-001", "veo-3.1-fast-generate-preview", "veo-3.1-lite-generate-001",
+                 "veo-3.1-lite-generate-preview"),
     "high": ("veo-3.1-generate-001", "veo-3.1-generate-preview", "veo-3.1-fast-generate-001", "veo-3.1-fast-generate-preview"),
 }
 VIDEO_SECONDS = (4, 6, 8)  # the lengths Veo 3.1 makes
