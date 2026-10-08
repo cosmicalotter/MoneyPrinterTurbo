@@ -21,7 +21,9 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
+import threading
 import time
 from typing import List, Optional, Tuple
 
@@ -115,7 +117,8 @@ Return only JSON: {answer}
 """.strip()
     if purpose == "clip":
         rules = f"""- clearly shows what the narrator talks about, so a viewer gets it at a glance;
-- is a clean, well-lit, sharp shot of a real scene; no text, titles, logos or watermarks;
+- is a clean, bright, well-lit, sharp shot of a real scene (reject dark or night shots where little is visible);
+- has no text, titles, logos or watermarks;
 - nothing disturbing, no gore; any visible text is in {language} or English."""
         answer = f'{{"choice": <number from 0 to {count}>, "reason": "<a few words>"}}'
     elif purpose == "opener":
@@ -291,7 +294,11 @@ def illustrate(subject: str, app_config=None) -> str:
 
 
 SEQUENCE_DEFAULT_MODEL = "gemini-2.5-flash-image"
-RETRY_SECONDS = (3.0, 8.0)  # waits before the second and third try of a busy image model
+# Waits before each new try of a busy image model (quotas are per minute, so the last waits are long).
+RETRY_SECONDS = (5.0, 15.0, 30.0, 60.0)
+NO_IMAGE_RETRIES = 1  # an answer without a picture is asked once more
+IMAGE_SLOTS = 2  # pictures drawn at the same time (more only hits the per-minute quota)
+_slots = threading.BoundedSemaphore(IMAGE_SLOTS)
 _TRANSIENT = ("429", "resource_exhausted", "resource exhausted", "503", "unavailable", "500", "internal",
               "deadline", "timeout", "timed out", "temporarily", "overloaded", "rate limit")
 _state = {"imagen_failed": "", "last_error": ""}
@@ -365,10 +372,10 @@ def _generate_image(
     """
     from google import genai
 
-    attempt = 0
+    attempt = empty = 0
     while True:
         try:
-            with genai.Client(**_client_kwargs(app_config)) as client:
+            with _slots, genai.Client(**_client_kwargs(app_config)) as client:
                 return _image_bytes(client, model, prompt, aspect, references)
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"[:300]
@@ -378,8 +385,13 @@ def _generate_image(
                     logger.warning(f"Imagen failed ({reason}); drawing with {SEQUENCE_DEFAULT_MODEL} from now on")
                 model = SEQUENCE_DEFAULT_MODEL
                 continue
-            if attempt < len(RETRY_SECONDS) and (_transient(exc) or isinstance(exc, _NoImage)):
-                time.sleep(RETRY_SECONDS[attempt])
+            if isinstance(exc, _NoImage) and empty < NO_IMAGE_RETRIES:
+                empty += 1
+                continue
+            if _transient(exc) and attempt < len(RETRY_SECONDS):
+                wait = RETRY_SECONDS[attempt] * random.uniform(0.8, 1.25)
+                logger.info(f"image model busy ({reason[:80]}); trying again in {wait:.0f} s")
+                time.sleep(wait)
                 attempt += 1
                 continue
             _state["last_error"] = reason
@@ -589,3 +601,39 @@ def draw(
         return ""
     logger.info(f"drawn: {subject!r}")
     return path
+
+
+def build_drawing_check_prompt(description: str, mascot: bool = False) -> str:
+    otter = (
+        "- the channel's mascot, an otter with round glasses and a teal sweater, looks like itself (not a different animal);\n"
+        if mascot else ""
+    )
+    return f"""
+You are the art director of an educational cartoon channel. An illustrator was asked to draw:
+"{description}"
+Check the picture below. It passes when:
+- it clearly shows what was asked, so a viewer recognises it at a glance;
+{otter}- it has no text, letters, numbers, labels or watermarks drawn in it;
+- nothing is broken: no melted or extra limbs, no garbled shapes, no half-drawn objects.
+Return only JSON: {{"ok": true or false, "reason": "<a few words>"}}
+""".strip()
+
+
+def check_drawing(path: str, description: str, mascot: bool = False, app_config=None) -> Optional[bool]:
+    """True when Gemini confirms a drawing shows ``description`` cleanly, False when not, None if the check failed."""
+    if not path or not os.path.isfile(path):
+        return False
+    app_config = _app(app_config)
+    try:
+        answer = _parse_answer(_ask([path], build_drawing_check_prompt(description, mascot), app_config)) or {}
+    except Exception as exc:
+        logger.warning(f"drawing check failed ({type(exc).__name__}: {exc})")
+        return None
+    verdict = answer.get("ok")
+    if isinstance(verdict, str):
+        verdict = verdict.strip().lower() in ("true", "yes", "1")
+    if verdict is None:
+        return None
+    if not verdict:
+        logger.info(f"drawing rejected for {description!r}: {answer.get('reason', '')}")
+    return bool(verdict)

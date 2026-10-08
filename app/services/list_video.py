@@ -892,6 +892,15 @@ def mux_final_video(
     return output_file
 
 
+def write_render_report(task_dir: str, summary: List[str], warnings: List[str]) -> str:
+    """render-report.txt: what the editor did and every warning, to find out why a shot looks wrong."""
+    path = os.path.join(task_dir, "render-report.txt")
+    lines = list(summary) + ["", "Warnings:" if warnings else "No warnings."] + [f"- {w}" for w in warnings]
+    with open(path, "w", encoding="utf-8") as fp:
+        fp.write("\n".join(lines).strip() + "\n")
+    return path
+
+
 def _list_bgm_file(params: VideoParams, warnings: List[str]) -> str:
     if str(params.bgm_type or "").strip().lower() == "none":
         return ""
@@ -1165,6 +1174,7 @@ def generate_list_video(
 
     for warning in warnings:
         logger.warning(warning)
+    report_file = write_render_report(task_dir, editor.report() if editor is not None else [], warnings)
     logger.success(f"list video finished: {final_video}")
     return {
         "videos": [final_video],
@@ -1175,4 +1185,5 @@ def generate_list_video(
         "audio_duration": round(offset, 3),
         "subtitle_path": subtitle_path,
         "warnings": warnings,
+        "report_file": report_file,
     }

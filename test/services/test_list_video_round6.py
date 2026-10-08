@@ -192,12 +192,12 @@ class TestAnimaticPlan(unittest.TestCase):
     def test_prompt_asks_for_an_animatic(self):
         segments = [{"index": 0, "kind": "intro", "title": "t", "text": "hola", "seconds": 30.0, "shots": 10}]
         prompt = llm.build_storyboard_prompt(segments, ["feliz"], "es-CO")
-        for words in ("animatic", "every 2 to 4 seconds", '"continue": true', "next frame", '"camera"', '"shots": 10',
-                      '"type": "clip"', "8%", "cutaway"):
+        for words in ("ANIMATIONS", "every 2 to 4 seconds", '"continue": true', "redrawn from the previous one", '"camera"',
+                      '"shots": 10', '"type": "clip"', "5%", "cutaway", "never show text alone"):
             self.assertIn(words, prompt)
         self.assertNotIn('"type": "meme"', prompt)
         more = llm.build_storyboard_prompt(segments, [], "es", clips="more", memes=True)
-        self.assertIn("15%", more)
+        self.assertIn("10%", more)
         self.assertIn('"type": "meme"', more)
         self.assertIn("one every 40 seconds", more)
         none = llm.build_storyboard_prompt(segments, [], "es", clips="none")
@@ -291,26 +291,28 @@ class TestAnimaticRenderer(_TempDirCase):
         photo = scenes.prepare_picture(_icon(self.path("i.png")), allow_cutout=False)
         renderer = self._renderer(lambda item: photo)
         moves = []
-        real = scenes.ken_burns_clip
+        real = scenes.motion_clip
 
-        def spy(still, output, frames, size, zoom_from, zoom_to, pan=0.0, zoom=""):
-            moves.append((zoom_from, zoom_to, pan, frames))
-            return real(still, output, frames, size, zoom_from, zoom_to, pan=pan, zoom=zoom)
+        def spy(pictures, output, frames, size, path=None, fade=0.2, trim=False):
+            moves.append((path(0, 0.0), path(0, 1.0), frames, trim))
+            return real(pictures, output, frames, size, path=path, fade=fade, trim=trim)
 
         shot = scenes.Scene("illustration", 1.0, 3.0, text="05:30", center=scenes.SceneItem(), camera="left", fade_in=0.3, overlap=0.3)
-        with patch.object(scenes, "ken_burns_clip", side_effect=spy):
+        with patch.object(scenes, "motion_clip", side_effect=spy):
             overlays, sounds = renderer.build(shot, "a")
-        self.assertEqual(moves[0][:3], (1.1, 1.1, -1.0))
-        self.assertEqual(moves[0][3], int(round(2.3 * scenes.FPS)) + 2)  # long enough to stay under the next shot
+        (zoom_start, pan_start), (zoom_end, pan_end), frames, trim = moves[0]
+        self.assertEqual((zoom_start, zoom_end), (1.06, 1.06))
+        self.assertGreater(pan_start, pan_end)  # drifts to the left
+        self.assertTrue(trim)  # a drawn page's white border is cut away
+        self.assertEqual(frames, int(round(2.3 * scenes.FPS)) + 2)  # long enough to stay under the next shot
         self.assertEqual(overlays[0].fade_in, 0.3)
         self.assertTrue(all(o.end == 3.3 and o.fade_out == 0 for o in overlays))
         caption = overlays[1]
         self.assertGreater(int(float(caption.y.split("+")[0])), 180 * 0.55)  # the caption sits low, off the subject
         lingering = scenes.Scene("illustration", 0, 2, center=scenes.SceneItem(), linger=0.3)
-        with patch.object(scenes, "ken_burns_clip", side_effect=spy):
+        with patch.object(scenes, "motion_clip", side_effect=spy):
             overlays, _ = renderer.build(lingering, "b")
         self.assertEqual((overlays[0].end, overlays[0].fade_out), (2.3, 0.3))
-        self.assertIn(moves[-1][:3], [(1.0, 1.1, 0.0), (1.1, 1.0, 0.0), (1.1, 1.1, -1.0), (1.1, 1.1, 1.0)])
 
     def test_clips_in_a_frame_or_full_screen(self):
         stock = _video(self.path("stock.mp4"))

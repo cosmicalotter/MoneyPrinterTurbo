@@ -50,6 +50,7 @@ class TestArgv(unittest.TestCase):
             voice_name="gcloud:es-US-Chirp3-HD-Charon", voice_rate=1.1, host_presence="normal", openers=False,
             sound_effects=True, sfx_volume=0.5, music=True, subtitles=True, scene_color="#FFEEEE", lip_sync=True,
             also={"en-US": "gemini:Puck-Upbeat", "pt-BR": ""}, progress_bar=True, numbers=False, picture_check=False,
+            logo="nutria",
         )
         argv = studio.build_argv(settings, script_file="/p/script.json", edit_plan="/p/plan.json", task_id="0f8fad5b-d9cb-469f-a165-70867728950e")
         joined = " ".join(argv)
@@ -59,7 +60,7 @@ class TestArgv(unittest.TestCase):
             "--scene-color #FFEEEE", "--lip-sync", "--edit-plan /p/plan.json", "--also-in en-US,pt-BR",
             "--also-voice en-US=gemini:Puck-Upbeat", "--progress-bar", "--no-numbers", "--no-picture-check", "--task-id 0f8fad5b-d9cb-469f-a165-70867728950e",
             "--voice-style calmado", "--format story", "--look doodle", "--canvas-color #F4C24F", "--logo nutria",
-            "--pause 0.5", "--max-drawings 160",
+            "--pause 0.5", "--max-drawings 260",
         ):
             self.assertIn(expected, joined)
         self.assertNotIn("--items", argv)  # only for a subject

@@ -345,10 +345,11 @@ def page_style() -> None:
         c1, c2, c3, c4 = st.columns(4)
         s.canvas_color = c1.color_picker("Color del fondo", s.canvas_color or "#F4C24F")
         s.boil = c2.toggle("Trazo vivo (hecho a mano)", s.boil, help="Los dibujos tiemblan muy levemente, como animación hecha a mano")
-        s.max_drawings = c3.number_input("Máximo de dibujos IA", 0, 400, int(s.max_drawings), step=10,
-                                         help="Cada dibujo cuesta ~US$0,02-0,04; después se usan iconos")
-        logos = ["nutria", "ninguno"]
-        s.logo = "" if c4.selectbox("Logo en la esquina", logos, index=0 if s.logo == "nutria" else 1) == "ninguno" else "nutria"
+        s.max_drawings = c3.number_input("Máximo de dibujos IA", 0, 600, int(s.max_drawings), step=10,
+                                         help="Cada dibujo cuesta ~US$0,02-0,04 y cada animación usa 2-4. Un video de 5 min "
+                                              "usa unos 200-260 (~US$5-10). Después se usan fotos reales")
+        logos = ["ninguno", "nutria"]
+        s.logo = "nutria" if c4.selectbox("Logo en la esquina", logos, index=1 if s.logo == "nutria" else 0) == "nutria" else ""
         c1, c2, c3 = st.columns(3)
         s.shot_seconds = c1.slider("Cambio de imagen cada (s)", 2.0, 6.0, float(s.shot_seconds), 0.5,
                                    help="Como un animatic: escenas cortas y continuas que cuentan la historia")
@@ -366,8 +367,9 @@ def page_style() -> None:
         if s.memes == "folder":
             s.memes_dir = c2.text_input("Carpeta de memes", s.memes_dir, placeholder="resource/memes",
                                         help="Subcarpetas por emoción: sorpresa, risa, facepalm, mente, confundido, miedo, triste...")
-        st.caption("Casi todo se dibuja: ilustraciones a pantalla completa que cuentan la historia, escenas explicativas "
-                   "con dibujos que aparecen al nombrarlos y, de vez en cuando, un video real enmarcado.")
+        st.caption("Casi todo son dibujos de IA a pantalla completa: animaciones cortas (un dibujo por segundo que "
+                   "continúa del anterior) e ilustraciones con un movimiento de cámara suave. De vez en cuando, una escena "
+                   "explicativa con imágenes o un video real enmarcado.")
     look, motion, sound, languages = st.tabs(["🎨 Imagen", "🎬 Edición", "🔊 Sonido", "🌎 Idiomas"])
     with look:
         c1, c2, c3 = st.columns(3)
@@ -491,6 +493,9 @@ def page_results() -> None:
                     with open(video, "rb") as fp:
                         st.download_button("⬇️ Descargar MP4", fp, file_name=f"{slug}-{name}.mp4", key=f"dl-{task_id}")
                 st.caption(f"Carpeta: `{outputs['folder']}`")
+                if outputs.get("report"):
+                    with st.expander("Informe del render (dibujos, respaldos y advertencias)"):
+                        st.code(outputs["report"], language=None)
             with right:
                 st.markdown("### Descripción para YouTube")
                 hashtags = st.text_input("Hashtags", "#ciencia #educación #cabeceando", key=f"tags-{task_id}")

@@ -142,17 +142,27 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
 - **Íconos solo como respaldo, y revisados:** Gemini elige entre varios candidatos el que de verdad representa la cosa; si ninguno sirve, se muestra solo la etiqueta.
 - **Studio:** en Estilo → dibujado: "Cambio de imagen cada (s)", "Videos reales dentro del dibujo", "Estilo de dibujo" y "Reacciones tipo meme".
 
+### Ronda 7: animaciones cortas con IA, cámara suave y nunca solo texto
+- **Diagnóstico del segundo video ("La electricidad explicada", 3:20):** las ilustraciones que salieron se veían bien, pero eran imágenes sueltas de 5–9 s; muchos dibujos fallaron y el respaldo dejó tomas de solo texto ("MEDICIÓN EN VOLTIOS" 13 s, "PRESIÓN DISPONIBLE" 12 s) o el fondo vacío hasta 11 s; el color de marca (casi igual al fondo) volvió invisible el texto de las definiciones; la primera ilustración traía bordes blancos; el zoom temblaba; los clips de tormenta eran casi negros.
+- **Animaciones (`"type": "animation"`):** 2–4 dibujos de una misma acción, ~1 s cada uno; cada dibujo se redibuja desde el anterior (mismo lugar y personajes, cambia una cosa) y se funde con el siguiente bajo un solo movimiento de cámara. Son ~50 % de las tomas; ~35 % ilustraciones; composiciones como mucho ~12 %.
+- **Cámara suave:** cada fotograma se recorta con precisión sub-píxel y aceleración suave al inicio y al final (adiós al temblor del zoompan de ffmpeg); movimientos más pequeños y lentos (zoom 1,00→1,06, paneos cortos). Se recorta la hoja blanca alrededor de un dibujo.
+- **Composiciones (fondo naranja):** pocas, de al menos 4 s (la toma siguiente espera hasta 2 s), y **nunca solo texto**: elementos sin imagen se quitan, una etiqueta sola lleva a la nutria, una fórmula la presenta la nutria; si una composición no puede mostrar imágenes, se omite.
+- **Imágenes en vez de íconos:** cada elemento prueba dibujo IA → imagen real (PNG recortado si se puede) que Gemini aprueba → ícono revisado. **Auditoría:** Gemini revisa cada dibujo (que muestre lo pedido, sin texto ni deformaciones, la nutria reconocible) y lo rehace una vez si falla.
+- **Fiabilidad:** máximo 2 dibujos a la vez; ante cuota agotada (429) espera 5, 15, 30 y 60 s; los dibujos que aún fallan se reintentan al final y, si no, se usa una foto real aprobada del momento (cada toma lleva un `query` en inglés para eso). Una toma que falla al renderizarse la reemplaza la nutria con su etiqueta.
+- **Otros:** el texto en color de marca se oscurece si no contrasta con el fondo; se descartan clips oscuros; `render-report.txt` (también en Resultados del Studio) resume tomas, dibujos (hechos, fallidos, rehechos), respaldos y advertencias. **Sin logo** en la esquina por defecto (los proyectos guardados también lo pierden; se vuelve a activar en Estilo). `--max-drawings` por defecto 260.
+
 ## Tipos de escena y de toma disponibles
 
 - **Escenas clásicas:** statement, stat, sequence, compare, diagram, figure, zoom, story, steps, bars, grid, formula, timeline, gauge, question.
 - **Escenas científicas:** definition, equation, annotate, chain, branch.
-- **Tomas del estilo dibujado:** single, speech, illustration (con `continue` y `camera`), clip (video real enmarcado o a pantalla completa) y meme (reacción por emoción: shock, mindblown, laugh, facepalm, confused, scared, sad, proud, suspicious, panic).
+- **Tomas del estilo dibujado:** animation (2–4 dibujos de ~1 s que continúan uno del otro), illustration (con `continue`, `camera` y `query` de respaldo), single, speech, clip (video real enmarcado o a pantalla completa) y meme (reacción por emoción: shock, mindblown, laugh, facepalm, confused, scared, sad, proud, suspicious, panic).
 - **Uso interno:** opener (portada de sección).
 
 ## Pendiente o ideas para seguir
 
 - Probar en mi PC la ronda 6 con Gemini real: revisar en el log si aparece "Imagen failed" (entonces todo lo dibuja `gemini-2.5-flash-image`) y ajustar los prompts de estilo (`CARTOON_PROMPT`, `CARTOON_SCENE_PROMPT` y `NEXT_FRAME_PROMPT` en `gemini_media.py`).
-- Costo aproximado por video de ~5 min con la ronda 6: 110–160 dibujos ≈ US$3–6 (se guardan en caché; re-renderizar o hacer otro idioma no los vuelve a cobrar).
+- Costo aproximado por video de ~5 min con la ronda 7: 200–260 dibujos ≈ US$5–10 (se guardan en caché; re-renderizar o hacer otro idioma no los vuelve a cobrar). Si sale caro, bajar `--max-drawings`: lo que no se dibuje se reemplaza por fotos reales.
+- Después de cada render, revisar `render-report.txt` (o el informe en Resultados): si dice muchos "failed", copiar la línea "Last drawing error" para diagnosticar (cuota de Vertex, región, filtro de seguridad).
 - Escuchar la voz masterizada y ajustar la cadena (`polish_chain` en `voice_polish.py`) y la pausa.
 - Ideas:
   - una voz propia del canal con voz clonada (ElevenLabs o Fish Audio);

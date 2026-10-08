@@ -364,8 +364,9 @@ for the YouTube description, and edit-plan.json.
     edit_group.add_argument(
         "--max-drawings",
         type=int,
-        default=160,
-        help="doodle look: most AI drawings per video; icons are used after that (default: 160)",
+        default=260,
+        help="doodle look: most AI drawings per video (animation frames included); real photos are used after "
+        "that (default: 260, about US$5-10 for a 5-minute video)",
     )
     edit_group.add_argument(
         "--shot-seconds",

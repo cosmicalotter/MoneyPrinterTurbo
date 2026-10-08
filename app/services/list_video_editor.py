@@ -76,7 +76,7 @@ class EditOptions:
     canvas_color: str = ""  # background of the doodle look; "" is a warm yellow
     boil: bool = True  # doodle look: drawings wobble very slightly, like hand-drawn animation
     logo: str = ""  # a corner badge: "nutria" (the bundled otter) or a picture file
-    max_drawings: int = 160  # doodle look: AI drawings per video (icons after that)
+    max_drawings: int = 260  # doodle look: AI drawings per video, animation frames included (photos after that)
     seamless: bool = False  # story format: segments flow into each other (no whoosh at the cuts)
     shot_seconds: float = 3.0  # doodle look: a new picture about this often
     clips: str = "some"  # doodle look: real video clips in a frame now and then ("none", "some", "more")
@@ -452,6 +452,7 @@ def default_plan(segments, poses) -> List[dict]:
 LOOKS = ("footage", "doodle")
 DOODLE_COLOR = (244, 194, 79)  # the warm yellow of hand-drawn explainer channels
 HOLD_FACTOR = 1.8  # a picture held longer than this many shot lengths gets more shots
+DARK_CLIP = 60  # stock clips darker than this (mean 0-255) look like a black box on the canvas
 MEME_POSES = {
     "shock": "sorprendido", "mindblown": "sin_palabras", "laugh": "riendo", "facepalm": "preocupado",
     "confused": "pensando", "scared": "preocupado", "sad": "triste", "proud": "feliz", "suspicious": "pensando",
@@ -598,6 +599,10 @@ class Editor:
         self._failed_drawings = 0
         self._memes: Optional[Dict[str, List[str]]] = None
         self._used_memes: set = set()
+        self._unpictured: List[scenes.Scene] = []  # drawn shots whose drawing failed (rescued after the others)
+        # What happened to the pictures, for render-report.txt.
+        self._stats: Dict[str, int] = {key: 0 for key in (
+            "drawn", "rejected", "budget", "real", "photo", "otter", "items_dropped", "shots_dropped", "build_failed")}
 
     @property
     def wants_footage(self) -> bool:
@@ -864,7 +869,8 @@ class Editor:
                 showing = next((s for s in reversed(shots) if s.start <= start + 0.01), None)
                 what = ""
                 if showing is not None:
-                    center = showing.center or (showing.items[0] if showing.items else None)
+                    center = showing.items[-1] if showing.type == "animation" and showing.items else (
+                        showing.center or (showing.items[0] if showing.items else None))
                     what = f"{showing.type}: {(center.draw or center.label) if center else showing.text}".strip()
                 gaps.append({
                     "index": index, "text": said, "showing": what, "seconds": round(end - start, 1),
@@ -917,7 +923,7 @@ class Editor:
                 elif scene.type == "opener":
                     jobs.append(lambda sc=scene, t=text: self._opener_picture(sc, t))
                     continue
-                elif scene.type == "illustration":
+                elif scene.type in ("illustration", "animation"):
                     if scene.follows and chains:
                         chains[-1].append(scene)
                     else:
@@ -932,8 +938,8 @@ class Editor:
                 elif scene.type == "story" and (self.options.illustrations == "ai" or self.doodle) and self._gemini:
                     jobs.append(lambda sc=scene: self._story_pictures(sc))
                 for item in scene.items + ([scene.center] if scene.center and scene.type != "figure" else []):
-                    if self.doodle and (item.draw or item.icon or item.pose):
-                        jobs.append(lambda i=item: self._doodle_picture(i))
+                    if self.doodle and (item.draw or item.icon or item.pose or item.query):
+                        jobs.append(lambda i=item, t=text: self._doodle_picture(i, t))
                     elif item.query or item.icon or item.draw:
                         jobs.append(lambda i=item, t=text: self._item_picture(i, sentence_at(t, i.at)))
         first = [lambda c=chain: self._illustration_chain(c) for chain in chains]
@@ -946,10 +952,12 @@ class Editor:
                     future.result()
                 except Exception as exc:
                     logger.warning(f"a picture could not be prepared: {type(exc).__name__}: {exc}")
+        if self._unpictured:
+            self._rescue(texts)
         # Full-screen pictures that were not found leave the footage alone.
         dropped = 0
         for index, timed in self._scenes.items():
-            kept = [sc for sc in timed if self._has_picture(sc)]
+            kept = [sc for sc in timed if self._has_picture(sc) and (not self.doodle or self._complete(sc))]
             dropped += len(timed) - len(kept)
             if self.doodle and kept and timed:
                 # Shots follow each other: the one before a dropped shot stays longer.
@@ -961,9 +969,12 @@ class Editor:
                 self._crossfade(kept)
             self._scenes[index] = kept
         if self.doodle:
+            self._stats["shots_dropped"] += dropped
             self._report_drawings(dropped)
 
     def _has_picture(self, scene: scenes.Scene) -> bool:
+        if scene.type == "animation":
+            return any(self._item_pictures.get(id(frame)) is not None for frame in scene.items)
         if scene.type in ("figure", "annotate", "illustration"):
             return self._item_pictures.get(id(scene.center)) is not None
         if scene.type in ("clip", "meme"):
@@ -1234,46 +1245,76 @@ class Editor:
     def _drawing(self, description: str, mascot: bool = False, scene: bool = False, previous: str = ""):
         """A Gemini/Imagen drawing for the doodle look, within the drawing budget; None otherwise.
 
-        ``previous`` is the picture file of the scene this one continues.
+        ``previous`` is the picture file of the scene this one continues. With
+        the picture check on, Gemini audits the drawing and a rejected one is
+        drawn once more.
         """
         if not (self._gemini and description):
             return None
         with self._drawing_lock:
             if self._drawings >= max(0, self.options.max_drawings):
+                self._stats["budget"] += 1
                 return None
             self._drawings += 1
             # The same description twice would give the very same drawing.
             key = " ".join(description.lower().split())
             seen = self._drawn.get(key, 0)
             self._drawn[key] = seen + 1
+        asked = description
         if seen:
-            description = f"{description}, a different moment, pose and angle from before (variation {seen + 1})"
+            asked = f"{description}, a different moment, pose and angle from before (variation {seen + 1})"
         options = {"scene": scene, "mascot": self._mascot() if mascot else ""}
         if previous:
             options["previous"] = previous
         if self.options.drawing_style != "cartoon":
             options["style"] = self.options.drawing_style
-        path = gemini_media.draw(description, **options)
+        path = gemini_media.draw(asked, **options)
+        if path and self.options.picture_check:
+            if gemini_media.check_drawing(path, description, mascot=mascot) is False:
+                with self._drawing_lock:
+                    self._stats["rejected"] += 1
+                    again = self._drawings < max(0, self.options.max_drawings)
+                    if again:
+                        self._drawings += 1
+                if again:
+                    redrawn = gemini_media.draw(f"{asked}, drawn again clearly and simply", **options)
+                    path = redrawn or path
         if not path:
             with self._drawing_lock:
                 self._failed_drawings += 1
             return None
+        with self._drawing_lock:
+            self._stats["drawn"] += 1
         self.credits.append("Illustrations: drawn with Google Gemini / Imagen")
         picture = scenes.prepare_picture(path, allow_cutout=not scene)
         if picture is not None:
             picture.info["source"] = path
         return picture
 
-    def _doodle_picture(self, item: scenes.SceneItem) -> None:
-        """A shot element: the otter's own pose, a drawing, or the icon."""
+    def _doodle_picture(self, item: scenes.SceneItem, text: str = "") -> None:
+        """A shot element: the otter's own pose, a drawing, a real picture Gemini approves, or a checked icon."""
         image = None
         if item.pose and item.pose in self.poses:
             image = scenes.prepare_picture(self.poses[item.pose].idle, trust_alpha=True)
         if image is None and item.draw:
             image = self._drawing(item.draw, mascot=item.otter)
         if image is None:
+            image = self._real_picture(item, text)
+        if image is None:
             image = self._icon_picture(item)
         self._item_pictures[id(item)] = image
+
+    def _real_picture(self, item: scenes.SceneItem, text: str = "", look: str = "diagram", purpose: str = "scene"):
+        """A real picture of the element (a cut-out PNG when possible), only when Gemini confirms it fits."""
+        query = item.query or " ".join((item.draw or "").split()[:6])
+        if not (query and self.options.picture_check and self._gemini):
+            return None
+        path = self._web_picture(query, look, sentence_at(text, item.at) if text else query, purpose)
+        image = scenes.prepare_picture(path, allow_cutout=look != "photo") if path else None
+        if image is not None:
+            with self._drawing_lock:
+                self._stats["real"] += 1
+        return image
 
     def _illustration_picture(self, scene: scenes.Scene, previous: str = ""):
         """A whole drawn scene (16:9) for a story moment; drawn from ``previous`` when it continues it."""
@@ -1285,12 +1326,109 @@ class Editor:
             self._item_pictures[id(item)] = image
         return image
 
+    def _animation_frames(self, scene: scenes.Scene, previous: str = "") -> str:
+        """The drawings of an animation, each redrawn from the one before it; the last drawing's file."""
+        last = previous
+        for number, frame in enumerate(scene.items):
+            follow = last if number > 0 or scene.follows else ""
+            image = self._drawing(frame.draw, mascot=frame.otter and not follow, scene=True, previous=follow)
+            if image is None:
+                continue  # a missing frame is skipped; the next one follows the last good one
+            image.info["framed"] = True
+            self._item_pictures[id(frame)] = image
+            last = image.info.get("source", "") or last
+        return last if any(id(frame) in self._item_pictures for frame in scene.items) else ""
+
     def _illustration_chain(self, chain: List[scenes.Scene]) -> None:
-        """Illustrations drawn in order, each continuing frame redrawn from the one before it."""
+        """Illustrations and animations drawn in order, a continuing one redrawn from the picture before it."""
         previous = ""
         for scene in chain:
-            image = self._illustration_picture(scene, previous if scene.follows else "")
-            previous = image.info.get("source", "") if image is not None else ""
+            if scene.type == "animation":
+                drawn = self._animation_frames(scene, previous if scene.follows else "")
+            else:
+                image = self._illustration_picture(scene, previous if scene.follows else "")
+                drawn = image.info.get("source", "") if image is not None else ""
+            if not drawn:
+                with self._drawing_lock:
+                    self._unpictured.append(scene)
+            previous = drawn or previous
+
+    def _rescue(self, texts: Dict[int, str]) -> None:
+        """Pictures that are still missing: one more drawing try (the model may have been busy), then a
+        real photo of the moment that Gemini approves; a shot without either is left out."""
+        where = {id(sc): index for index, timed in self._scenes.items() for sc in timed}
+        for scene in list(self._unpictured):
+            text = texts.get(where.get(id(scene), -1), "")
+            if scene.type == "animation":
+                if self._animation_frames(scene):
+                    continue
+            elif self._illustration_picture(scene) is not None:
+                continue
+            center = scene.center or scenes.SceneItem()
+            if not center.query and scene.items:
+                center.query = scene.items[0].query or " ".join(scene.items[0].draw.split()[:6])
+            elif not center.query:
+                center.query = " ".join(center.draw.split()[:6])
+            photo = self._real_picture(center, text, look="photo", purpose="beat")
+            if photo is not None:
+                photo.info["framed"] = True
+                scene.type, scene.center, scene.items = "illustration", center, []
+                self._item_pictures[id(center)] = photo
+                with self._drawing_lock:
+                    self._stats["photo"] += 1
+        self._unpictured = []
+
+    def _complete(self, scene: scenes.Scene) -> bool:
+        """Every composition shows pictures: elements without one are left out, a lone label gets the
+        otter; False when the shot has nothing left to show."""
+        if scene.type in ("illustration", "figure", "annotate", "clip", "meme", "animation", "opener") or scene.reprise:
+            return True
+        picture = self._item_pictures.get
+        if scene.type in ("single", "definition", "stat", "zoom"):
+            if scene.center is not None and picture(id(scene.center)) is None:
+                otter = self._pose_picture("explicando")
+                if otter is None:
+                    return False
+                self._item_pictures[id(scene.center)] = otter
+                with self._drawing_lock:
+                    self._stats["otter"] += 1
+            return True
+        if scene.type == "speech" and scene.items:
+            if picture(id(scene.items[0])) is None:
+                otter = self._pose_picture("explicando")
+                if otter is None:
+                    return False
+                self._item_pictures[id(scene.items[0])] = otter
+            scene.items = [scene.items[0]] + [item for item in scene.items[1:] if picture(id(item)) is not None]
+            return True
+        if scene.type in scenes.ITEM_SCENES and scene.type != "story":
+            kept = [item for item in scene.items if picture(id(item)) is not None]
+            if len(kept) < len(scene.items):
+                with self._drawing_lock:
+                    self._stats["items_dropped"] += len(scene.items) - len(kept)
+            if not kept or (scene.type == "compare" and len(kept) < 2):
+                return False
+            if kept[0] is not scene.items[0]:
+                kept[0].time = min(kept[0].time, scene.items[0].time)
+            scene.items = kept
+        return True
+
+    def _stand_in(self, scene: scenes.Scene) -> Optional[scenes.Scene]:
+        """The otter with the shot's words, for a shot that could not be drawn (never an empty screen)."""
+        otter = self._pose_picture("explicando")
+        if otter is None:
+            return None
+        center = scene.center or scenes.SceneItem()
+        item = scenes.SceneItem(label=center.label or (scene.items[0].label if scene.items else ""))
+        self._item_pictures[id(item)] = otter
+        return scenes.Scene(
+            "single", scene.start, scene.end, text=scene.text if scene.type in ("single", "statement") else "",
+            center=item, overlap=scene.overlap, linger=scene.linger,
+        )
+
+    def _pose_picture(self, preferred: str):
+        name = preferred if preferred in self.poses else _pick(self.poses, ("explicando", "feliz", "neutral"))
+        return scenes.prepare_picture(self.poses[name].idle, trust_alpha=True) if name else None
 
     def _clip_media(self, scene: scenes.Scene, text: str = "") -> None:
         """A stock video for a clip shot (Pexels, then Pixabay); its drawing when none is found."""
@@ -1325,9 +1463,12 @@ class Editor:
                 continue
             if not path:
                 continue
-            if check:
-                frame = os.path.join(self.work_dir, "clips", f"{os.path.basename(path)}.jpg")
-                if fx.extract_frame(utils.get_ffmpeg_binary(), path, frame, 1.0):
+            frame = os.path.join(self.work_dir, "clips", f"{os.path.basename(path)}.jpg")
+            if fx.extract_frame(utils.get_ffmpeg_binary(), path, frame, 1.0):
+                if fx.brightness(frame) < DARK_CLIP:
+                    logger.info(f"the clip for {query!r} is too dark")
+                    continue
+                if check:
                     verdict = gemini_media.choose_picture([frame], line, query, self.options.language, purpose="clip")
                     if verdict is not None and verdict < 0:
                         logger.info(f"the clip for {query!r} did not pass the check")
@@ -1596,8 +1737,16 @@ class Editor:
                 overlays, sounds = self.scene_renderer().build(scene, f"{index:02d}-{number}")
             except Exception as exc:
                 logger.exception(f"scene {scene.type!r} could not be drawn")
-                self.warnings.append(f"a {scene.type} scene could not be drawn: {exc}")
-                continue
+                self.warnings.append(f"a {scene.type} scene could not be drawn ({exc}); the otter stood in for it")
+                self._stats["build_failed"] += 1
+                stand_in = self._stand_in(scene) if self.doodle else None
+                if stand_in is None:
+                    continue
+                try:
+                    overlays, sounds = self.scene_renderer().build(stand_in, f"{index:02d}-{number}-otter")
+                except Exception as again:
+                    logger.warning(f"the stand-in shot could not be drawn either: {again}")
+                    continue
             edit.overlays += overlays
             edit.sounds += sounds
 
@@ -1702,6 +1851,33 @@ class Editor:
             info["source"], x=cx, y=y, start=start,
             end=start + info.get("duration", SUBSCRIBE_SECONDS), mode=info["mode"],
         )
+
+    def report(self) -> List[str]:
+        """What the editor did, for render-report.txt: shots by type and what happened to the pictures."""
+        counts: Dict[str, int] = {}
+        for timed in self._scenes.values():
+            for scene in timed:
+                counts[scene.type] = counts.get(scene.type, 0) + 1
+        frames = sum(len(sc.items) for timed in self._scenes.values() for sc in timed if sc.type == "animation")
+        lines = ["Shots: " + (", ".join(f"{name} {count}" for name, count in sorted(counts.items(), key=lambda kv: -kv[1])) or "none")]
+        if frames:
+            lines.append(f"Animation frames: {frames}")
+        if self.doodle:
+            stats = self._stats
+            lines.append(
+                f"Drawings: {stats['drawn']} drawn, {self._failed_drawings} failed, {stats['rejected']} redrawn after "
+                f"Gemini's check, {self._drawings} of the budget of {self.options.max_drawings} used"
+                + (f", {stats['budget']} not drawn because the budget ran out" if stats["budget"] else "")
+            )
+            lines.append(
+                f"Stand-ins: {stats['real']} real pictures, {stats['photo']} photos instead of drawings, {stats['otter']} "
+                f"otter poses, {stats['items_dropped']} elements and {stats['shots_dropped']} shots left out, "
+                f"{stats['build_failed']} shots that failed to render"
+            )
+            reason = gemini_media.last_error()
+            if reason:
+                lines.append(f"Last drawing error: {reason}")
+        return lines
 
     def write_credits(self) -> str:
         if not self.credits:

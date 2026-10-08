@@ -1267,7 +1267,8 @@ EDIT_SCENE_TYPES = (
 )
 # Shots of the doodle look: everything above plus drawn compositions, real
 # video clips in a frame and comic reaction cut-ins.
-SHOT_TYPES = EDIT_SCENE_TYPES + ("single", "speech", "illustration", "clip", "meme")
+SHOT_TYPES = EDIT_SCENE_TYPES + ("single", "speech", "illustration", "clip", "meme", "animation")
+MAX_ANIMATION_FRAMES = 6
 MAX_SHOTS_PER_SEGMENT = 80
 CAMERA_MOVES = ("in", "out", "left", "right")
 CLIP_FRAMES = ("card", "full")
@@ -1532,7 +1533,11 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
             return None
         unit = str(entry.get("unit") or "").strip()[:6]
         chart = "pie" if entry.get("chart") == "pie" and unit == "%" and 0 < value <= 100 else "number"
-        return {"type": kind, "at": anchor, "value": _plain_number(value), "unit": unit, "label": label, "chart": chart, "icon": icon}
+        stat = {"type": kind, "at": anchor, "value": _plain_number(value), "unit": unit, "label": label, "chart": chart, "icon": icon}
+        for key in ("draw", "query"):
+            if _text(entry, key, 160):
+                stat[key] = _text(entry, key, 160)
+        return stat
     if kind == "grid":
         value, total = _number(entry.get("value")), _number(entry.get("total") or 10)
         if not anchor or value is None or total is None or not 2 <= total <= 100 or not 0 <= value <= total:
@@ -1553,6 +1558,34 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
             return None
         item.update(type=kind, direction="out" if entry.get("direction") == "out" else "in")
         return item
+    if kind == "animation":
+        frames = []
+        for data in entry.get("frames") or entry.get("items") or []:
+            draw = _text(data, "draw", 200) if isinstance(data, dict) else " ".join(str(data or "").split())[:200]
+            if draw:
+                frame = {"draw": draw}
+                said = _text(data, "at", 80) if isinstance(data, dict) else ""
+                if said:
+                    frame["at"] = said
+                frames.append(frame)
+        if not anchor or not frames:
+            return None
+        animation = {"type": kind if len(frames) > 1 else "illustration", "at": anchor, "text": _text(entry, "text", 16)}
+        if len(frames) > 1:
+            animation["frames"] = frames[:MAX_ANIMATION_FRAMES]
+        else:
+            animation["draw"] = frames[0]["draw"]
+        if entry.get("otter"):
+            animation["otter"] = True
+        if entry.get("continue") is True or str(entry.get("continue")).lower() == "true":
+            animation["continue"] = True
+        camera = str(entry.get("camera") or "").strip().lower()
+        if camera in CAMERA_MOVES:
+            animation["camera"] = camera
+        query = _text(entry, "query", 80)
+        if query:
+            animation["query"] = query
+        return animation
     if kind in ("single", "illustration"):
         item = _scene_item(dict(entry, at=anchor), needs_anchor=True, lookup=lookup)
         if item is None or (kind == "illustration" and not item.get("draw")):
@@ -1789,26 +1822,31 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
 
 
 def _storyboard_example(expressions: list, clips: bool = True, memes: bool = False) -> dict:
-    pose = expressions[0] if expressions else ""
     shots = [
-        {"type": "illustration", "at": "imagine you call your bank", "otter": True, "camera": "in", "text": "",
-         "draw": "medium shot of the otter at home on a sofa, holding a phone to its ear, evening light"},
-        {"type": "illustration", "at": "but the voice is a robot", "otter": True, "continue": True, "camera": "right",
-         "draw": "a small friendly robot appears inside a speech bubble coming out of the phone, the otter frowns"},
+        {"type": "animation", "at": "imagine you call your bank", "otter": True, "camera": "in", "text": "",
+         "query": "person on phone at home", "frames": [
+             {"draw": "medium shot of the otter at home on a sofa in the evening, picking up a ringing phone"},
+             {"draw": "the otter holds the phone to its ear and smiles, waiting", "at": "and someone answers"},
+             {"draw": "a small friendly robot appears in a speech bubble coming out of the phone, the otter frowns",
+              "at": "but the voice is a robot"},
+         ]},
         {"type": "illustration", "at": "a call center in Manila", "camera": "out", "text": "MANILA",
+         "query": "call center office night",
          "draw": "wide shot of a huge open-plan call center at night, rows of tiny desks with glowing screens"},
-        {"type": "single", "at": "the most common job in the world", "text": "the most common job in the world",
-         "label": "", "draw": "a cracked call-center headset with small pieces falling off", "icon": "🎧"},
-        {"type": "stat", "at": "two hundred million people", "value": 200000000, "unit": "", "label": "tens of millions of people",
-         "chart": "number", "icon": "🏢"},
+        {"type": "animation", "at": "every call is answered by a person", "camera": "right", "query": "call center headset",
+         "frames": [
+             {"draw": "close-up of a tired worker's hand putting on a headset at a desk"},
+             {"draw": "the worker talks into the headset, a queue of glowing call icons on the screen"},
+             {"draw": "the queue on the screen keeps growing, the worker rubs its eyes"},
+         ]},
         {"type": "sequence", "items": [
-            {"at": "no holidays", "label": "holidays", "draw": "a beach umbrella and a deck chair", "mark": "cross", "icon": "🏖️"},
-            {"at": "no salary", "label": "salary", "draw": "a pay cheque", "mark": "cross", "icon": "💵"},
+            {"at": "no holidays", "label": "holidays", "draw": "a beach umbrella and a deck chair", "query": "beach umbrella",
+             "mark": "cross", "icon": "🏖️"},
+            {"at": "no salary", "label": "salary", "draw": "a pay cheque with coins", "query": "paycheck", "mark": "cross",
+             "icon": "💵"},
         ]},
-        {"type": "speech", "at": "the robot never gets tired", "text": "", "items": [
-            {"label": "", "pose": pose, "draw": "the otter yawning at a desk", "otter": True},
-            {"at": "and never sleeps", "label": "", "draw": "a smiling robot with a headset, wide awake", "icon": "🤖"},
-        ]},
+        {"type": "illustration", "at": "the robot never gets tired", "continue": False, "camera": "left",
+         "query": "robot headset", "draw": "a smiling robot with a headset answering ten phones at once, wide awake at 3 a.m."},
     ]
     if clips:
         shots.append({"type": "clip", "at": "thousands of servers humming", "query": "data center servers", "label": "",
@@ -1853,7 +1891,7 @@ def build_storyboard_prompt(
             " Now and then a short real video clip, in a frame on the drawn background, shows something real "
             "(a storm, a power plant, a city at night) to give the video texture."
         )
-        clip_mix = f", about {8 if clips == 'some' else 15}% \"clip\""
+        clip_mix = f", about {5 if clips == 'some' else 10}% \"clip\""
         clip_type = (
             '\n- {"type": "clip", "at": ..., "query": an English stock-video search of 2 to 4 words for something a camera can '
             "really film (a thunderstorm at night, a power plant chimney, a city skyline at night, hands plugging in a charger), "
@@ -1886,46 +1924,46 @@ labels into {language_name} and pick new "at" anchors from this version's text.
 # Role: Storyboard artist and animator of a calm, professional educational YouTube channel
 
 ## Goal:
-The video is an animatic: a continuous flow of drawn moments over one warm-coloured background, changing
-every 2 to 4 seconds, so the viewer always SEES what is being said and the story keeps moving, like the hand-drawn
-explainers of "Cápsula Mental". Most moments are full-screen cartoon illustrations that tell the story like frames of
-an animated film (the mascot living the situation, the object being explained, a close-up of a detail, a cutaway
-that shows what happens inside). Between them, minimalist explainer compositions make an idea crystal clear (a chain
-of causes, a comparison, a number, a formula, things named one after the other), built from drawings that appear
-one by one exactly as the narrator names them, with short hand-lettered labels.{clip_goal}
+The video is a short animated film: almost everything on screen is a full-screen cartoon picture drawn by an
+illustrator, and the pictures tell a continuous story that follows the narration, so the viewer always SEES what is
+being said. Most moments are tiny ANIMATIONS: 2 to 4 drawings (usually 3) of the same place and characters, about
+one second each, where one thing changes from drawing to drawing (the otter reaches for the switch -> flips it -> the bulb glows ->
+the room lights up), like the key frames of an animated film. Other moments are single full-screen illustrations with a
+slow camera move. Only now and then, when a comparison, a process or a number is clearer as a diagram, a minimalist
+explainer composition appears on the warm background, built from drawings and real pictures with short hand-lettered
+labels.{clip_goal}
 
 ## Constrains:
 1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index" and "shots"; no markdown.
-2. pace: cover EVERY sentence. Each segment gives its spoken length in "seconds" and the shots it needs in "shots": plan that many (never fewer than 80% of it), one every 2 to 4 seconds of speech, in narration order. A sentence usually gets 2 or 3 shots: change the picture whenever the narration moves to a new object, action, place, number or idea. Never leave more than 5 seconds without a new shot or a new element appearing.
-3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text (same spelling and accents); the shot (or element) appears when they are spoken. The anchors of a segment are all different and follow the order of the text.
-4. mix of shots across the video: about 55% "illustration", about 35% explainer compositions (single, sequence, compare, chain, steps, branch, diagram, stat, bars, grid, equation, definition, timeline, speech, question, statement){clip_mix}{meme_mix}. Never three compositions in a row, never the same composition type twice in a row.
-5. illustrations are frames of one continuous animated story:
-   - when the next illustration happens in the same place with the same characters, set "continue": true and describe ONLY what changes ("the otter flips the switch and the bulb lights up"): it is redrawn from the previous frame, like the next frame of an animation. Chains of 2 to 4 continued frames show an action unfolding;
-   - start fresh (no "continue") for a new place, object or idea;
+2. pace: cover EVERY sentence. Each segment gives its spoken length in "seconds" and the shots it needs in "shots": plan about that many (an animation counts as one shot), in narration order, so the picture changes every 2 to 4 seconds; never leave more than 5 seconds without a new drawing.
+3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text (same spelling and accents); the shot (or the frame) appears when they are spoken. The anchors of a segment are all different and follow the order of the text.
+4. mix of shots across the video: about 50% "animation", about 35% "illustration", at most 12% explainer compositions{clip_mix}{meme_mix}. Compositions are the exception: never two in a row, at least 4 seconds each (their elements are named within about 3 seconds of each other), and at most one "statement" or "question" per minute.
+5. the pictures are one continuous animated story:
+   - in an "animation", every frame after the first is redrawn from the previous one, so describe in each later frame ONLY what changes (an action that advances, a light that turns on, an object that moves closer); give a frame its own "at" when it should appear on precise words;
+   - "continue": true on an illustration or an animation draws its first picture from the last picture before it (same place, same characters), to keep a scene going across shots; start fresh for a new place, object or idea;
    - vary the framing like a film: wide shot, medium shot, close-up of a detail, a cutaway that shows the inside of something (a wire cut open with electrons flowing), a top view, a tiny world at the scale of an atom;
-   - "camera" is the slow camera move over the frame: "in", "out", "left" or "right"; vary it.
-6. the elements of one composition are named within about 6 seconds of each other; a composition never waits for words said much later.
-7. labels have at most 4 words in {language_name}, titles ("text" of a single shot) at most 7 words, illustration captions at most 3 words (most illustrations need none); they are hand-lettered in capitals.
-8. "draw" is an English description of what is drawn (subject, action, place, mood, and the framing of an illustration), concrete and visual, with no text or letters in the drawing and no style words. Each "draw" and "icon" in the whole video is DIFFERENT.
-9. the channel's mascot is an otter with round glasses, a teal sweater and a pencil behind its ear: it is the protagonist of the human situations of the story (use "otter": true in an illustration or drawing that shows it, or a {pose_rule}).
+   - "camera" is the slow camera move over the picture: "in", "out", "left" or "right"; vary it;
+   - "query" is a short English search (2 to 4 words) for a real photo of the same moment, used only if the drawing fails.
+6. never a picture without meaning: every drawing shows exactly what is being said at that moment; an abstract idea becomes a visual metaphor or a situation with the otter (pressure -> the otter pushing a crowd of tiny balls through a pipe).
+7. compositions never show text alone: every element has a "draw" (and a "query" for a real picture of it); labels have at most 4 words in {language_name}, titles at most 7 words, captions on pictures at most 3 words (most pictures need none); they are hand-lettered in capitals.
+8. "draw" is an English description of what is drawn (subject, action, place, mood, and the framing of a scene), concrete and visual, with no text or letters in the drawing and no style words. Each "draw" in the whole video is DIFFERENT.
+9. the channel's mascot is an otter with round glasses, a teal sweater and a pencil behind its ear: it is the protagonist of the human situations of the story (use "otter": true in an animation, illustration or drawing that shows it, or a {pose_rule}).
 10. keep the tone calm and clear; never add facts that the narration does not state.
 {opener_rule}
 {meme_rule}
 
 ## Shot types:
-- {{"type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": ""}}: a full-screen cartoon frame of the story (the main shot type); "text" is an optional big caption of at most 3 words, such as a time "05:30", a place or a name.
-- {{"type": "single", "at": ..., "text": title or "", "label": ..., "draw": ..., "icon": ..., "otter": false, "pose": ""}}: one big drawing on the background (with an optional title above it).
-- {{"type": "speech", "at": ..., "text": words in the bubble or "" for an empty bubble, "items": [speaker, optional listener with its own "at"]}}: someone talking or calling.
-- {{"type": "sequence", "items": [1 to 4 items]}}: things that appear left to right as each is named ("mark": "cross" to cross one out, "check" to tick it).
+- {{"type": "animation", "at": ..., "otter": false, "continue": false, "camera": "in", "text": "", "query": ..., "frames": [{{"draw": ..., "at": optional}}, 2 to 4 frames, usually 3]}}: a tiny animation of one action, about a second per frame (the main shot type).
+- {{"type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": "", "query": ...}}: one full-screen cartoon picture of the story with a slow camera move; "text" is an optional big caption of at most 3 words, such as a time "05:30", a place or a name.
+- {{"type": "single", "at": ..., "text": title or "", "label": ..., "draw": ..., "query": ..., "icon": ..., "otter": false, "pose": ""}}: one big drawing on the background (with an optional title above it).
+- {{"type": "sequence", "items": [2 to 4 items]}}: things that appear left to right as each is named ("mark": "cross" to cross one out, "check" to tick it).
 - {{"type": "compare", "items": [left, right]}}: two things side by side, named close together.
-- {{"type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "pie" or "number", "icon": ...}}: a number that counts up, or a pie.
+- {{"type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "pie" or "number", "draw": ..., "icon": ...}}: a number that counts up next to a drawing, or a pie.
 - {{"type": "bars", "unit": ..., "items": [2 to 5 items with "value"]}}: quantities as bars, each with its drawing and label.
-- {{"type": "grid", "at": ..., "value": 7, "total": 10, "label": ..., "icon": ...}}: "7 out of 10".
-- {{"type": "steps", "items": [2 to 5 items]}}, {{"type": "chain", "items": [2 to 4 items with "link"]}}, {{"type": "branch", "center": item, "items": [2 to 4]}}, {{"type": "diagram", "center": item, "items": [3 to 5]}}, {{"type": "timeline", "items": [2 to 5 with "date"]}}: processes, causes and effects, parts of a whole, dates.
-- {{"type": "definition", "at": ..., "term": ..., "text": ..., "symbol": ..., "unit": ..., "draw": ...}}, {{"type": "equation", "at": ..., "name": ..., "formula": ..., "terms": [{{"symbol": ..., "label": ..., "unit": ...}}]}}: a term with its symbol and unit, or a formula.
-- {{"type": "statement", "at": ..., "text": ..., "expression": ...}} and {{"type": "question", "at": ..., "text": ..., "expression": ...}}: a punchline or a question with the otter.
-- {{"type": "figure", "at": ..., "query": ..., "query_local": ..., "look": "diagram" or "photo", "seconds": ..., "label": ...}}: only when a REAL picture is essential (a map, a famous place, a real organ); shown in an ink frame.{clip_type}{meme_type}
-   An item is {{"at": ..., "label": ..., "draw": ..., "icon": ..., "otter": false, "pose": ""}}: "draw" is an English description of 4 to 14 words of ONE simple subject for the illustrator (what it is and what it is doing); "icon" is one emoji that depicts the thing literally, used only if the drawing fails.
+- {{"type": "steps", "items": [2 to 5 items]}}, {{"type": "chain", "items": [2 to 4 items with "link"]}}, {{"type": "branch", "center": item, "items": [2 to 4]}}: processes, causes and effects.
+- {{"type": "equation", "at": ..., "name": ..., "formula": ..., "terms": [{{"symbol": ..., "label": ..., "unit": ...}}]}}: a formula, only when the narration states one.
+- {{"type": "statement", "at": ..., "text": ..., "expression": ...}} and {{"type": "question", "at": ..., "text": ..., "expression": ...}}: a punchline or a question with the otter (rare).{clip_type}{meme_type}
+   An item is {{"at": ..., "label": ..., "draw": ..., "query": ..., "icon": ..., "otter": false, "pose": ""}}: "draw" is an English description of 4 to 14 words of ONE simple subject for the illustrator (what it is and what it is doing); "query" is a 2 to 4 word English search for a real picture of it; "icon" is one emoji that depicts the thing literally, the very last resort.
 {reference_rule}
 ## Output Example:
 {json.dumps(_storyboard_example(expressions, clips != "none", memes), ensure_ascii=False)}
@@ -2049,7 +2087,7 @@ def build_storyboard_gaps_prompt(
 ) -> str:
     """Extra shots for stretches of narration where the picture stays the same for too long."""
     language_name = language or "the language of the narration"
-    types = ["illustration", "single", "sequence", "compare", "chain", "stat"]
+    types = ["animation", "illustration", "single", "compare", "chain"]
     if clips in ("some", "more"):
         types.append("clip")
     pose_rule = (
@@ -2068,20 +2106,20 @@ Add new shots so the picture changes every 2 to 4 seconds, following exactly wha
    and how many new shots it needs ("shots"); add that many shots for the gap, each with that "index".
 3. every "at" is 2 to 6 consecutive words copied exactly from that gap's "text", all different, in order;
    never on its first 3 words (the current picture stays a moment).
-4. shot types: {", ".join(types)}, in the same format as the main storyboard (below). Mostly "illustration":
-   when the current picture is an illustration and the story stays in the same place, set "continue": true and
-   describe only what changes, like the next frame of an animation; vary "camera" ("in", "out", "left", "right").
+4. shot types: {", ".join(types)}, in the same format as the main storyboard (below). Almost always "animation"
+   (2 to 4 drawings of one action, about a second each) or "illustration": when the story stays in the same place
+   as the current picture, set "continue": true and describe only what changes; vary "camera" ("in", "out", "left",
+   "right"); give each a short English "query" for a real photo of the moment, used if the drawing fails.
 5. "draw" is an English description of what is drawn, concrete and visual, never text in it; the channel's
    mascot is an otter with round glasses and a teal sweater ("otter": true when it is in the drawing {pose_rule}).
 6. labels at most 4 words in {language_name}; never add facts the narration does not state.
 
 ## Formats:
-{{"index": 2, "type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": ""}}
-{{"index": 2, "type": "single", "at": ..., "text": "", "label": ..., "draw": ..., "icon": ...}}
-{{"index": 2, "type": "sequence", "items": [{{"at": ..., "label": ..., "draw": ..., "icon": ...}}]}}
-{{"index": 2, "type": "compare", "items": [left item, right item]}}
+{{"index": 2, "type": "animation", "at": ..., "otter": false, "continue": false, "camera": "in", "query": ..., "frames": [{{"draw": ...}}, {{"draw": only what changes, "at": optional}}]}}
+{{"index": 2, "type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": "", "query": ...}}
+{{"index": 2, "type": "single", "at": ..., "text": "", "label": ..., "draw": ..., "query": ..., "icon": ...}}
+{{"index": 2, "type": "compare", "items": [left item, right item, each {{"at": ..., "label": ..., "draw": ..., "query": ...}}]}}
 {{"index": 2, "type": "chain", "items": [2 to 4 items with "link"]}}
-{{"index": 2, "type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "number", "icon": ...}}
 {{"index": 2, "type": "clip", "at": ..., "query": English stock video search, "label": "", "frame": "card", "draw": fallback illustration}}
 
 ## Gaps:

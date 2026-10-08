@@ -132,6 +132,15 @@ def extract_frame(ffmpeg_binary: str, video_file: str, output: str, at: float = 
     return ""
 
 
+def brightness(picture_file: str) -> float:
+    """Mean brightness of a picture (0 black to 255 white); 255 when it cannot be read."""
+    try:
+        with Image.open(picture_file) as picture:
+            return float(np.asarray(picture.convert("L").resize((64, 36))).mean())
+    except Exception:
+        return 255.0
+
+
 @dataclass
 class Theme:
     width: int

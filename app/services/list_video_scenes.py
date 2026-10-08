@@ -46,7 +46,7 @@ SCENE_TYPES = (
     "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
     "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
     "definition", "equation", "annotate", "chain", "branch",
-    "single", "speech", "illustration", "clip", "meme",
+    "single", "speech", "illustration", "clip", "meme", "animation",
 )
 # Scenes whose elements are anchored one by one to the narration.
 ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "formula", "timeline", "chain", "branch")
@@ -54,10 +54,17 @@ ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "form
 PART_SCENES = ("equation", "annotate", "speech")
 PART_KEYS = {"equation": "terms", "annotate": "labels", "speech": "items"}
 # Scenes rendered as a full-frame video clip (a slow zoom) instead of layers.
-CLIP_SCENES = ("figure", "zoom", "illustration", "clip", "meme")
+CLIP_SCENES = ("figure", "zoom", "illustration", "clip", "meme", "animation")
 # Shots that cover the whole frame: the shot before them stays underneath while they fade in.
 FULL_FRAME_SHOTS = CLIP_SCENES
 CROSSFADE_SECONDS = 0.3
+# Shots that are one picture (understood at a glance); the others are compositions to read.
+PICTURE_SHOTS = ("illustration", "animation", "clip", "meme", "figure", "zoom")
+COMPOSITION_SECONDS = 4.0  # a composition stays at least this long, so it can be followed
+MAX_PUSH_SECONDS = 2.0  # the shot after a composition may wait this long for it
+ANIMATION_FRAME_SECONDS = 1.0  # an animation shows a new drawing about this often
+ANIMATION_MIN_FRAME = 0.7
+ANIMATION_FADE = 0.18
 SCENE_MARKS = ("cross", "check")
 SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
@@ -78,7 +85,8 @@ _SFX = {"pop": 0.5, "stamp": 0.8, "scribble": 0.45, "whoosh": 0.5, "tick": 0.6, 
 # Seconds a scene stays after its last element, by type.
 _TAILS = {"statement": 2.6, "stat": 3.0, "bars": 3.0, "grid": 3.4, "gauge": 3.2, "zoom": 3.4,
           "question": 2.8, "story": 2.8, "figure": 5.0, "definition": 5.2, "equation": 2.8, "annotate": 2.6,
-          "chain": 2.8, "branch": 2.8, "single": 2.6, "speech": 3.0, "illustration": 3.5, "clip": 3.5, "meme": 2.2}
+          "chain": 2.8, "branch": 2.8, "single": 2.6, "speech": 3.0, "illustration": 3.5, "clip": 3.5, "meme": 2.2,
+          "animation": 3.5}
 PART_FIRST = {"equation": 1.2, "annotate": 1.0, "speech": 0.0}  # seconds from the anchor to the first part
 PART_STEP = 0.9  # parts without their own anchor follow each other this far apart
 
@@ -245,10 +253,10 @@ def _scene_from(spec: dict, kind: str, start: float, end: float, items: List[Sce
         scene.center = SceneItem(label=str(spec.get("name") or spec.get("label") or ""))
     elif kind == "annotate":
         scene.center = SceneItem(query=scene.query, at=str(spec.get("at") or ""))
-    elif kind in ("single", "illustration", "clip", "meme"):
+    elif kind in ("single", "illustration", "clip", "meme", "animation"):
         item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
         scene.center = _item(dict(item, at=spec.get("at") or ""))
-        if kind == "illustration":
+        if kind in ("illustration", "animation"):
             scene.camera = str(spec.get("camera") or "") if spec.get("camera") in CAMERA_MOVES else ""
             scene.follows = bool(spec.get("continue"))
         elif kind == "clip":
@@ -284,6 +292,17 @@ def _spec_times(
 ) -> Optional[Tuple[List[SceneItem], List[float]]]:
     """The timed elements of a plan scene and every moment it shows something; None if it cannot be placed."""
     items: List[SceneItem] = []
+    if kind == "animation":
+        time = locate(spec.get("at", ""))
+        if time is None:
+            return None
+        for data in spec.get("frames") or []:
+            if isinstance(data, dict) and data.get("draw"):
+                item = _item(dict(data, otter=data.get("otter", spec.get("otter")), query=data.get("query") or spec.get("query")))
+                said = locate(item.at) if item.at else None
+                item.time = said if said is not None else -1.0
+                items.append(item)
+        return (items, [time]) if items else None
     if kind not in ITEM_SCENES:
         time = locate(spec.get("at", ""))
         if time is None:
@@ -325,7 +344,7 @@ def _spec_times(
     return spaced, [i.time for i in spaced]
 
 
-MIN_SHOT_SECONDS = 1.6
+MIN_SHOT_SECONDS = 2.0
 MEME_SECONDS = 2.4  # a reaction cut-in lasts this long; the shot before it comes back after
 
 
@@ -352,8 +371,15 @@ def time_shots(
     placed.sort(key=lambda entry: entry[0])
     kept = []
     for at, spec, kind, items in placed:
-        if kept and at - kept[-1][0] < MIN_SHOT_SECONDS:
-            continue
+        if kept:
+            before, before_kind = kept[-1][0], kept[-1][2]
+            needed = MIN_SHOT_SECONDS if before_kind in PICTURE_SHOTS else COMPOSITION_SECONDS
+            if at - before < MIN_SHOT_SECONDS:
+                continue
+            if at - before < needed:
+                if before + needed - at > MAX_PUSH_SECONDS:
+                    continue
+                at = before + needed  # waits a moment, so the composition can be read
         if duration - at < MIN_SHOT_SECONDS:
             continue
         kept.append((at, spec, kind, items))
@@ -361,9 +387,19 @@ def time_shots(
     for number, (at, spec, kind, items) in enumerate(kept):
         begin = start if number == 0 else at
         end = kept[number + 1][0] if number + 1 < len(kept) else duration
-        visible = [i for i in items if i.time < end - 0.8]
-        for item in visible:
-            item.time = max(item.time, begin + 0.12)
+        if kind == "animation":
+            visible = frame_times(items, begin, end)
+        else:
+            visible = [i for i in items if i.time < end - 0.8]
+        if kind != "animation":
+            previous_time = None
+            for item in visible:
+                item.time = max(item.time, begin + 0.12)
+                if previous_time is not None and kind in ITEM_SCENES:
+                    # Elements said before a shot that had to wait still pop in one after another.
+                    item.time = max(item.time, previous_time + 0.4)
+                previous_time = item.time
+            visible = [item for item in visible if item.time < end - 0.8] or visible[:1]
         if visible and kind in ITEM_SCENES:
             # The screen is never left empty waiting for the first element.
             visible[0].time = begin + 0.12
@@ -373,6 +409,7 @@ def time_shots(
         if kind == "meme" and end - begin > MEME_SECONDS + 1.0:
             scene.end = begin + MEME_SECONDS
             if previous is not None and previous.type in ("illustration", "single") and not previous.reprise:
+                # (an animation is not repeated: the reaction simply lasts until the next shot)
                 shots.append(scene)
                 # Back to the picture the reaction interrupted (the very same drawing).
                 shots.append(replace(previous, start=scene.end, end=end, items=[], reprise=True, follows=False, camera=""))
@@ -380,6 +417,30 @@ def time_shots(
             scene.end = end
         shots.append(scene)
     return shots
+
+
+def frame_times(frames: List[SceneItem], begin: float, end: float) -> List[SceneItem]:
+    """When each drawing of an animation appears: about a second each, spread over the shot.
+
+    A frame keeps the moment its own words are said when that fits in order;
+    frames that do not fit (the shot is short) are left out.
+    """
+    span = max(0.0, end - begin)
+    count = min(len(frames), max(1, int(span / ANIMATION_MIN_FRAME)))
+    frames = frames[:count]
+    step = span / max(1, len(frames))
+    previous = begin - ANIMATION_MIN_FRAME
+    for number, frame in enumerate(frames):
+        even = begin + number * step
+        said = frame.time
+        if number == 0:
+            frame.time = begin
+        elif previous + ANIMATION_MIN_FRAME <= said <= end - ANIMATION_MIN_FRAME:
+            frame.time = said
+        else:
+            frame.time = max(even, previous + ANIMATION_MIN_FRAME)
+        previous = frame.time
+    return [f for f in frames if f.time <= end - ANIMATION_MIN_FRAME or f is frames[0]]
 
 
 def long_holds(shots: List[Scene], duration: float, limit: float, start: float = 0.0) -> List[Tuple[float, float]]:
@@ -891,32 +952,118 @@ def gauge_frames(value: float, radius: int, line: int, frames: int = 20) -> List
     return out
 
 
-def ken_burns_clip(
-    still: Image.Image, output: str, frames: int, size: Tuple[int, int], zoom_from: float, zoom_to: float,
-    pan: float = 0.0, zoom: str = "",
-) -> str:
-    """A slow push-in (or pull-out) video of ``still`` with exactly ``frames`` frames.
+def ease_in_out(progress: float) -> float:
+    """A slow start and a slow end (sine ease), so a camera move never jerks."""
+    return 0.5 - 0.5 * math.cos(math.pi * min(1.0, max(0.0, progress)))
 
-    ``pan`` (-1 to 1) also drifts the camera sideways (negative: to the left);
-    ``zoom`` replaces the linear zoom with an ffmpeg expression of ``on`` (the frame).
+
+# Slow, gentle camera moves: (zoom at the start, zoom at the end, pan at the start, pan at the end).
+# Zoom 1 shows the whole picture; pan -1/1 is the far left/right of what the zoom leaves.
+CAMERA_PATHS = {
+    "in": (1.0, 1.06, 0.0, 0.0),
+    "out": (1.06, 1.0, 0.0, 0.0),
+    "left": (1.06, 1.06, 0.6, -0.6),
+    "right": (1.06, 1.06, -0.6, 0.6),
+    "still": (1.02, 1.02, 0.0, 0.0),
+}
+
+
+def camera_path(camera: str) -> Callable[[float, float], Tuple[float, float]]:
+    """(zoom, pan) at (second, progress 0-1) for a named camera move, eased at both ends."""
+    zoom_from, zoom_to, pan_from, pan_to = CAMERA_PATHS.get(camera, CAMERA_PATHS["in"])
+
+    def path(seconds: float, progress: float) -> Tuple[float, float]:
+        eased = ease_in_out(progress)
+        return zoom_from + (zoom_to - zoom_from) * eased, pan_from + (pan_to - pan_from) * eased
+
+    return path
+
+
+def trim_border(image: Image.Image, tolerance: int = 18, most: float = 0.22) -> Image.Image:
+    """``image`` without a flat border around it (image models sometimes draw the scene on a white page)."""
+    rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    height, width = rgb.shape[:2]
+    corner = np.median(np.concatenate([rgb[:4, :4].reshape(-1, 3), rgb[-4:, -4:].reshape(-1, 3),
+                                       rgb[:4, -4:].reshape(-1, 3), rgb[-4:, :4].reshape(-1, 3)]), axis=0)
+    if corner.min() < 215 or corner.max() - corner.min() > 25:
+        return image  # only a white or paper-coloured page is cut away, never a dark part of the scene
+    flat = np.abs(rgb - corner).max(axis=2) <= tolerance
+    rows = np.where(flat.mean(axis=1) < 0.97)[0]
+    columns = np.where(flat.mean(axis=0) < 0.97)[0]
+    if not len(rows) or not len(columns):
+        return image
+    top, bottom, left, right = rows[0], rows[-1] + 1, columns[0], columns[-1] + 1
+    if top == 0 and left == 0 and bottom == height and right == width:
+        return image
+    if (right - left) < width * (1 - most) * 0.5 or (bottom - top) < height * (1 - most) * 0.5:
+        return image  # mostly empty: a drawing on white, not a framed scene
+    return image.crop((int(left), int(top), int(right), int(bottom)))
+
+
+def motion_clip(
+    pictures: Sequence[Tuple[Image.Image, float]], output: str, frames: int, size: Tuple[int, int],
+    path: Optional[Callable[[float, float], Tuple[float, float]]] = None, fade: float = 0.2, trim: bool = False,
+) -> str:
+    """A smooth video of ``pictures`` [(picture, the second it appears)] under one slow camera move.
+
+    Every frame is cut from the picture at sub-pixel precision (no jitter, unlike
+    ffmpeg's zoompan), and each picture dissolves into the next over ``fade``
+    seconds, so a few drawings play as a short animation. ``trim`` first cuts
+    away a flat border (a scene drawn on a white page).
     """
     import subprocess
 
     width, height = size
-    source = output.rsplit(".", 1)[0] + "-still.png"
-    still.convert("RGB").resize((int(width * 1.5), int(height * 1.5)), Image.LANCZOS).save(source)
     frames = max(2, frames)
-    zoom = zoom or f"{zoom_from}+({zoom_to - zoom_from})*on/{frames - 1}"
-    pan = max(-1.0, min(1.0, pan))
-    x = "iw/2-(iw/zoom/2)" if not pan else f"(iw-iw/zoom)*(0.5+{0.4 * pan:.3f}*(2*on/{frames - 1}-1))"
+    path = path or camera_path("in")
+    margin = 1.08  # a little more picture than the frame, so zooming in stays sharp
+    sources = [(fit_cover(trim_border(image) if trim else image, (int(width * margin), int(height * margin))), max(0.0, at))
+               for image, at in pictures]
+    if not sources:
+        raise ValueError("a camera move needs at least one picture")
+    sources.sort(key=lambda entry: entry[1])
+    source_w, source_h = sources[0][0].size
     command = [
-        utils.get_ffmpeg_binary(), "-v", "error", "-y", "-loop", "1", "-i", source,
-        "-vf", f"zoompan=z='{zoom}':x='{x}':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={FPS},format=yuv420p",
-        "-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", output,
+        utils.get_ffmpeg_binary(), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", f"{width}x{height}", "-r", str(FPS), "-i", "-",
+        "-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", output,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-    if result.returncode != 0 or not os.path.isfile(output):
-        raise RuntimeError(f"zoom clip failed: {(result.stderr or '').strip()[-400:]}")
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def view(source: Image.Image, zoom: float, pan: float) -> Image.Image:
+        box_w, box_h = source_w / zoom, source_h / zoom
+        cx = source_w / 2 + pan * (source_w - box_w) / 2
+        cy = source_h / 2
+        return source.resize((width, height), Image.BICUBIC, box=(cx - box_w / 2, cy - box_h / 2, cx + box_w / 2, cy + box_h / 2))
+
+    try:
+        for number in range(frames):
+            seconds = number / FPS
+            zoom, pan = path(seconds, number / (frames - 1))
+            zoom = max(1.0, zoom)
+            current = max((k for k, (_, at) in enumerate(sources) if at <= seconds + 1e-6), default=0)
+            frame = view(sources[current][0], zoom, pan)
+            since = seconds - sources[current][1]
+            if current > 0 and fade > 0 and since < fade:
+                before = view(sources[current - 1][0], zoom, pan)
+                frame = Image.blend(before, frame, ease_in_out(since / fade))
+            process.stdin.write(frame.tobytes())
+    except BrokenPipeError:
+        pass  # ffmpeg stopped early; its error is read below
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+    error = process.stderr.read().decode("utf-8", "replace")
+    process.stderr.close()
+    process.wait()
+    if process.returncode != 0 or not os.path.isfile(output):
+        raise RuntimeError(f"camera move failed: {error.strip()[-400:]}")
     return output
 
 
@@ -1018,6 +1165,27 @@ def darker(color: Tuple[int, int, int], share: float = 0.12) -> Tuple[int, int, 
     return tuple(int(c * (1 - share)) for c in color)
 
 
+def contrast(first: Tuple[int, int, int], second: Tuple[int, int, int]) -> float:
+    """WCAG contrast ratio of two colours (1 = the same, 21 = black on white)."""
+
+    def luminance(color):
+        channels = [c / 255 for c in color[:3]]
+        channels = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def readable(color: Tuple[int, int, int], background: Tuple[int, int, int], minimum: float = 2.6) -> Tuple[int, int, int]:
+    """``color``, darkened towards the ink until text in it reads on ``background``."""
+    for share in (0.0, 0.3, 0.5, 0.7, 0.85, 1.0):
+        mixed = tuple(int(c + (i - c) * share) for c, i in zip(color, INK))
+        if contrast(mixed, background) >= minimum:
+            return mixed
+    return INK
+
+
 def spot(width: int, height: int, color: Tuple[int, int, int], seed: int = 0) -> Image.Image:
     """An organic, slightly wobbly blob, like a paper cut-out behind a drawing."""
     rng = np.random.default_rng(seed)
@@ -1094,6 +1262,8 @@ class SceneRenderer:
         self.work_dir = os.path.join(work_dir, "scenes")
         os.makedirs(self.work_dir, exist_ok=True)
         self.canvas_color = canvas_color
+        # The brand colour as used for text: darkened when it would vanish on the canvas.
+        self.accent_text = readable(theme.accent, canvas_color)
         self.picture = picture
         self.host_still = host_still
         self.sfx = sfx or {}
@@ -1422,14 +1592,18 @@ class SceneRenderer:
         return int(round((scene.end + max(scene.overlap, scene.linger) - scene.start) * FPS)) + 2
 
     def _clip(
-        self, scene: Scene, still: Image.Image, folder: str, zoom_from: float, zoom_to: float, pan: float = 0.0, zoom: str = ""
+        self, scene: Scene, pictures, folder: str, path: Optional[Callable[[float, float], Tuple[float, float]]] = None,
+        fade: float = 0.2, trim: bool = False,
     ) -> fx.Overlay:
-        path = ken_burns_clip(
-            still, os.path.join(folder, "clip.mp4"), self._clip_frames(scene), (self.theme.width, self.theme.height),
-            zoom_from, zoom_to, pan=pan, zoom=zoom,
+        """The scene as a full-frame video: ``pictures`` (one picture, or [(picture, second)]) under a smooth camera move."""
+        if isinstance(pictures, Image.Image):
+            pictures = [(pictures, 0.0)]
+        output = motion_clip(
+            pictures, os.path.join(folder, "clip.mp4"), self._clip_frames(scene), (self.theme.width, self.theme.height),
+            path=path, fade=fade, trim=trim,
         )
         return fx.Overlay(
-            path, x=self._slide(scene), y=self._slide(scene, "y"), start=scene.start, end=scene.end, mode="media"
+            output, x=self._slide(scene), y=self._slide(scene, "y"), start=scene.start, end=scene.end, mode="media"
         )
 
     def _caption(self, canvas: Image.Image, text: str) -> None:
@@ -1468,7 +1642,7 @@ class SceneRenderer:
             canvas.alpha_composite(picture, ((W - picture.width) // 2, max(0, int(top))))
         if item.label:
             self._caption(canvas, item.label)
-        overlays.append(self._clip(scene, canvas, folder, 1.0, 1.12 if photo else 1.05))
+        overlays.append(self._clip(scene, canvas, folder, camera_path("in" if photo else "still")))
 
     def _build_zoom(self, scene, folder, overlays, sounds) -> None:
         """One thing, big, while the camera slowly pushes in (or pulls out)."""
@@ -1478,8 +1652,7 @@ class SceneRenderer:
         box = int(H * (0.62 if not self.theme.portrait else 0.34))
         card, _ = self._card(item, box, int(H * 0.085), int(W * 0.8), label_on_top=False)
         canvas.alpha_composite(card, ((W - card.width) // 2, max(0, (H - card.height) // 2)))
-        zoom = (1.0, 1.16) if scene.direction == "in" else (1.16, 1.0)
-        overlays.append(self._clip(scene, canvas, folder, *zoom))
+        overlays.append(self._clip(scene, canvas, folder, camera_path("in" if scene.direction == "in" else "out")))
         self._sound(sounds, scene.start + SLIDE_SECONDS, "pop")
 
     # -- story ---------------------------------------------------------------------
@@ -1768,7 +1941,7 @@ class SceneRenderer:
         size = H * (0.1 if picture is not None and not theme.portrait else 0.12 if picture is None else 0.06)
         digits = None
         if scene.number:
-            digits = self.text.render(f"{scene.number:02d}", int(size * 2.6), int(W * 0.4), color=theme.accent, max_lines=1)
+            digits = self.text.render(f"{scene.number:02d}", int(size * 2.6), int(W * 0.4), color=self.accent_text, max_lines=1)
         text = self.text.render(title, int(size), title_width, max_lines=3)
         gap, line_gap = theme.px(8), theme.px(14)
         block = (digits.height + gap if digits else 0) + text.height + line_gap + theme.px(10)
@@ -1829,7 +2002,7 @@ class SceneRenderer:
         else:
             column, middle, width = W / 2, H * 0.5, int(W * 0.8)
         big = 1.0 if not theme.portrait else 0.62  # text sizes are fractions of the height
-        term = self.text.render(item.label.upper(), int(H * 0.13 * big), int(width * (0.78 if scene.symbol else 1)), color=theme.accent, max_lines=2)
+        term = self.text.render(item.label.upper(), int(H * 0.13 * big), int(width * (0.78 if scene.symbol else 1)), color=self.accent_text, max_lines=2)
         if scene.symbol:
             badge = self._symbol_badge(scene.symbol, int(min(term.height, H * 0.14 * big)), INK)
             gap = theme.px(22)
@@ -1860,7 +2033,7 @@ class SceneRenderer:
         theme, W, H = self.theme, self.theme.width, self.theme.height
         appear = scene.start + SLIDE_SECONDS + 0.05
         tokens = re.findall(r"[^\W_]+(?:_[^\W_]+)?|[^\w\s]", scene.text) or [scene.text or "?"]
-        palette = (theme.accent,) + self._TERM_COLORS[1:]
+        palette = (self.accent_text,) + tuple(readable(c, self.canvas_color) for c in self._TERM_COLORS[1:])
         colors = {}
         for number, term in enumerate(t for t in scene.items if t.symbol):
             colors.setdefault(term.symbol, palette[number % len(palette)])
@@ -1917,6 +2090,12 @@ class SceneRenderer:
             example = self._pill(scene.example, int(H * 0.065), int(W * 0.8), border=theme.accent)
             overlays.append(self._centered(stamp_frames(example), folder, "example", W / 2, H * 0.88, when, scene))
             self._sound(sounds, when, "stamp")
+        if self.doodle and self.host_still is not None and not theme.portrait:
+            # Never a formula alone: the otter presents it from the corner.
+            pose = die_cut(self.host_still("senalando", int(H * 0.36)), theme.px(5), shadow=False)
+            frames = pop_frames(pose, frames=8, start_scale=0.6)
+            w, h = frames[-1].size
+            overlays.append(self._frames(frames, folder, "host", W * 0.005, H - h + (h - pose.height) / 2 + pose.height * 0.1, appear + 0.3, scene))
 
     # -- annotated picture ------------------------------------------------------------------
 
@@ -1996,7 +2175,7 @@ class SceneRenderer:
             overlays.append(self._frames(frames, folder, f"arrow{a}", left, top, when, scene))
             self._sound(sounds, when, "scribble")
             if items[a].link:
-                verb = self.text.render(items[a].link.lower(), int(H * (0.05 if not theme.portrait else 0.03)), int(W * 0.18 if not theme.portrait else W * 0.4), color=theme.accent)
+                verb = self.text.render(items[a].link.lower(), int(H * (0.05 if not theme.portrait else 0.03)), int(W * 0.18 if not theme.portrait else W * 0.4), color=self.accent_text)
                 mx, my = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
                 spot = (mx + verb.width / 2 + theme.px(16), my) if theme.portrait else (mx, my - verb.height / 2 - theme.px(22))
                 overlays.append(self._centered(pop_frames(verb), folder, f"verb{a}", *spot, when + 0.15, scene))
@@ -2136,24 +2315,41 @@ class SceneRenderer:
         ImageDraw.Draw(image).text((4 - bbox[0], 4 - bbox[1]), text, font=font, fill=WHITE + (255,), stroke_width=stroke, stroke_fill=INK + (255,))
         return image
 
-    _CAMERA = {"in": (1.0, 1.1, 0.0), "out": (1.1, 1.0, 0.0), "left": (1.1, 1.1, -1.0), "right": (1.1, 1.1, 1.0)}
+    def _camera(self, scene: Scene) -> str:
+        """The scene's camera move, or one picked from its start (so moves vary along the video)."""
+        if scene.camera in CAMERA_MOVES:
+            return scene.camera
+        return CAMERA_MOVES[int(scene.start * 7) % len(CAMERA_MOVES)]
+
+    def _story_caption(self, scene, folder, overlays, sounds) -> None:
+        """A big outlined caption low on a full-screen picture (a time, a place, a name)."""
+        W, H = self.theme.width, self.theme.height
+        if not scene.text:
+            return
+        text = self._outlined(scene.text.upper(), int(H * 0.13), int(W * 0.8))
+        when = scene.start + 0.35
+        cy = H * (0.84 if not self.theme.portrait else 0.8) - text.height / 2
+        overlays.append(self._centered(stamp_frames(text), folder, "caption", W / 2, cy, when, scene))
+        self._sound(sounds, when, "stamp")
 
     def _build_illustration(self, scene, folder, overlays, sounds) -> None:
         """A whole illustrated scene filling the screen, the camera slowly moving, with an optional big caption."""
-        W, H = self.theme.width, self.theme.height
         image = self.picture(scene.center or SceneItem())
         if image is None:
             raise ValueError("the illustration was not drawn")
-        canvas = fit_cover(image, (W, H)).convert("RGBA")
-        camera = scene.camera if scene.camera in self._CAMERA else CAMERA_MOVES[int(scene.start * 7) % len(CAMERA_MOVES)]
-        zoom_from, zoom_to, pan = self._CAMERA[camera]
-        overlays.append(self._clip(scene, canvas, folder, zoom_from, zoom_to, pan=pan))
-        if scene.text:
-            text = self._outlined(scene.text.upper(), int(H * 0.13), int(W * 0.8))
-            when = scene.start + 0.35
-            cy = H * (0.84 if not self.theme.portrait else 0.8) - text.height / 2
-            overlays.append(self._centered(stamp_frames(text), folder, "caption", W / 2, cy, when, scene))
-            self._sound(sounds, when, "stamp")
+        overlays.append(self._clip(scene, image, folder, camera_path(self._camera(scene)), trim=True))
+        self._story_caption(scene, folder, overlays, sounds)
+
+    def _build_animation(self, scene, folder, overlays, sounds) -> None:
+        """A short animation: a few drawn frames of one action, about a second each, dissolving into each other
+        under one slow camera move."""
+        frames = [(self.picture(item), item.time - scene.start) for item in scene.items]
+        frames = [(image, max(0.0, at)) for image, at in frames if image is not None]
+        if not frames:
+            raise ValueError("the animation has no frames")
+        frames[0] = (frames[0][0], 0.0)
+        overlays.append(self._clip(scene, frames, folder, camera_path(self._camera(scene)), fade=ANIMATION_FADE, trim=True))
+        self._story_caption(scene, folder, overlays, sounds)
 
     def _build_clip(self, scene, folder, overlays, sounds) -> None:
         """A real video: in an ink frame on the drawn background, or filling the screen."""
@@ -2203,7 +2399,11 @@ class SceneRenderer:
         theme, W, H = self.theme, self.theme.width, self.theme.height
         frames = self._clip_frames(scene)
         output = os.path.join(folder, "clip.mp4")
-        punch = f"1+0.16*pow(max(0,1-on/7),2)+0.04*on/{max(1, frames - 1)}"
+
+        def punch(seconds: float, progress: float) -> Tuple[float, float]:
+            # A quick punch-in that settles, then a slow drift.
+            return 1.0 + 0.14 * max(0.0, 1 - seconds / 0.25) ** 2 + 0.03 * ease_in_out(progress), 0.0
+
         if scene.media:
             video_clip(scene.media, output, frames, (W, H), contain=True)
             overlays.append(fx.Overlay(output, x="0", y="0", start=scene.start, end=scene.end, mode="media"))
@@ -2225,7 +2425,7 @@ class SceneRenderer:
                 picture.thumbnail((int(W * 0.8), int(H * (0.78 if scene.text else 0.9))), Image.LANCZOS)
                 picture = die_cut(picture, theme.px(8))
                 canvas.alpha_composite(picture, ((W - picture.width) // 2, H - picture.height + theme.px(10)))
-            path = ken_burns_clip(canvas, output, frames, (W, H), 1.0, 1.0, zoom=punch)
+            path = motion_clip([(canvas, 0.0)], output, frames, (W, H), path=punch)
             overlays.append(fx.Overlay(path, x="0", y="0", start=scene.start, end=scene.end, mode="media"))
         self._sound(sounds, scene.start, "boom")
         if scene.text:

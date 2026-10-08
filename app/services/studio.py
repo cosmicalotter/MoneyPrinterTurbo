@@ -34,6 +34,7 @@ ILLUSTRATIONS = ("icons", "ai")
 STYLE_PRESETS = ("divulgador", "entusiasta", "profe", "calmado", "sereno", "narrador")
 LOOKS = ("doodle", "footage")
 FORMATS = ("story", "list")
+SETTINGS_VERSION = 2
 CLIPS = ("none", "some", "more")
 MEMES = ("off", "otter", "folder")
 DRAWING_STYLES = ("cartoon", "ink")
@@ -70,8 +71,8 @@ class RenderSettings:
     look: str = "doodle"  # doodle (everything drawn) or footage (stock video + scenes)
     canvas_color: str = "#F4C24F"
     boil: bool = True
-    logo: str = "nutria"
-    max_drawings: int = 160
+    logo: str = ""  # "nutria" adds the round channel badge in the corner
+    max_drawings: int = 260
     shot_seconds: float = 3.0  # a new picture about this often (the animatic pace)
     clips: str = "some"  # real video clips in a frame now and then
     memes: str = "off"  # comic reactions: off, otter or folder
@@ -105,11 +106,19 @@ class RenderSettings:
     zoom: float = 0.08
     # Other languages: {"en-US": "gemini:Puck-Upbeat"}
     also: Dict[str, str] = field(default_factory=dict)
+    # Settings saved before a version get its new defaults (see from_dict).
+    version: int = SETTINGS_VERSION
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "RenderSettings":
         known = {f.name for f in fields(cls)}
         values = {k: v for k, v in (data or {}).items() if k in known}
+        if values and int(values.get("version") or 1) < 2:
+            # Round 7: no corner badge for now, and room for the many more drawings of the animated look.
+            values["logo"] = ""
+            if int(values.get("max_drawings") or 0) == 160:
+                values["max_drawings"] = 260
+        values["version"] = SETTINGS_VERSION
         settings = cls(**values)
         settings.also = {str(k): str(v) for k, v in dict(settings.also or {}).items() if str(k).strip()}
         return settings
@@ -512,6 +521,7 @@ def task_outputs(task_id: str) -> dict:
         "videos": [str(p) for p in sorted(folder.glob("final-*.mp4"))],
         "chapters": text("chapters.txt"),
         "credits": text("credits.txt"),
+        "report": text("render-report.txt"),
         "plan": str(folder / "edit-plan.json") if (folder / "edit-plan.json").is_file() else "",
         "script": str(folder / "list-script.json") if (folder / "list-script.json").is_file() else "",
     }

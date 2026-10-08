@@ -159,12 +159,16 @@ class TestShotTiming(unittest.TestCase):
         self.assertEqual(shots[0].start, 0.5)
         for shot, following in zip(shots, shots[1:]):
             self.assertAlmostEqual(shot.end, following.start)
+            self.assertGreaterEqual(shot.end - shot.start, scenes.COMPOSITION_SECONDS - 0.5)  # long enough to follow
         self.assertEqual(shots[-1].end, 15.0)
         self.assertTrue(all(not s.exit for s in shots))
+        self.assertAlmostEqual(shots[1].start, 0.85 + scenes.COMPOSITION_SECONDS)  # waited for the single to be read
         self.assertEqual([i.label for i in shots[1].items], ["b", "c"])
+        first, second = shots[1].items
+        self.assertGreaterEqual(second.time - first.time, 0.4)  # still one after the other
         speaker, listener = shots[-1].items
-        self.assertAlmostEqual(speaker.time, 12.0)
-        self.assertAlmostEqual(listener.time, 12.0 + scenes.PART_STEP)
+        self.assertAlmostEqual(speaker.time, shots[-1].start + 0.12)
+        self.assertGreaterEqual(listener.time, speaker.time)
         # A single item is enough for a list shot; a shot at the very end is dropped.
         one = scenes.time_shots([{"type": "sequence", "items": [{"at": "uno", "label": "b"}]}], self.TIMES.get, 5.0)
         self.assertEqual(len(one[0].items), 1)
@@ -194,7 +198,7 @@ class TestStoryboardPlan(unittest.TestCase):
         self.assertEqual(board[0]["opener"]["query"], "call center")
         self.assertEqual(board[1]["shots"], [])
         prompt = llm.build_storyboard_prompt([{"index": 0, "kind": "item", "title": "t", "text": "hola"}], ["feliz"], "es-CO")
-        for words in ("Cápsula Mental", "EVERY sentence", "DIFFERENT", '"illustration"', '"speech"', "otter", "es-CO"):
+        for words in ("animated film", "EVERY sentence", "DIFFERENT", '"illustration"', '"animation"', "otter", "es-CO"):
             self.assertIn(words, prompt)
         reply = json.dumps(data)
         with patch.object(llm, "_generate_response", return_value=reply):
@@ -358,11 +362,13 @@ class TestDoodleEditor(_TempDirCase):
         with patch.object(editor.llm, "generate_storyboard", return_value=llm.normalize_storyboard(self.BOARD, 3, sorted(ed.poses))) as board, \
                 patch.object(editor.llm, "generate_storyboard_gaps", return_value={}), \
                 patch.object(editor.gemini_media, "draw", side_effect=draw), patch.object(editor.icons, "fetch", return_value=icon), \
-                patch.object(editor.web_images, "find_candidates") as find:
+                patch.object(editor.gemini_media, "check_drawing", return_value=True), \
+                patch.object(editor.web_images, "find_candidates", return_value=[]) as find:
             ed.make_plan()
             edit = ed.segment_edit(1, 1.5, show_titles=True)
         board.assert_called_once()
-        find.assert_not_called()  # no stock pictures in the doodle look
+        # Real pictures are only looked for when a drawing failed (the plug and the dark lab), never footage.
+        self.assertEqual(sorted(c.args[0] for c in find.call_args_list), ["a dark lab", "a plug"])
         self.assertFalse(ed.wants_footage)
         self.assertEqual(drawn[0], ("a dark lab", True, False))  # illustrations are drawn first (the budget goes to them)
         self.assertIn(("a battery with arms", False, True), drawn)  # the otter is drawn from its own picture

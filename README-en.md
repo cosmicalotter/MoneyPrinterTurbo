@@ -541,6 +541,25 @@ busy models are retried, and the render's warnings say how many drawings failed 
 why. Icons are only a fallback, and Gemini checks that the icon depicts the thing (no
 kissing face for "an energy wave"): no icon is better than a wrong one.
 
+**Short AI animations (round 7):** about half the shots are now `animation`s: 2-4
+drawings of one action, about a second each, every drawing redrawn from the one before
+it (same place and characters, one thing changed) and dissolving into the next under one
+camera move; the other pictures are single full-screen illustrations. Compositions on the
+coloured canvas are the exception (at most ~12%), last at least 4 seconds, and never show
+text alone: an element without a picture is left out, a lone label gets the otter, a
+formula is presented by the otter. Camera moves are rendered frame by frame at sub-pixel
+precision with eased starts and ends, so they are slow and smooth (no zoompan jitter), and
+a white page around a drawn scene is trimmed. Elements prefer real pictures to icons
+(drawing, then a real picture Gemini approves, then a checked icon); every drawing is
+audited by Gemini and redrawn once when it is wrong; image requests run two at a time with
+long waits on busy quotas, and a drawing that still fails becomes a real photo of the moment
+(or the shot is left out). Brand-coloured text is darkened when it would vanish on the
+canvas, dark stock clips are skipped, a shot that fails to render is replaced by the otter,
+and `render-report.txt` (also on the Studio's results page) lists the shots, the drawings
+drawn, failed and redrawn, the stand-ins used and every warning. The corner badge is now
+off by default (`--logo nutria` brings it back) and `--max-drawings` defaults to 260 (about
+US$5-10 for a 5-minute video).
+
 ```shell
 uv run python list_video.py --subject "Why call centres are disappearing" --format story \
   --items 6 --video-language es-CO --look doodle --logo nutria \
