@@ -78,7 +78,10 @@ class EditOptions:
     logo: str = ""  # a corner badge: "nutria" (the bundled otter) or a picture file
     max_drawings: int = 260  # doodle look: AI drawings per video, animation frames included (photos after that)
     seamless: bool = False  # story format: segments flow into each other (no whoosh at the cuts)
-    shot_seconds: float = 3.0  # doodle look: a new picture about this often
+    shot_seconds: float = 5.0  # doodle look: a new picture about this often (calm, documentary pace)
+    director_review: bool = True  # doodle look: a film editor pass corrects the storyboard before drawing
+    image_quality: str = "standard"  # AI drawings: "economy", "standard", "high" (pro key frames) or "max"
+    ai_videos: int = 0  # doodle look: illustrations brought to life by Veo (4-8 s videos, paid per second)
     clips: str = "some"  # doodle look: real video clips in a frame now and then ("none", "some", "more")
     memes: str = "off"  # comic reaction cut-ins: "off", "otter" (drawn otter reactions) or "folder" (your memes)
     memes_dir: str = ""  # folder of reaction pictures and videos, by mood ("" is resource/memes)
@@ -379,6 +382,14 @@ def chip_spans(chip: fx.Overlay, covered: List[Tuple[float, float]], duration: f
     return overlays
 
 
+PILL_SHOTS = ("illustration", "animation", "archive", "figure", "zoom")
+
+
+def _pill_over(scene: scenes.Scene) -> bool:
+    """The section's label may stay over this shot (a full-screen picture with nothing written at its top)."""
+    return scene.type in PILL_SHOTS or (scene.type == "clip" and scene.frame == "full")
+
+
 def _after_opener(beat: _Beat, opener_end: float) -> Optional[_Beat]:
     """A beat said while the section opener is on screen waits for it to leave."""
     start = opener_end + 0.2
@@ -534,6 +545,105 @@ def load_plan_file(path: str, segment_count: int, expressions: List[str]) -> Lis
     return llm.normalize_edit_plan(data, segment_count, expressions)
 
 
+def load_plan_bible(path: str) -> dict:
+    """The visual bible saved in an edit-plan.json ({} when there is none)."""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fp:
+            data = json.load(fp)
+    except (OSError, ValueError):
+        return {}
+    bible = data.get("bible") if isinstance(data, dict) else None
+    if not isinstance(bible, dict):
+        return {}
+    sections = bible.get("sections") or {}
+    if isinstance(sections, dict):
+        bible = dict(bible, sections=[{"index": int(k), "archive": v} for k, v in sections.items() if str(k).isdigit()])
+    try:
+        return llm.normalize_visual_bible(bible)
+    except ValueError:
+        return {}
+
+
+_STOP_WORDS = frozenset(
+    "the and with from into onto over under while their there them they this that these those then than what when "
+    "where which shot wide medium close view frame same again very more most some side back front left right".split()
+)
+REPEAT_SIMILARITY = 0.65  # share of the words two picture descriptions have in common to be the same picture
+PICTURE_KINDS = ("archive", "illustration", "animation", "single")
+
+
+def _subject_words(shot: dict) -> set:
+    """The content words of what a picture shot shows (to spot the same picture planned twice)."""
+    if shot.get("type") == "archive":
+        source = shot.get("query", "")
+    elif shot.get("type") == "animation":
+        source = " ".join(f.get("draw", "") for f in shot.get("frames") or [] if isinstance(f, dict))
+    else:
+        source = shot.get("draw", "") or shot.get("query", "")
+    return {word for word in normalize_words(source) if len(word) > 3 and word not in _STOP_WORDS}
+
+
+def drop_repeats(plan: List[dict]) -> int:
+    """Leave out picture shots that show again what an earlier shot showed: the same archive search, or a drawing
+    described with nearly the same words. A shot that continues the one before it is kept. Returns how many."""
+    seen: List[Tuple[str, str, set]] = []
+    dropped = 0
+    for entry in plan:
+        kept = []
+        for shot in entry.get("shots") or []:
+            kind = shot.get("type")
+            if kind not in PICTURE_KINDS or shot.get("continue") or shot.get("image"):
+                kept.append(shot)
+                continue
+            query = " ".join(normalize_words(shot.get("query", ""))) if kind == "archive" else ""
+            words = _subject_words(shot)
+            repeated = any(query and query == q for _, q, _ in seen) or (
+                len(words) >= 4 and any(len(w) >= 4 and len(words & w) / len(words | w) >= REPEAT_SIMILARITY for _, _, w in seen)
+            )
+            if repeated:
+                dropped += 1
+                continue
+            seen.append((kind, query, words))
+            kept.append(shot)
+        entry["shots"] = kept
+    if dropped:
+        logger.info(f"{dropped} shots that showed the same picture again were left out")
+    return dropped
+
+
+_PINNED_KEYS = ("image", "video")
+
+
+def _pinned_places(plan: List[dict]):
+    """Every dict of a plan that may hold a pinned picture or video."""
+    for entry in plan:
+        if isinstance(entry.get("opener"), dict):
+            yield entry["opener"]
+        for shot in entry.get("shots") or []:
+            if not isinstance(shot, dict):
+                continue
+            yield shot
+            for key in ("frames", "items"):
+                yield from (part for part in shot.get(key) or [] if isinstance(part, dict))
+
+
+def pin_paths(plan: List[dict], base: str) -> None:
+    """Pinned pictures and videos given relative to ``base`` (the plan file's folder) become absolute paths."""
+    for place in _pinned_places(plan):
+        for key in _PINNED_KEYS:
+            if place.get(key) and not os.path.isabs(place[key]):
+                place[key] = os.path.normpath(os.path.join(base, place[key]))
+
+
+REVIEW_FILE = "review.json"
+REVIEW_PLAN_FILE = "review-plan.json"  # the plan with every picture pinned, as it was reviewed
+
+
+def llm_part_key(kind: str) -> str:
+    """The list of parts of a shot type that has them ("terms" of an equation, "labels" of an annotated picture)."""
+    return scenes.PART_KEYS.get(kind, "items")
+
+
 def doodle_fallback(segments, poses) -> List[dict]:
     """A plain storyboard when the LLM gives none: one drawing per segment."""
     plan = default_plan(segments, poses)
@@ -596,13 +706,16 @@ class Editor:
         self._used_icons: set = set()
         self._icon_lock = threading.Lock()
         self._storyboarded = False  # the doodle plan came from the LLM (its long holds can be filled)
+        self.bible: dict = {}  # the art direction of the video: style, recurring characters, real pictures
         self._failed_drawings = 0
         self._memes: Optional[Dict[str, List[str]]] = None
         self._used_memes: set = set()
         self._unpictured: List[scenes.Scene] = []  # drawn shots whose drawing failed (rescued after the others)
+        self._sheets: Dict[str, Tuple[str, str]] = {}  # character id -> (name, character sheet file)
         # What happened to the pictures, for render-report.txt.
         self._stats: Dict[str, int] = {key: 0 for key in (
-            "drawn", "rejected", "budget", "real", "photo", "otter", "items_dropped", "shots_dropped", "build_failed")}
+            "drawn", "rejected", "budget", "real", "photo", "otter", "items_dropped", "shots_dropped", "build_failed",
+            "archive", "archive_drawn", "pinned", "videos", "sheets", "repeats")}
 
     @property
     def wants_footage(self) -> bool:
@@ -617,6 +730,8 @@ class Editor:
         plan = None
         if self.options.plan_file:
             plan = load_plan_file(self.options.plan_file, count, expressions)
+            pin_paths(plan, os.path.dirname(os.path.abspath(self.options.plan_file)))
+            self.bible = load_plan_bible(self.options.plan_file)
             logger.info(f"using edit plan: {self.options.plan_file}")
         elif expressions or self.options.beats != "none":
             payload = [
@@ -631,13 +746,23 @@ class Editor:
                         seconds = max(0.0, seconds - scenes.OPENER_SECONDS)
                     entry["seconds"] = round(seconds, 1)
                     entry["shots"] = llm.storyboard_shot_target(seconds, self.options.shot_seconds)
+                if not reference:
+                    # The art director reads the whole script first: style, recurring characters, real pictures.
+                    self.bible = llm.generate_visual_bible(
+                        [{"index": e["index"], "kind": e["kind"], "title": e["title"], "text": e["text"]} for e in payload],
+                        self.options.language, self.persona,
+                    ) or {}
+                else:
+                    self.bible = self._reference_bible()
                 plan = llm.generate_storyboard(payload, expressions, self.options.language, reference=reference,
                                                openers=self.options.openers, clips=self.options.clips,
-                                               memes=self.options.memes in ("otter", "folder"))
+                                               memes=self.options.memes in ("otter", "folder"), bible=self.bible or None,
+                                               review=self.options.director_review)
                 if plan is None:
                     self.warnings.append("the LLM did not return a storyboard; one drawing per segment was used")
                 else:
                     self._storyboarded = not reference
+                    self._stats["repeats"] += drop_repeats(plan)
             elif reference:
                 plan = llm.generate_edit_plan(payload, expressions, self.options.language, reference=reference,
                                               openers=self.options.openers)
@@ -688,6 +813,15 @@ class Editor:
                 added += len(beats)
         logger.info(f"{added} pictures added where only footage was planned ({len(gaps)} sentences)")
 
+    @property
+    def persona(self) -> str:
+        """"otter" when the bundled otter narrates (the scripts and the art direction know it)."""
+        return "otter" if os.path.basename(os.path.normpath(self.options.assets_dir or "")) == "nutria" else ""
+
+    def _reference_bible(self) -> dict:
+        path = self.options.reference_plan
+        return load_plan_bible(path) if path and os.path.isfile(path) else {}
+
     def _reference_plan(self) -> Optional[list]:
         path = self.options.reference_plan
         if not path or not os.path.isfile(path):
@@ -703,8 +837,11 @@ class Editor:
         return [{k: v for k, v in entry.items() if k != "host"} for entry in segments if isinstance(entry, dict)]
 
     def _save_plan(self) -> None:
+        data = {"segments": self.plan}
+        if self.bible:
+            data["bible"] = {**self.bible, "sections": {str(k): v for k, v in (self.bible.get("sections") or {}).items()}}
         with open(os.path.join(self.task_dir, "edit-plan.json"), "w", encoding="utf-8") as fp:
-            json.dump({"segments": self.plan}, fp, ensure_ascii=False, indent=2)
+            json.dump(data, fp, ensure_ascii=False, indent=2)
             fp.write("\n")
 
     def _entry(self, index: int) -> dict:
@@ -904,7 +1041,9 @@ class Editor:
         each chain of frames is drawn in order.
         """
         jobs = []
-        chains: List[List[scenes.Scene]] = []
+        chains: List[List[Tuple[scenes.Scene, str]]] = []
+        if self.doodle:
+            self._prepare_characters()  # every drawing of a recurring person follows their character sheet
         for index, beats in self._beats.items():
             text = texts[index]
             for beat, _ in beats:
@@ -925,9 +1064,12 @@ class Editor:
                     continue
                 elif scene.type in ("illustration", "animation"):
                     if scene.follows and chains:
-                        chains[-1].append(scene)
+                        chains[-1].append((scene, text))
                     else:
-                        chains.append([scene])
+                        chains.append([(scene, text)])
+                    continue
+                elif scene.type == "archive":
+                    jobs.append(lambda sc=scene, t=text: self._archive_picture(sc, t))
                     continue
                 elif scene.type == "clip":
                     jobs.append(lambda sc=scene, t=text: self._clip_media(sc, t))
@@ -937,9 +1079,11 @@ class Editor:
                     continue
                 elif scene.type == "story" and (self.options.illustrations == "ai" or self.doodle) and self._gemini:
                     jobs.append(lambda sc=scene: self._story_pictures(sc))
+                # Icons only ever stand in for the small pictures of a composition of several elements.
+                small = scene.type in scenes.ITEM_SCENES and len(scene.items) > 1
                 for item in scene.items + ([scene.center] if scene.center and scene.type != "figure" else []):
-                    if self.doodle and (item.draw or item.icon or item.pose or item.query):
-                        jobs.append(lambda i=item, t=text: self._doodle_picture(i, t))
+                    if self.doodle and (item.draw or item.icon or item.pose or item.query or item.image):
+                        jobs.append(lambda i=item, t=text, s=small and item is not scene.center: self._doodle_picture(i, t, icon=s))
                     elif item.query or item.icon or item.draw:
                         jobs.append(lambda i=item, t=text: self._item_picture(i, sentence_at(t, i.at)))
         first = [lambda c=chain: self._illustration_chain(c) for chain in chains]
@@ -970,12 +1114,13 @@ class Editor:
             self._scenes[index] = kept
         if self.doodle:
             self._stats["shots_dropped"] += dropped
+            self._bring_to_life()
             self._report_drawings(dropped)
 
     def _has_picture(self, scene: scenes.Scene) -> bool:
         if scene.type == "animation":
             return any(self._item_pictures.get(id(frame)) is not None for frame in scene.items)
-        if scene.type in ("figure", "annotate", "illustration"):
+        if scene.type in ("figure", "annotate", "illustration", "archive"):
             return self._item_pictures.get(id(scene.center)) is not None
         if scene.type in ("clip", "meme"):
             return bool(scene.media) or (scene.type == "meme" and self._item_pictures.get(id(scene.center)) is not None)
@@ -1005,7 +1150,7 @@ class Editor:
             reason = gemini_media.last_error()
             self.warnings.append(
                 f"{self._failed_drawings} drawings failed" + (f" (last error: {reason})" if reason else "")
-                + "; icons or the previous shot were used instead"
+                + "; real pictures or the previous shot were used instead"
             )
         if self._gemini and self._drawings >= self.options.max_drawings > 0:
             self.warnings.append(
@@ -1070,7 +1215,7 @@ class Editor:
             if self._gemini:
                 path = gemini_media.illustrate(beat.query)
                 if path:
-                    self.credits.append("Illustrations: generated with Google Imagen")
+                    self.credits.append("Illustrations: generated with Google Gemini")
                     return path
             elif material.is_openai_image_enabled():
                 items = material.generate_images_openai(
@@ -1097,7 +1242,7 @@ class Editor:
             path = gemini_media.illustrate(item.draw)
             if path:
                 image = scenes.prepare_picture(path)
-                self.credits.append("Illustrations: generated with Google Imagen")
+                self.credits.append("Illustrations: generated with Google Gemini")
         if image is None and item.query and self.options.picture_check and self._gemini:
             # Real pictures only when Gemini can confirm they fit; icons otherwise.
             path = self._web_picture(item.query, "diagram", line, "scene")
@@ -1242,12 +1387,89 @@ class Editor:
         name = _pick(self.poses, ("explicando", "feliz", "neutral"))
         return self.poses[name].idle if name else ""
 
-    def _drawing(self, description: str, mascot: bool = False, scene: bool = False, previous: str = ""):
-        """A Gemini/Imagen drawing for the doodle look, within the drawing budget; None otherwise.
+    def _pinned(self, item: scenes.SceneItem, framed: bool = True):
+        """The picture a review pinned to this element (used as it is), or None."""
+        if not item.image:
+            return None
+        path = item.image
+        if not os.path.isabs(path):
+            base = os.path.dirname(os.path.abspath(self.options.plan_file)) if self.options.plan_file else self.task_dir
+            path = os.path.join(base, path)
+        if not os.path.isfile(path):
+            logger.warning(f"the pinned picture {item.image!r} is missing; it is made again")
+            return None
+        picture = scenes.prepare_picture(path, allow_cutout=not framed)
+        if picture is not None:
+            picture.info["source"] = path
+            if framed:
+                picture.info["framed"] = True
+            with self._drawing_lock:
+                self._stats["pinned"] += 1
+        return picture
 
-        ``previous`` is the picture file of the scene this one continues. With
-        the picture check on, Gemini audits the drawing and a rejected one is
-        drawn once more.
+    def _prepare_characters(self) -> None:
+        """Draw the character sheet of every recurring person the shots show (from a real portrait when one is found)."""
+        if not (self._gemini and self.bible.get("characters")):
+            return
+        wanted = set()
+        for timed in self._scenes.values():
+            for scene in timed:
+                for item in scene.items + ([scene.center] if scene.center else []):
+                    wanted.update(item.characters)
+        people = [c for c in self.bible["characters"] if c.get("id") in wanted and c.get("id") not in self._sheets]
+        if not people:
+            return
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            for person, path in zip(people, pool.map(self._character_sheet, people)):
+                if path:
+                    self._sheets[person["id"]] = (person.get("name") or person["id"], path)
+        logger.info(f"{len(self._sheets)} character sheets ready for {len(people)} recurring people")
+
+    def _character_sheet(self, person: dict) -> str:
+        """The character sheet file of a person of the visual bible ("" when it could not be drawn)."""
+        with self._drawing_lock:
+            if self._drawings >= max(0, self.options.max_drawings):
+                return ""
+            self._drawings += 1
+        portrait = ""
+        if person.get("portrait") and self.options.picture_check:
+            save_dir = os.path.join(self.work_dir, "portraits")
+            try:
+                candidates = web_images.find_candidates(person["portrait"], save_dir, kind="archive", limit=4)
+            except Exception as exc:
+                logger.debug(f"no portrait of {person.get('name')!r}: {exc}")
+                candidates = []
+            if candidates:
+                choice = gemini_media.choose_picture(
+                    [c.path for c in candidates], person.get("name", ""), person["portrait"], self.options.language,
+                    purpose="portrait",
+                )
+                if choice is not None and choice >= 0:
+                    portrait = candidates[choice].path
+                    self.credits.append(candidates[choice].credit())
+        path = gemini_media.draw_character(
+            person.get("name", ""), person.get("look", ""), portrait, style=self.options.drawing_style,
+            art=self.bible.get("style", ""), quality=self.options.image_quality,
+        )
+        if path:
+            with self._drawing_lock:
+                self._stats["sheets"] += 1
+        return path
+
+    def _sheets_for(self, ids: List[str]) -> List[Tuple[str, str]]:
+        return [self._sheets[key] for key in ids if key in self._sheets]
+
+    def _drawing(
+        self, description: str, mascot: bool = False, scene: bool = False, previous: str = "",
+        characters: Optional[List[str]] = None, context: str = "",
+    ):
+        """A Gemini drawing for the doodle look, within the drawing budget; None otherwise.
+
+        ``previous`` is the picture file of the scene this one continues;
+        ``characters`` the ids of the recurring people it shows (drawn from
+        their character sheets); ``context`` the sentence said while it is on
+        screen. With the picture check on, Gemini audits the drawing against
+        that sentence and a rejected one is drawn once more with its fix.
         """
         if not (self._gemini and description):
             return None
@@ -1263,21 +1485,29 @@ class Editor:
         asked = description
         if seen:
             asked = f"{description}, a different moment, pose and angle from before (variation {seen + 1})"
-        options = {"scene": scene, "mascot": self._mascot() if mascot else ""}
+        sheets = self._sheets_for(characters or [])
+        options = {
+            "scene": scene, "mascot": self._mascot() if mascot else "", "characters": sheets,
+            "art": self.bible.get("style", ""), "quality": self.options.image_quality,
+        }
         if previous:
             options["previous"] = previous
         if self.options.drawing_style != "cartoon":
             options["style"] = self.options.drawing_style
         path = gemini_media.draw(asked, **options)
         if path and self.options.picture_check:
-            if gemini_media.check_drawing(path, description, mascot=mascot) is False:
+            verdict, fix = gemini_media.audit_drawing(
+                path, description, mascot=mascot, context=context, characters=[name for name, _ in sheets]
+            )
+            if verdict is False:
                 with self._drawing_lock:
                     self._stats["rejected"] += 1
                     again = self._drawings < max(0, self.options.max_drawings)
                     if again:
                         self._drawings += 1
                 if again:
-                    redrawn = gemini_media.draw(f"{asked}, drawn again clearly and simply", **options)
+                    retry = f"{asked}. Make sure: {fix}" if fix else f"{asked}, drawn again clearly and simply"
+                    redrawn = gemini_media.draw(retry, **options)
                     path = redrawn or path
         if not path:
             with self._drawing_lock:
@@ -1285,22 +1515,27 @@ class Editor:
             return None
         with self._drawing_lock:
             self._stats["drawn"] += 1
-        self.credits.append("Illustrations: drawn with Google Gemini / Imagen")
+        self.credits.append("Illustrations: drawn with Google Gemini")
         picture = scenes.prepare_picture(path, allow_cutout=not scene)
         if picture is not None:
             picture.info["source"] = path
         return picture
 
-    def _doodle_picture(self, item: scenes.SceneItem, text: str = "") -> None:
-        """A shot element: the otter's own pose, a drawing, a real picture Gemini approves, or a checked icon."""
-        image = None
-        if item.pose and item.pose in self.poses:
+    def _doodle_picture(self, item: scenes.SceneItem, text: str = "", icon: bool = False) -> None:
+        """A shot element: a pinned picture, the otter's own pose, a drawing, or a real picture Gemini approves.
+
+        ``icon``: a small element among others, which may fall back to a checked
+        icon (never a big picture alone on screen).
+        """
+        image = self._pinned(item, framed=False)
+        if image is None and item.pose and item.pose in self.poses:
             image = scenes.prepare_picture(self.poses[item.pose].idle, trust_alpha=True)
         if image is None and item.draw:
-            image = self._drawing(item.draw, mascot=item.otter)
+            image = self._drawing(item.draw, mascot=item.otter, characters=item.characters,
+                                  context=sentence_at(text, item.at) if text else "")
         if image is None:
             image = self._real_picture(item, text)
-        if image is None:
+        if image is None and icon:
             image = self._icon_picture(item)
         self._item_pictures[id(item)] = image
 
@@ -1316,22 +1551,32 @@ class Editor:
                 self._stats["real"] += 1
         return image
 
-    def _illustration_picture(self, scene: scenes.Scene, previous: str = ""):
+    def _illustration_picture(self, scene: scenes.Scene, previous: str = "", text: str = ""):
         """A whole drawn scene (16:9) for a story moment; drawn from ``previous`` when it continues it."""
         item = scene.center or scenes.SceneItem()
         scene.center = item
-        image = self._drawing(item.draw, mascot=item.otter and not previous, scene=True, previous=previous)
+        image = self._pinned(item)
+        if image is None:
+            image = self._drawing(
+                item.draw, mascot=item.otter and not previous, scene=True, previous=previous,
+                characters=item.characters, context=sentence_at(text, item.at) if text else "",
+            )
         if image is not None:
             image.info["framed"] = True
             self._item_pictures[id(item)] = image
         return image
 
-    def _animation_frames(self, scene: scenes.Scene, previous: str = "") -> str:
+    def _animation_frames(self, scene: scenes.Scene, previous: str = "", text: str = "") -> str:
         """The drawings of an animation, each redrawn from the one before it; the last drawing's file."""
         last = previous
+        anchor = scene.center.at if scene.center else ""
         for number, frame in enumerate(scene.items):
             follow = last if number > 0 or scene.follows else ""
-            image = self._drawing(frame.draw, mascot=frame.otter and not follow, scene=True, previous=follow)
+            image = self._pinned(frame)
+            if image is None:
+                context = sentence_at(text, frame.at or anchor) if text else ""
+                image = self._drawing(frame.draw, mascot=frame.otter and not follow, scene=True, previous=follow,
+                                      characters=frame.characters, context=context)
             if image is None:
                 continue  # a missing frame is skipped; the next one follows the last good one
             image.info["framed"] = True
@@ -1339,14 +1584,14 @@ class Editor:
             last = image.info.get("source", "") or last
         return last if any(id(frame) in self._item_pictures for frame in scene.items) else ""
 
-    def _illustration_chain(self, chain: List[scenes.Scene]) -> None:
+    def _illustration_chain(self, chain: List[Tuple[scenes.Scene, str]]) -> None:
         """Illustrations and animations drawn in order, a continuing one redrawn from the picture before it."""
         previous = ""
-        for scene in chain:
+        for scene, text in chain:
             if scene.type == "animation":
-                drawn = self._animation_frames(scene, previous if scene.follows else "")
+                drawn = self._animation_frames(scene, previous if scene.follows else "", text)
             else:
-                image = self._illustration_picture(scene, previous if scene.follows else "")
+                image = self._illustration_picture(scene, previous if scene.follows else "", text)
                 drawn = image.info.get("source", "") if image is not None else ""
             if not drawn:
                 with self._drawing_lock:
@@ -1360,9 +1605,9 @@ class Editor:
         for scene in list(self._unpictured):
             text = texts.get(where.get(id(scene), -1), "")
             if scene.type == "animation":
-                if self._animation_frames(scene):
+                if self._animation_frames(scene, text=text):
                     continue
-            elif self._illustration_picture(scene) is not None:
+            elif self._illustration_picture(scene, text=text) is not None:
                 continue
             center = scene.center or scenes.SceneItem()
             if not center.query and scene.items:
@@ -1378,10 +1623,94 @@ class Editor:
                     self._stats["photo"] += 1
         self._unpictured = []
 
+    def _archive_picture(self, scene: scenes.Scene, text: str = "") -> None:
+        """A real historical picture (Wikimedia Commons) that Gemini confirms is authentic and shows exactly this
+        moment; the moment is drawn instead when none is."""
+        item = scene.center or scenes.SceneItem()
+        scene.center = item
+        image = self._pinned(item)
+        if image is None and self.options.picture_check and self._gemini:
+            save_dir = os.path.join(self.work_dir, "archive")
+            shorter = " ".join(scene.query.split()[:4])
+            candidates: list = []
+            for query in dict.fromkeys(q for q in (scene.query, scene.query_local, shorter) if q):
+                with self._icon_lock:
+                    used = set(self._used_urls) | set(item.avoid)
+                try:
+                    found = web_images.find_candidates(query, save_dir, kind="archive", exclude_urls=used, limit=4)
+                except Exception as exc:
+                    logger.debug(f"archive search failed for {query!r}: {exc}")
+                    found = []
+                candidates += [c for c in found if c.url not in {k.url for k in candidates}]
+                if len(candidates) >= 4:
+                    break
+            candidates = candidates[:6]
+            if candidates:
+                line = sentence_at(text, item.at) if text else scene.query
+                wanted = f"{scene.query} ({scene.text})" if scene.text else scene.query
+                choice = gemini_media.choose_picture(
+                    [c.path for c in candidates], line, wanted, self.options.language, purpose="archive"
+                )
+                if choice is not None and choice >= 0:
+                    chosen = candidates[choice]
+                    with self._icon_lock:
+                        fresh = chosen.url not in self._used_urls
+                        self._used_urls.add(chosen.url)
+                    image = scenes.prepare_picture(chosen.path, allow_cutout=False) if fresh else None
+                    if image is not None:
+                        image.info["framed"] = True
+                        image.info["archive"] = True
+                        image.info["url"] = chosen.url
+                        self.credits.append(chosen.credit())
+                        logger.info(f"archive picture: {scene.query!r}")
+                        with self._drawing_lock:
+                            self._stats["archive"] += 1
+                else:
+                    logger.info(f"no authentic picture of {scene.query!r} passed the check")
+        if image is not None:
+            self._item_pictures[id(item)] = image
+            return
+        if item.draw:
+            # No real picture fits: the moment is drawn instead (never a wrong or staged photo).
+            scene.type = "illustration"
+            if self._illustration_picture(scene, text=text) is not None:
+                with self._drawing_lock:
+                    self._stats["archive_drawn"] += 1
+
+    def _bring_to_life(self) -> None:
+        """The longest illustrations that have a "motion" become short Veo videos (``ai_videos`` at most)."""
+        if self.options.ai_videos <= 0 or not self._gemini:
+            return
+        chosen = []
+        for timed in self._scenes.values():
+            for scene in timed:
+                item = scene.center
+                if scene.type != "illustration" or scene.reprise or scene.media or item is None or not item.motion:
+                    continue
+                picture = self._item_pictures.get(id(item))
+                source = picture.info.get("source", "") if picture is not None else ""
+                if source and not picture.info.get("archive") and scene.end - scene.start >= 3.5:
+                    chosen.append((scene.end - scene.start, scene, source))
+        chosen.sort(key=lambda entry: -entry[0])
+
+        def make(entry) -> None:
+            seconds, scene, source = entry
+            path = gemini_media.animate(source, scene.center.motion, seconds, self.options.image_quality)
+            if path:
+                scene.media = path
+                with self._drawing_lock:
+                    self._stats["videos"] += 1
+
+        with ThreadPoolExecutor(max_workers=gemini_media.VIDEO_SLOTS) as pool:
+            list(pool.map(make, chosen[: self.options.ai_videos]))
+        if self._stats["videos"]:
+            self.credits.append("Animated shots: generated with Google Veo")
+            logger.info(f"{self._stats['videos']} illustrations brought to life with Veo")
+
     def _complete(self, scene: scenes.Scene) -> bool:
         """Every composition shows pictures: elements without one are left out, a lone label gets the
         otter; False when the shot has nothing left to show."""
-        if scene.type in ("illustration", "figure", "annotate", "clip", "meme", "animation", "opener") or scene.reprise:
+        if scene.type in ("illustration", "figure", "annotate", "clip", "meme", "animation", "opener", "archive") or scene.reprise:
             return True
         picture = self._item_pictures.get
         if scene.type in ("single", "definition", "stat", "zoom"):
@@ -1434,6 +1763,9 @@ class Editor:
         """A stock video for a clip shot (Pexels, then Pixabay); its drawing when none is found."""
         item = scene.center or scenes.SceneItem()
         scene.center = item
+        if scene.media and os.path.isfile(scene.media):
+            return  # kept in a review
+        scene.media = ""
         query = item.query
         aspect = VideoAspect.portrait if self.theme.portrait else VideoAspect.landscape
         seconds = max(2, int(scene.end - scene.start + 1))
@@ -1521,21 +1853,21 @@ class Editor:
     def _opener_picture(self, scene: scenes.Scene, text: str) -> None:
         """The section opener's picture, strictly about its title.
 
-        A web picture Gemini confirms shows exactly that topic; else a drawing
-        of it (Imagen, when Gemini is configured); else the plan's icon; else
-        the card shows only the number and the title.
+        A web picture Gemini confirms shows exactly that topic (in the doodle
+        look the real photo or portrait of the section's subject, on its
+        coloured card); else a drawing of it; else the plan's icon (footage
+        look); else the card shows only the number and the title.
         """
         item = scene.center or scenes.SceneItem(label=scene.text)
         scene.center = item
-        image = None
-        if self.doodle:
-            # The doodle look draws the opener too, so it matches the rest.
-            image = self._drawing(item.draw or scene.query or scene.text, mascot=item.otter)
+        image = self._pinned(item)
         if image is None and self.options.picture_check and self._gemini:
             save_dir = os.path.join(self.work_dir, "pictures")
             candidates = []
             for query in dict.fromkeys(q for q in (scene.query_local, scene.query) if q):
-                candidates += web_images.find_candidates(query, save_dir, kind=scene.look, exclude_urls=self._used_urls, limit=3)
+                with self._icon_lock:
+                    used = set(self._used_urls) | set(item.avoid)
+                candidates += web_images.find_candidates(query, save_dir, kind=scene.look, exclude_urls=used, limit=3)
             candidates = candidates[:5]
             if candidates:
                 first = re.split(r"(?<=[.!?…])\s+", (text or "").strip())[0][:300]
@@ -1545,17 +1877,24 @@ class Editor:
                 )
                 if choice is not None and choice >= 0:
                     found = candidates[choice]
-                    self._used_urls.add(found.url)
+                    with self._icon_lock:
+                        self._used_urls.add(found.url)
                     self.credits.append(found.credit())
-                    image = scenes.prepare_picture(found.path, allow_cutout=scene.look != "photo")
+                    image = scenes.prepare_picture(found.path, allow_cutout=scene.look != "photo" and not self.doodle)
+                    if image is not None:
+                        image.info["url"] = found.url
+                        if self.doodle:
+                            image.info["framed"] = True
                 else:
                     logger.info(f"no picture for the section {scene.text!r} passed the check")
-            if image is None:
-                path = gemini_media.illustrate(item.draw or scene.query or scene.text)
-                if path:
-                    image = scenes.prepare_picture(path)
-                    self.credits.append("Illustrations: generated with Google Imagen")
-        if image is None and (item.icon or item.draw):
+        if image is None and self.doodle:
+            image = self._drawing(item.draw or scene.query or scene.text, mascot=item.otter)
+        elif image is None and self._gemini:
+            path = gemini_media.illustrate(item.draw or scene.query or scene.text)
+            if path:
+                image = scenes.prepare_picture(path)
+                self.credits.append("Illustrations: generated with Google Gemini")
+        if image is None and (item.icon or item.draw) and not self.doodle:
             image = self._icon_picture(item)
         self._item_pictures[id(item)] = image
 
@@ -1572,10 +1911,14 @@ class Editor:
                 self._item_pictures[id(item)] = image
 
     def _scene_picture(self, item: scenes.SceneItem):
-        """Picture for a scene element (prepared in advance, or an icon on demand)."""
+        """Picture for a scene element: prepared in advance, or (footage look) an icon on demand.
+
+        The doodle look never puts an icon in place of a picture that failed:
+        the shot shows what it has (a missing animation frame is skipped).
+        """
         if id(item) in self._item_pictures:
             return self._item_pictures[id(item)]
-        return self._icon_picture(item)
+        return None if self.doodle else self._icon_picture(item)
 
     def scene_renderer(self) -> scenes.SceneRenderer:
         if self._scene_renderer is None:
@@ -1752,8 +2095,10 @@ class Editor:
 
         if chip_overlay is not None:
             # The label hides while a scene fills the screen, so nothing drawn
-            # at the top of the scene ends up behind it.
-            covered = [(sc.start, sc.end) for sc in self._scenes.get(index, [])]
+            # at the top of the scene ends up behind it. In the doodle look it
+            # stays over the full-screen pictures and leaves for the opener and
+            # the compositions, whose titles and labels use the top of the frame.
+            covered = [(sc.start, sc.end) for sc in self._scenes.get(index, []) if not (self.doodle and _pill_over(sc))]
             edit.overlays += chip_spans(chip_overlay, covered, duration, chip_w + margin)
 
         if subscribe_window:
@@ -1841,6 +2186,9 @@ class Editor:
         info = self._subscribe
         cx = "(W-w)/2" if not has_character or theme.portrait else f"(W-w)/2+{int(theme.width * 0.08)}"
         y = f"H-h-{theme.px(40)}"
+        if self.doodle and not theme.portrait:
+            # Over the drawings it waits in the top-right corner, away from the pictures' subject and captions.
+            cx, y = f"W-w-{theme.px(30)}", str(theme.px(30))
         if info["mode"] == "still":
             ease = fx.ease_expression(0.35, start)
             return fx.Overlay(
@@ -1851,6 +2199,133 @@ class Editor:
             info["source"], x=cx, y=y, start=start,
             end=start + info.get("duration", SUBSCRIBE_SECONDS), mode=info["mode"],
         )
+
+    # -- review before rendering ---------------------------------------------
+
+    @staticmethod
+    def _review_slots(scene: scenes.Scene) -> List[Tuple[str, scenes.SceneItem]]:
+        """(where it is pinned in the plan, element) for every picture a shot shows."""
+        if scene.type == "opener":
+            return [("opener", scene.center)] if scene.center else []
+        if scene.type == "animation":
+            return [(f"frame:{item.slot}", item) for item in scene.items if item.slot >= 0]
+        if scene.type in scenes.ITEM_SCENES or scene.type in scenes.PART_SCENES:
+            slots = [(f"item:{item.slot}", item) for item in scene.items if item.slot >= 0]
+            return slots + ([("center", scene.center)] if scene.center and scene.type == "diagram" else [])
+        if scene.type in ("clip", "meme"):
+            return []
+        return [("center", scene.center)] if scene.center else []
+
+    @staticmethod
+    def _shot_as_made(spec: dict, scene: scenes.Scene) -> dict:
+        """The plan entry of a shot as it was finally made: an archive picture, a clip or an animation that had to
+        be drawn (or photographed) instead becomes an illustration, so the render does not look for it again."""
+        if scene.type == spec.get("type") or scene.type != "illustration":
+            return spec
+        center = scene.center or scenes.SceneItem()
+        frames = [f.get("draw", "") for f in spec.get("frames") or [] if isinstance(f, dict)]
+        shot = {
+            "type": "illustration", "at": spec.get("at") or center.at,
+            "draw": center.draw or spec.get("draw") or (frames[0] if frames else "") or center.query,
+            "query": center.query or spec.get("query", ""), "text": spec.get("text", ""),
+        }
+        for key in ("camera", "characters", "otter", "motion"):
+            if spec.get(key):
+                shot[key] = spec[key]
+        return shot
+
+    def write_review(self) -> str:
+        """Make every picture of the video and stop before rendering.
+
+        The pictures are copied to review/ and pinned in edit-plan.json (a
+        render with that plan uses them as they are, on the same timing,
+        since the narration is cached), and review.json lists the shots, with
+        what is said meanwhile, for the Studio's review page. Returns the path
+        of review.json.
+        """
+        import shutil
+
+        self._prepare()
+        folder = os.path.join(self.task_dir, "review")
+        os.makedirs(folder, exist_ok=True)
+        assets = os.path.abspath(self.options.assets_dir) if self.options.assets_dir else ""
+        shots = []
+        for index, segment in enumerate(self.segments):
+            entry = self._entry(index)
+            planned = list(entry.get("shots") or [])
+            made: Dict[int, dict] = {}
+            listed: List[dict] = []
+            for scene in self._scenes.get(index, []):
+                if scene.reprise or (scene.type != "opener" and not 0 <= scene.spec < len(planned)):
+                    continue
+                key = "opener" if scene.type == "opener" else f"{scene.spec:02d}"
+                pictures = []
+                for slot, item in self._review_slots(scene):
+                    image = self._item_pictures.get(id(item))
+                    source = image.info.get("source", "") if image is not None else ""
+                    if not source or not os.path.isfile(source) or (assets and os.path.abspath(source).startswith(assets)):
+                        continue  # nothing to review (or the character's own pose)
+                    target = os.path.join(folder, f"s{index:02d}-{key}-{slot.replace(':', '')}{os.path.splitext(source)[1] or '.png'}")
+                    shutil.copyfile(source, target)
+                    pictures.append({"slot": slot, "file": target, "url": image.info.get("url", ""),
+                                     "kind": "archive" if image.info.get("archive") else "picture"})
+                if scene.media and os.path.isfile(scene.media) and scene.type in ("illustration", "clip"):
+                    target = os.path.join(folder, f"s{index:02d}-{key}-video{os.path.splitext(scene.media)[1] or '.mp4'}")
+                    shutil.copyfile(scene.media, target)
+                    pictures.append({"slot": "video", "file": target, "url": "", "kind": "video"})
+                if scene.type == "opener":
+                    place = entry.setdefault("opener", {"query": scene.query or scene.text})
+                    for picture in pictures:
+                        place["image"] = picture["file"]
+                else:
+                    shot = self._shot_as_made(planned[scene.spec], scene)
+                    for picture in pictures:
+                        slot = picture["slot"]
+                        if slot.startswith(("frame:", "item:")):
+                            kind, position = slot.split(":")
+                            parts = shot.get("frames" if kind == "frame" else ("items" if "items" in shot else
+                                             llm_part_key(shot.get("type", ""))))
+                            if isinstance(parts, list) and int(position) < len(parts) and isinstance(parts[int(position)], dict):
+                                parts[int(position)]["image"] = picture["file"]
+                        elif slot == "center" and isinstance(shot.get("center"), dict):
+                            shot["center"]["image"] = picture["file"]  # the hub of a diagram
+                        else:
+                            shot["video" if slot == "video" else "image"] = picture["file"]
+                    made[scene.spec] = shot
+                center = scene.center or scenes.SceneItem()
+                anchor = center.at or (scene.items[0].at if scene.items else "")
+                if scene.type == "opener":
+                    said = re.split(r"(?<=[.!?…])\s+", segment.text.strip())[0]
+                else:
+                    said = sentence_at(segment.text, anchor) if anchor else ""
+                listed.append({
+                    "id": f"{index}-{key}", "segment": index, "shot": -1 if scene.type == "opener" else scene.spec,
+                    "chapter": segment.chapter, "type": scene.type,
+                    "planned": planned[scene.spec].get("type", "") if scene.type != "opener" else "opener",
+                    "start": round(scene.start, 2), "end": round(scene.end, 2), "said": said,
+                    "describe": center.draw or " / ".join(i.draw for i in scene.items if i.draw) or scene.query or center.query,
+                    "query": scene.query or center.query, "caption": scene.text, "pictures": pictures,
+                })
+            if self.doodle and planned:
+                # The render shows exactly what was reviewed: shots without a picture are left out of the plan.
+                order = sorted(made)
+                entry["shots"] = [made[position] for position in order]
+                for shot in listed:
+                    if shot["shot"] >= 0:
+                        shot["shot"] = order.index(shot["shot"])
+            shots += listed
+        self._save_plan()
+        plan_file = os.path.join(self.task_dir, "edit-plan.json")
+        reviewed = os.path.join(self.task_dir, REVIEW_PLAN_FILE)
+        shutil.copyfile(plan_file, reviewed)  # the plan as reviewed: the review's decisions always start from it
+        path = os.path.join(self.task_dir, REVIEW_FILE)
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump({"version": 1, "plan_file": plan_file, "reviewed_plan": reviewed,
+                       "report": self.report(), "warnings": list(dict.fromkeys(self.warnings)), "shots": shots},
+                      fp, ensure_ascii=False, indent=2)
+            fp.write("\n")
+        logger.success(f"review ready: {len(shots)} shots, {sum(len(s['pictures']) for s in shots)} pictures ({path})")
+        return path
 
     def report(self) -> List[str]:
         """What the editor did, for render-report.txt: shots by type and what happened to the pictures."""
@@ -1868,6 +2343,11 @@ class Editor:
                 f"Drawings: {stats['drawn']} drawn, {self._failed_drawings} failed, {stats['rejected']} redrawn after "
                 f"Gemini's check, {self._drawings} of the budget of {self.options.max_drawings} used"
                 + (f", {stats['budget']} not drawn because the budget ran out" if stats["budget"] else "")
+            )
+            lines.append(
+                f"Real history: {stats['archive']} archive pictures, {stats['archive_drawn']} drawn because no authentic "
+                f"picture passed the check; {stats['sheets']} character sheets; {stats['videos']} AI videos; "
+                f"{stats['pinned']} pictures kept from the review; {stats['repeats']} repeated shots left out"
             )
             lines.append(
                 f"Stand-ins: {stats['real']} real pictures, {stats['photo']} photos instead of drawings, {stats['otter']} "

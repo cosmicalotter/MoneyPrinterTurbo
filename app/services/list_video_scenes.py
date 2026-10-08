@@ -36,6 +36,7 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from loguru import logger
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from app.services import list_video_fx as fx
@@ -46,7 +47,7 @@ SCENE_TYPES = (
     "statement", "stat", "sequence", "compare", "diagram", "figure", "zoom", "story",
     "steps", "bars", "grid", "formula", "timeline", "gauge", "question",
     "definition", "equation", "annotate", "chain", "branch",
-    "single", "speech", "illustration", "clip", "meme", "animation",
+    "single", "speech", "illustration", "clip", "meme", "animation", "archive",
 )
 # Scenes whose elements are anchored one by one to the narration.
 ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "formula", "timeline", "chain", "branch")
@@ -54,17 +55,17 @@ ITEM_SCENES = ("sequence", "compare", "diagram", "story", "steps", "bars", "form
 PART_SCENES = ("equation", "annotate", "speech")
 PART_KEYS = {"equation": "terms", "annotate": "labels", "speech": "items"}
 # Scenes rendered as a full-frame video clip (a slow zoom) instead of layers.
-CLIP_SCENES = ("figure", "zoom", "illustration", "clip", "meme", "animation")
+CLIP_SCENES = ("figure", "zoom", "illustration", "clip", "meme", "animation", "archive")
 # Shots that cover the whole frame: the shot before them stays underneath while they fade in.
 FULL_FRAME_SHOTS = CLIP_SCENES
-CROSSFADE_SECONDS = 0.3
+CROSSFADE_SECONDS = 0.4
 # Shots that are one picture (understood at a glance); the others are compositions to read.
-PICTURE_SHOTS = ("illustration", "animation", "clip", "meme", "figure", "zoom")
-COMPOSITION_SECONDS = 4.0  # a composition stays at least this long, so it can be followed
-MAX_PUSH_SECONDS = 2.0  # the shot after a composition may wait this long for it
-ANIMATION_FRAME_SECONDS = 1.0  # an animation shows a new drawing about this often
-ANIMATION_MIN_FRAME = 0.7
-ANIMATION_FADE = 0.18
+PICTURE_SHOTS = ("illustration", "animation", "clip", "meme", "figure", "zoom", "archive")
+COMPOSITION_SECONDS = 5.0  # a composition stays at least this long, so it can be followed
+MAX_PUSH_SECONDS = 2.5  # the shot after a composition may wait this long for it
+ANIMATION_FRAME_SECONDS = 1.7  # an animation shows a new drawing about this often
+ANIMATION_MIN_FRAME = 1.2
+ANIMATION_FADE = 0.3
 SCENE_MARKS = ("cross", "check")
 SLIDE_SECONDS = 0.35
 MAX_SCENE_SECONDS = 12.0
@@ -110,6 +111,11 @@ class SceneItem:
     point: Optional[Tuple[float, float]] = None  # annotate: where the part is (0-1, 0-1 of the picture)
     otter: bool = False  # draw the channel's otter in this picture
     pose: str = ""  # use one of the host's own poses as the picture
+    characters: List[str] = field(default_factory=list)  # recurring characters drawn from their sheets
+    motion: str = ""  # a gentle movement that an AI video could bring to the picture
+    image: str = ""  # a picture file pinned in a review (used as it is)
+    avoid: List[str] = field(default_factory=list)  # web pictures a review turned down (never chosen again)
+    slot: int = -1  # its position among the plan's items or frames of its shot
 
 
 @dataclass
@@ -149,9 +155,12 @@ class Scene:
     overlap: float = 0.0  # stays this long under the next shot while that one fades in
     linger: float = 0.0  # fades out this long over the start of the next shot (drawn on the canvas)
     reprise: bool = False  # the shot before a reaction, shown again after it (same picture)
+    spec: int = -1  # the position of the shot in its segment's plan (to pin its pictures in a review)
 
 
-OPENER_SECONDS = 3.2  # how long a section opener holds the screen
+OPENER_SECONDS = 3.6  # how long a section opener holds the screen (its name is said meanwhile)
+# The colour cards that open the sections of the doodle look, one colour per section in turn.
+SECTION_COLORS = ((42, 157, 143), (69, 123, 157), (231, 111, 81), (110, 88, 170), (60, 140, 90), (205, 128, 40))
 CAMERA_MOVES = ("in", "out", "left", "right")
 
 
@@ -172,6 +181,7 @@ def opener_scene(
     query_local = str(spec.get("query_local") or "").strip() or (title if not query else "")
     center = SceneItem(
         label=title, icon=str(spec.get("icon") or ""), draw=str(spec.get("draw") or ""), query=query or title,
+        image=str(spec.get("image") or ""),
     )
     return Scene(
         type="opener", start=0.0, end=end, text=title, center=center, enter=False, number=number,
@@ -205,6 +215,10 @@ def _item(data: dict) -> SceneItem:
         link=str(data.get("link") or ""),
         otter=bool(data.get("otter")),
         pose=str(data.get("pose") or ""),
+        characters=[str(c) for c in data.get("characters") or [] if c][:4] if isinstance(data.get("characters"), list) else [],
+        motion=str(data.get("motion") or ""),
+        image=str(data.get("image") or ""),
+        avoid=[str(u) for u in data.get("avoid") or [] if u][:20] if isinstance(data.get("avoid"), list) else [],
     )
 
 
@@ -253,14 +267,16 @@ def _scene_from(spec: dict, kind: str, start: float, end: float, items: List[Sce
         scene.center = SceneItem(label=str(spec.get("name") or spec.get("label") or ""))
     elif kind == "annotate":
         scene.center = SceneItem(query=scene.query, at=str(spec.get("at") or ""))
-    elif kind in ("single", "illustration", "clip", "meme", "animation"):
+    elif kind in ("single", "illustration", "clip", "meme", "animation", "archive"):
         item = spec.get("item") if isinstance(spec.get("item"), dict) else spec
         scene.center = _item(dict(item, at=spec.get("at") or ""))
-        if kind in ("illustration", "animation"):
+        if kind in ("illustration", "animation", "archive"):
             scene.camera = str(spec.get("camera") or "") if spec.get("camera") in CAMERA_MOVES else ""
             scene.follows = bool(spec.get("continue"))
         elif kind == "clip":
             scene.frame = "full" if spec.get("frame") == "full" else "card"
+        if kind in ("illustration", "clip"):
+            scene.media = str(spec.get("video") or "")  # a video kept in a review (an AI shot or a stock clip)
         elif kind == "meme":
             scene.mood = str(spec.get("mood") or "")
             scene.text = str(spec.get("text") or "")
@@ -296,9 +312,13 @@ def _spec_times(
         time = locate(spec.get("at", ""))
         if time is None:
             return None
-        for data in spec.get("frames") or []:
+        for position, data in enumerate(spec.get("frames") or []):
             if isinstance(data, dict) and data.get("draw"):
-                item = _item(dict(data, otter=data.get("otter", spec.get("otter")), query=data.get("query") or spec.get("query")))
+                item = _item(dict(
+                    data, otter=data.get("otter", spec.get("otter")), query=data.get("query") or spec.get("query"),
+                    characters=data.get("characters") or spec.get("characters") or [],
+                ))
+                item.slot = position
                 said = locate(item.at) if item.at else None
                 item.time = said if said is not None else -1.0
                 items.append(item)
@@ -311,10 +331,11 @@ def _spec_times(
         if kind in PART_SCENES:
             # Each part appears when it is explained, or after the previous one.
             previous = time + PART_FIRST[kind] - PART_STEP
-            for data in spec.get(PART_KEYS[kind]) or []:
+            for position, data in enumerate(spec.get(PART_KEYS[kind]) or []):
                 if not isinstance(data, dict):
                     continue
                 item = _item(data)
+                item.slot = position
                 said = locate(item.at) if item.at else None
                 item.time = max(previous + PART_STEP, said if said is not None and said < previous + 4.0 else 0.0)
                 previous = item.time
@@ -324,10 +345,11 @@ def _spec_times(
     source = list(spec.get("items") or spec.get("frames") or [])
     if kind == "formula" and isinstance(spec.get("result"), dict):
         source.append(dict(spec["result"], role="result"))
-    for data in source:
+    for position, data in enumerate(source):
         if not isinstance(data, dict):
             continue
         item = _item(data)
+        item.slot = position
         time = locate(item.at)
         if time is not None:
             item.time = time
@@ -344,7 +366,7 @@ def _spec_times(
     return spaced, [i.time for i in spaced]
 
 
-MIN_SHOT_SECONDS = 2.0
+MIN_SHOT_SECONDS = 3.0  # calm: no picture stays less than this
 MEME_SECONDS = 2.4  # a reaction cut-in lasts this long; the shot before it comes back after
 
 
@@ -359,7 +381,7 @@ def time_shots(
     are dropped.
     """
     placed = []
-    for spec in specs:
+    for position, spec in enumerate(specs):
         kind = spec.get("type")
         if kind not in SCENE_TYPES:
             continue
@@ -367,7 +389,7 @@ def time_shots(
         if found is None:
             continue
         items, times = found
-        placed.append((max(start, min(times) - 0.15), spec, kind, items))
+        placed.append((max(start, min(times) - 0.15), dict(spec, _position=position), kind, items))
     placed.sort(key=lambda entry: entry[0])
     kept = []
     for at, spec, kind, items in placed:
@@ -404,11 +426,12 @@ def time_shots(
             # The screen is never left empty waiting for the first element.
             visible[0].time = begin + 0.12
         scene = _scene_from(spec, kind, begin, end, visible)
+        scene.spec = int(spec.get("_position", -1))
         scene.exit = False
         previous = shots[-1] if shots else None
         if kind == "meme" and end - begin > MEME_SECONDS + 1.0:
             scene.end = begin + MEME_SECONDS
-            if previous is not None and previous.type in ("illustration", "single") and not previous.reprise:
+            if previous is not None and previous.type in ("illustration", "single", "archive") and not previous.reprise:
                 # (an animation is not repeated: the reaction simply lasts until the next shot)
                 shots.append(scene)
                 # Back to the picture the reaction interrupted (the very same drawing).
@@ -602,7 +625,7 @@ def prepare_picture(path: str, allow_cutout: bool = True, trust_alpha: bool = Fa
 
     Pictures that cannot be cut out cleanly (photos, dark or busy backdrops)
     come back whole and marked ``info["framed"]``, so scenes show them as a
-    framed card instead of a shredded sticker.
+    framed card instead of a shredded sticker. ``info["source"]`` is the file.
     """
     try:
         with Image.open(path) as source:
@@ -612,15 +635,18 @@ def prepare_picture(path: str, allow_cutout: bool = True, trust_alpha: bool = Fa
     if trust_alpha and fx.has_transparency(image):
         # Icons are drawn with their own transparency; use them as they are.
         bbox = image.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
-        return image.crop(bbox) if bbox else image
-    cutout = fx.cutout_or_none(image, allow_cutout)
-    if cutout is None:
-        photo = Image.new("RGBA", image.size, (255, 255, 255, 255))
-        photo.alpha_composite(image)
-        photo.info["framed"] = True
-        return photo
-    bbox = cutout.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
-    return cutout.crop(bbox) if bbox else cutout
+        picture = image.crop(bbox) if bbox else image
+    else:
+        cutout = fx.cutout_or_none(image, allow_cutout)
+        if cutout is None:
+            picture = Image.new("RGBA", image.size, (255, 255, 255, 255))
+            picture.alpha_composite(image)
+            picture.info["framed"] = True
+        else:
+            bbox = cutout.getchannel("A").point(lambda a: 255 if a > 24 else 0).getbbox()
+            picture = cutout.crop(bbox) if bbox else cutout
+    picture.info["source"] = path
+    return picture
 
 
 def framed_card(image: Image.Image, border: int, radius: int) -> Image.Image:
@@ -1073,7 +1099,7 @@ VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v", ".gif")
 def video_clip(
     source: str, output: str, frames: int, size: Tuple[int, int], background: Optional[Image.Image] = None,
     box: Optional[Tuple[int, int, int, int]] = None, cover: Optional[Image.Image] = None, contain: bool = False,
-    skip: float = 0.0,
+    skip: float = 0.0, hold: bool = False, slow: float = 1.0,
 ) -> str:
     """A full-frame video of exactly ``frames`` frames playing ``source`` (looped when short).
 
@@ -1081,7 +1107,8 @@ def video_clip(
     ``background`` with rounded corners, and ``cover`` (a full-frame picture
     with a transparent window, such as an ink frame) goes on top. Without it
     the video fills the frame, cropped or, with ``contain``, whole over a
-    blurred copy of itself.
+    blurred copy of itself. With ``hold`` the video plays once, ``slow`` times
+    slower, and then stays on its last frame (an AI shot is never looped).
     """
     import subprocess
 
@@ -1089,9 +1116,13 @@ def video_clip(
     stem = output.rsplit(".", 1)[0]
     frames = max(2, frames)
     gif = source.lower().endswith(".gif")
-    looping = ["-ignore_loop", "0"] if gif else ["-stream_loop", "-1"]
+    looping = [] if hold else ["-ignore_loop", "0"] if gif else ["-stream_loop", "-1"]
     inputs = [*looping, "-ss", f"{max(0.0, skip):.2f}", "-i", source] if skip and not gif else [*looping, "-i", source]
     grade = "eq=saturation=0.92:contrast=1.03"
+    slower = ""
+    if hold:
+        slower = f"setpts={max(1.0, slow):.3f}*PTS,"
+        grade = f"tpad=stop_mode=clone:stop_duration={frames / FPS + 1:.2f}"
     filters = []
     if box is not None:
         x, y, w, h = box
@@ -1126,7 +1157,8 @@ def video_clip(
         )
     else:
         filters.append(
-            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={FPS},{grade},format=yuv420p[out]"
+            f"[0:v]{slower}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={FPS},{grade},"
+            "format=yuv420p[out]"
         )
     command = [
         utils.get_ffmpeg_binary(), "-v", "error", "-y", *inputs, "-filter_complex", ";".join(filters),
@@ -1226,10 +1258,60 @@ def fit_inside(image: Image.Image, box: int, most: float = 2.5) -> Image.Image:
     return image.resize(size, Image.LANCZOS) if size != image.size else image
 
 
+def flatten(image: Image.Image, color: Tuple[int, int, int] = WHITE) -> Image.Image:
+    """``image`` without transparency: see-through parts become ``color`` (never black corners)."""
+    if image.mode not in ("RGBA", "LA", "P"):
+        return image.convert("RGB")
+    rgba = image.convert("RGBA")
+    canvas = Image.new("RGB", rgba.size, color)
+    canvas.paste(rgba, mask=rgba.getchannel("A"))
+    return canvas
+
+
 def fit_cover(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
     from PIL import ImageOps
 
-    return ImageOps.fit(image.convert("RGB"), size, Image.LANCZOS)
+    return ImageOps.fit(flatten(image), size, Image.LANCZOS)
+
+
+def contain_over_blur(image: Image.Image, size: Tuple[int, int], darken: int = 80) -> Image.Image:
+    """``image`` whole in a frame of ``size``, over a blurred, darker copy of itself (how documentaries show a
+    portrait or a page that is not 16:9)."""
+    width, height = size
+    picture = flatten(image)
+    back = fit_cover(picture, size).filter(ImageFilter.GaussianBlur(max(8, width // 60))).convert("RGBA")
+    back.alpha_composite(Image.new("RGBA", size, (0, 0, 0, darken)))
+    scale = min(width / picture.width, height / picture.height)
+    shown = picture.resize((max(1, int(picture.width * scale)), max(1, int(picture.height * scale))), Image.LANCZOS)
+    back.paste(shown, ((width - shown.width) // 2, (height - shown.height) // 2))
+    return back.convert("RGB")
+
+
+COVER_ASPECT_SLACK = 0.22  # a picture this much wider or narrower than the frame is still cropped to fill it
+
+
+def fills_frame(image: Image.Image, size: Tuple[int, int]) -> bool:
+    """True when cropping ``image`` to the frame loses little (its shape is close to the frame's)."""
+    ratio = (image.width / max(1, image.height)) / (size[0] / max(1, size[1]))
+    return 1 - COVER_ASPECT_SLACK <= ratio <= 1 + COVER_ASPECT_SLACK
+
+
+_FORMULA_SIGNS = (
+    (r"\*\*\s*2\b|\^\s*2\b", "²"), (r"\*\*\s*3\b|\^\s*3\b", "³"), (r"\bsqrt\s*", "√"), (r"\s*\*\s*", " × "),
+    (r"<=", "≤"), (r">=", "≥"), (r"!=", "≠"), (r"\+-", "±"),
+)
+
+
+SUPERSCRIPTS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+_PLAIN_DIGITS = str.maketrans(SUPERSCRIPTS, "0123456789")
+
+
+def pretty_formula(formula: str) -> str:
+    """A formula as it is written on a blackboard: × instead of *, ² instead of ^2, √ instead of sqrt."""
+    text = formula or ""
+    for pattern, sign in _FORMULA_SIGNS:
+        text = re.sub(pattern, sign, text)
+    return " ".join(text.split())
 
 
 # ---------------------------------------------------------------------------
@@ -1892,9 +1974,9 @@ class SceneRenderer:
         theme, W, H = self.theme, self.theme.width, self.theme.height
         appear = scene.start + SLIDE_SECONDS * 0.6
         with_host = self.host_still is not None
-        text_width = int(W * (0.56 if with_host and not theme.portrait else 0.86))
+        text_width = int(W * (0.5 if with_host and not theme.portrait else 0.86))
         text = self.text.render(scene.text.upper() or "?", int(H * 0.11), text_width, max_lines=3)
-        cx = W * (0.62 if with_host and not theme.portrait else 0.5)
+        cx = W * (0.65 if with_host and not theme.portrait else 0.5)
         overlays.append(self._centered(pop_frames(text), folder, "question", cx, H * 0.42, appear + 0.15, scene))
         self._sound(sounds, appear + 0.15, "pop")
         marks = [(-0.36, -0.3, -12), (0.38, -0.26, 14), (-0.3, 0.34, 8), (0.34, 0.36, -10)]
@@ -1906,6 +1988,7 @@ class SceneRenderer:
         if with_host and not theme.portrait:
             height = int(H * 0.8)
             pose = die_cut(self.host_still(scene.expression or "pensando", height), theme.px(6), shadow=False)
+            pose.thumbnail((int(W * 0.36), height), Image.LANCZOS)  # stays left of the question
             frames = pop_frames(pose, frames=10, start_scale=0.55)
             w, h = frames[-1].size
             pad_y = (h - pose.height) / 2
@@ -1925,6 +2008,9 @@ class SceneRenderer:
 
     def _build_opener(self, scene, folder, overlays, sounds) -> None:
         """Section title card: the number, the title and a picture of exactly that topic."""
+        if self.doodle:
+            self._build_section_card(scene, folder, overlays, sounds)
+            return
         theme, W, H = self.theme, self.theme.width, self.theme.height
         item = scene.center or SceneItem()
         image = self.picture(item) if (item.query or item.icon or item.draw) else None
@@ -1959,6 +2045,62 @@ class SceneRenderer:
         if picture is not None:
             when = scene.start + 0.3
             overlays.append(self._centered(pop_frames(picture, start_scale=0.8), folder, "picture", *picture_center, when, scene))
+            self._sound(sounds, when, "pop")
+
+    def _build_section_card(self, scene, folder, overlays, sounds) -> None:
+        """Doodle look: each section opens on its own colour with the photo of its subject (a polaroid, slightly
+        tilted) and its number and name in big outlined letters, while the narrator says the name."""
+        theme, W, H = self.theme, self.theme.width, self.theme.height
+        color = SECTION_COLORS[(max(1, scene.number or 1) - 1) % len(SECTION_COLORS)]
+        card = os.path.join(folder, "card.png")
+        paper((W, H), color, seed=scene.number or 1, vignette=0.0).save(card)
+        overlays.append(fx.Overlay(card, x="0", y="0", start=scene.start, end=scene.end, fade_in=0.2))
+        self._sound(sounds, scene.start, "whoosh")
+        item = scene.center or SceneItem()
+        image = self.picture(item) if (item.query or item.draw or item.image) else None
+        picture = None
+        if image is not None:
+            box = (int(W * 0.86), int(H * 0.44)) if theme.portrait else (int(W * 0.44), int(H * 0.72))
+            if image.info.get("framed"):
+                border = theme.px(16)
+                photo = flatten(image)
+                photo.thumbnail((box[0] - border * 2, box[1] - border * 2), Image.LANCZOS)
+                picture = framed_card(photo, border, theme.px(10))
+            else:
+                drawing = image.copy()
+                drawing.thumbnail(box, Image.LANCZOS)
+                picture = die_cut(drawing, theme.px(8))
+            picture = picture.rotate(-2.5, resample=Image.BICUBIC, expand=True)
+        if theme.portrait:
+            column, middle, title_width = W / 2, H * (0.74 if picture is not None else 0.5), int(W * 0.86)
+            picture_center = (W / 2, H * 0.3)
+        elif picture is not None:
+            column, middle, title_width = W * 0.28, H * 0.5, int(W * 0.46)
+            picture_center = (W * 0.72, H * 0.5)
+        else:
+            column, middle, title_width = W / 2, H * 0.5, int(W * 0.8)
+        size = int(H * (0.11 if picture is not None and not theme.portrait else 0.13 if picture is None else 0.06))
+        parts = []
+        if scene.number:
+            parts.append(("number", self._outlined(f"{scene.number:02d}", int(size * 1.9), int(W * 0.3)), stamp_frames, 0.05))
+        words = (scene.text or item.label).upper().split()
+        lines: List[str] = []
+        for word in words:  # at most three lines, each as wide as the column allows
+            trial = f"{lines[-1]} {word}" if lines else word
+            if lines and self.text.font(size).getlength(trial) <= title_width:
+                lines[-1] = trial
+            else:
+                lines.append(word)
+        for number, line in enumerate(lines[:3]):
+            parts.append((f"title{number}", self._outlined(line, size, title_width), pop_frames, 0.25 + 0.08 * number))
+        gap = theme.px(10)
+        top = middle - (sum(p.height for _, p, _, _ in parts) + gap * (len(parts) - 1)) / 2
+        for name, part, animate, delay in parts:
+            overlays.append(self._centered(animate(part), folder, name, column, top + part.height / 2, scene.start + delay, scene))
+            top += part.height + gap
+        if picture is not None:
+            when = scene.start + 0.35
+            overlays.append(self._centered(pop_frames(picture, start_scale=0.85), folder, "picture", *picture_center, when, scene))
             self._sound(sounds, when, "pop")
 
     # -- definitions and equations ------------------------------------------------------
@@ -2029,46 +2171,62 @@ class SceneRenderer:
     _TERM_COLORS = ((226, 44, 58), TEAL, (205, 128, 18), (112, 76, 196))
 
     def _build_equation(self, scene, folder, overlays, sounds) -> None:
-        """A formula written big, each symbol explained underneath as the narration names it."""
+        """A formula written big, each symbol explained underneath as the narration names it.
+
+        In the doodle look the otter presents it from its own column on the
+        left, so it never covers the formula or its labels.
+        """
         theme, W, H = self.theme, self.theme.width, self.theme.height
         appear = scene.start + SLIDE_SECONDS + 0.05
-        tokens = re.findall(r"[^\W_]+(?:_[^\W_]+)?|[^\w\s]", scene.text) or [scene.text or "?"]
+        formula = pretty_formula(scene.text)
+        tokens = re.findall(f"[{SUPERSCRIPTS}]+|[^\\W_{SUPERSCRIPTS}]+(?:_[^\\W_]+)?|[^\\w\\s]", formula) or [formula or "?"]
         palette = (self.accent_text,) + tuple(readable(c, self.canvas_color) for c in self._TERM_COLORS[1:])
         colors = {}
         for number, term in enumerate(t for t in scene.items if t.symbol):
             colors.setdefault(term.symbol, palette[number % len(palette)])
+        presenter = self.doodle and self.host_still is not None and not theme.portrait
+        left = W * 0.22 if presenter else 0.0  # the otter's column
+        area = W - left - W * 0.02
+        middle = left + area / 2
         size = int(H * (0.24 if not theme.portrait else 0.12))
+        raised = [bool(re.fullmatch(f"[{SUPERSCRIPTS}]+", t)) for t in tokens]  # exponents, small and high
         while True:
-            images = [self.text.render(t, size, W, color=colors.get(t, INK), max_lines=1) for t in tokens]
+            # An exponent is written as a small, raised ordinary digit (a superscript glyph would be tiny).
+            images = [self.text.render(t.translate(_PLAIN_DIGITS) if up else t, int(size * (0.5 if up else 1)), W,
+                                       color=colors.get(t, INK), max_lines=1) for t, up in zip(tokens, raised)]
             gap = int(size * 0.18)
-            total = sum(i.width for i in images) + gap * (len(images) - 1)
-            if total <= W * 0.86 or size < 30:
+            gaps = [0 if up else gap for up in raised[1:]]  # an exponent sits right against its base
+            total = sum(i.width for i in images) + sum(gaps)
+            if total <= area * 0.9 or size < 30:
                 break
             size = int(size * 0.88)
         has_terms = any(t.symbol for t in scene.items)
         formula_y = H * (0.42 if has_terms else 0.5)
-        x = (W - total) / 2
+        x = middle - total / 2
         centers = []
         for number, image in enumerate(images):
+            if number:
+                x += gaps[number - 1]
             centers.append(x + image.width / 2)
-            overlays.append(self._centered(pop_frames(image, frames=7), folder, f"token{number}", centers[-1], formula_y, appear + 0.08 * number, scene))
-            x += image.width + gap
+            y = formula_y - size * 0.3 if raised[number] else formula_y
+            overlays.append(self._centered(pop_frames(image, frames=7), folder, f"token{number}", centers[-1], y, appear + 0.08 * number, scene))
+            x += image.width
         self._sound(sounds, appear, "pop")
         name = scene.center.label if scene.center else ""
         if name:
-            label = self.text.render(name.upper(), int(H * 0.075), int(W * 0.8), max_lines=1)
-            overlays.append(self._centered(pop_frames(label), folder, "name", W / 2, H * 0.13, appear + 0.2, scene))
+            label = self.text.render(name.upper(), int(H * 0.075), int(area * 0.9), max_lines=1)
+            overlays.append(self._centered(pop_frames(label), folder, "name", middle, H * 0.13, appear + 0.2, scene))
         formula_bottom = formula_y + max(i.height for i in images) / 2
         used = set()
         symbols = [i for i, t in enumerate(tokens) if t in colors]
-        spacing = min((b - a for a, b in zip([centers[i] for i in symbols], [centers[i] for i in symbols][1:])), default=W * 0.4)
+        spacing = min((b - a for a, b in zip([centers[i] for i in symbols], [centers[i] for i in symbols][1:])), default=area * 0.4)
         for number, term in enumerate(scene.items[:4]):
             index = next((i for i, t in enumerate(tokens) if t == term.symbol and i not in used), None)
             if index is None or not (term.label or term.unit):
                 continue
             used.add(index)
             color = colors.get(term.symbol, INK)
-            width = int(min(W * 0.3, spacing * 0.96))
+            width = int(min(area * 0.34, spacing * 0.96))
             lines = [self.text.render(term.label.upper(), int(H * (0.068 if not theme.portrait else 0.034)), width, color=color)] if term.label else []
             if term.unit:
                 lines.append(self.text.render(term.unit, int(H * (0.056 if not theme.portrait else 0.028)), width))
@@ -2077,25 +2235,26 @@ class SceneRenderer:
             for line in lines:
                 caption.alpha_composite(line, ((caption.width - line.width) // 2, y))
                 y += line.height + theme.px(6)
-            cx = fx.clamp(centers[index], caption.width / 2 + W * 0.02, W * 0.98 - caption.width / 2)
+            cx = fx.clamp(centers[index], left + caption.width / 2 + W * 0.01, W * 0.98 - caption.width / 2)
             caption_y = formula_bottom + H * 0.14 + caption.height / 2
             overlays.append(self._centered(pop_frames(caption), folder, f"term{number}", cx, caption_y, term.time, scene))
-            frames, (left, top) = arrow_frames(
+            frames, (arrow_left, top) = arrow_frames(
                 (cx, caption_y - caption.height / 2 - theme.px(8)), (centers[index], formula_bottom + theme.px(10)), theme.px(5), frames=7, bend=0.0
             )
-            overlays.append(self._frames(frames, folder, f"pointer{number}", left, top, term.time + 0.1, scene))
+            overlays.append(self._frames(frames, folder, f"pointer{number}", arrow_left, top, term.time + 0.1, scene))
             self._sound(sounds, term.time, "pop")
         if scene.example:
             when = max([t.time for t in scene.items] + [appear]) + 1.0
-            example = self._pill(scene.example, int(H * 0.065), int(W * 0.8), border=theme.accent)
-            overlays.append(self._centered(stamp_frames(example), folder, "example", W / 2, H * 0.88, when, scene))
+            example = self._pill(pretty_formula(scene.example), int(H * 0.065), int(area * 0.9), border=theme.accent)
+            overlays.append(self._centered(stamp_frames(example), folder, "example", middle, H * 0.88, when, scene))
             self._sound(sounds, when, "stamp")
-        if self.doodle and self.host_still is not None and not theme.portrait:
-            # Never a formula alone: the otter presents it from the corner.
-            pose = die_cut(self.host_still("senalando", int(H * 0.36)), theme.px(5), shadow=False)
+        if presenter:
+            # Never a formula alone: the otter presents it from its column.
+            pose = die_cut(self.host_still("senalando", int(H * 0.4)), theme.px(5), shadow=False)
+            pose.thumbnail((int(left - W * 0.01), int(H * 0.5)), Image.LANCZOS)
             frames = pop_frames(pose, frames=8, start_scale=0.6)
             w, h = frames[-1].size
-            overlays.append(self._frames(frames, folder, "host", W * 0.005, H - h + (h - pose.height) / 2 + pose.height * 0.1, appear + 0.3, scene))
+            overlays.append(self._frames(frames, folder, "host", (left - w) / 2, H - h + (h - pose.height) / 2 + pose.height * 0.06, appear + 0.3, scene))
 
     # -- annotated picture ------------------------------------------------------------------
 
@@ -2333,12 +2492,50 @@ class SceneRenderer:
         self._sound(sounds, when, "stamp")
 
     def _build_illustration(self, scene, folder, overlays, sounds) -> None:
-        """A whole illustrated scene filling the screen, the camera slowly moving, with an optional big caption."""
+        """A whole illustrated scene filling the screen, the camera slowly moving, with an optional big caption.
+
+        An illustration brought to life by an AI video (``scene.media``) plays
+        that video once, a little slower when the shot is longer, and stays
+        on its last frame.
+        """
+        if scene.media:
+            W, H = self.theme.width, self.theme.height
+            length = fx.media_duration(utils.get_ffmpeg_binary(), scene.media) or 4.0
+            slow = min(1.4, max(1.0, (scene.end - scene.start) / max(0.5, length)))
+            output = os.path.join(folder, "video.mp4")
+            try:
+                video_clip(scene.media, output, self._clip_frames(scene), (W, H), hold=True, slow=slow)
+                overlays.append(fx.Overlay(output, x="0", y="0", start=scene.start, end=scene.end, mode="media"))
+                self._story_caption(scene, folder, overlays, sounds)
+                return
+            except RuntimeError as exc:
+                scene.media = ""  # the drawing itself, under a camera move
+                logger.warning(f"the AI video could not be used: {exc}")
         image = self.picture(scene.center or SceneItem())
         if image is None:
             raise ValueError("the illustration was not drawn")
         overlays.append(self._clip(scene, image, folder, camera_path(self._camera(scene)), trim=True))
         self._story_caption(scene, folder, overlays, sounds)
+
+    def _build_archive(self, scene, folder, overlays, sounds) -> None:
+        """A real historical picture filling the screen under a slow camera move, with a small museum-style caption.
+
+        A picture close to the frame's shape is cropped to fill it; a portrait
+        or a page is shown whole over a blurred, darker copy of itself.
+        """
+        W, H = self.theme.width, self.theme.height
+        image = self.picture(scene.center or SceneItem())
+        if image is None:
+            raise ValueError("the archive picture is missing")
+        size = (W, H)
+        canvas = fit_cover(image, size) if fills_frame(image, size) else contain_over_blur(image, size)
+        overlays.append(self._clip(scene, canvas, folder, camera_path(self._camera(scene))))
+        if scene.text:
+            label = self._pill(scene.text, int(H * (0.05 if not self.theme.portrait else 0.026)), int(W * 0.6))
+            when = scene.start + 0.6
+            margin = self.theme.px(36)
+            overlays.append(self._frames(pop_frames(label, frames=8, start_scale=0.85), folder, "caption", margin,
+                                         H - margin - label.height, when, scene))
 
     def _build_animation(self, scene, folder, overlays, sounds) -> None:
         """A short animation: a few drawn frames of one action, about a second each, dissolving into each other

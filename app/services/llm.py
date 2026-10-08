@@ -960,11 +960,37 @@ MIN_LIST_WORDS_PER_ITEM = 30
 MAX_LIST_WORDS_PER_ITEM = 400
 
 
+PERSONAS = {
+    "otter": (
+        "The narrator is the channel's mascot, a curious, friendly otter with round glasses; it speaks in the first "
+        "person and may make ONE light, self-aware joke about being an otter (never more)."
+    ),
+}
+
+
+def _intro_rule(words: int, persona: str = "") -> str:
+    """The opening: a hook, then the topic said out loud, so the viewer knows at once what the video is about."""
+    joke = (
+        ' (for example: "That is why today we are going to talk about the greatest scientists in human history... '
+        'well, even though I am an otter.")'
+        if persona == "otter" else
+        ' (for example: "That is why today we are going to talk about the greatest scientists in human history.")'
+    )
+    return (
+        f'"intro": at most {words} words, in two moves. First a hook: open INSIDE a concrete, gripping moment (a precise '
+        "time and place, a person living it, one or two sensory details) or with a surprising, verifiable fact or a question "
+        "the viewer cannot ignore. Then, in one natural sentence, say clearly what the video is about using the idea of the "
+        f"title{joke}, and promise what the viewer will understand by the end. Never greet, never say \"welcome\" or "
+        '"in this video", never start with a definition.'
+    )
+
+
 def build_list_script_prompt(
     video_subject: str,
     item_count: int,
     language: str = "",
     words_per_item: int = DEFAULT_LIST_WORDS_PER_ITEM,
+    persona: str = "",
 ) -> str:
     language_rule = (
         f"write title, intro, names, texts and outro in {language}"
@@ -996,7 +1022,7 @@ exactly {item_count} items, one at a time, each shown with its own picture.
 1. return only a JSON object with the keys shown in the output example; no markdown, no code fences.
 2. {language_rule}; every image_term must be in English.
 3. "title": a catchy video title, at most 70 characters.
-4. "intro": a hook of at most 60 words that drops the viewer into a concrete, gripping situation or a surprising fact (a place, a moment, a person, a question they cannot ignore); do not greet the viewer, say "welcome" or "in this video", and do not start with a definition.
+4. {_intro_rule(80, persona)}{(" " + PERSONAS[persona]) if persona in PERSONAS else ""}
 5. "items": exactly {item_count} objects, ordered to keep curiosity high, with the most surprising item last.
 6. each item "name": at most 5 words.
 7. each item "text": about {words_per_item} words of natural spoken narration, like a friendly science YouTuber who is also a careful teacher talking to a curious friend: scientific but easy to follow.
@@ -1028,6 +1054,7 @@ def build_story_script_prompt(
     item_count: int,
     language: str = "",
     words_per_item: int = DEFAULT_LIST_WORDS_PER_ITEM,
+    persona: str = "",
 ) -> str:
     """A narrative script: one continuous story told in chapters, opened by a gripping situation."""
     language_rule = (
@@ -1040,8 +1067,8 @@ def build_story_script_prompt(
         "intro": "It's 5:30 in the morning. Ana is already wearing her headset...",
         "intro_image_term": "woman with headset in a dark office at dawn",
         "items": [
-            {"name": "The most common job in the world", "text": "Ana is not alone. ...",
-             "image_term": "rows of call centre desks"},
+            {"name": "The call centre", "text": "Ana is not alone. ...",
+             "image_term": "call centre office photo"},
         ],
         "outro": "So the next time a friendly voice answers your call... Would you notice? Tell me in the comments.",
         "outro_image_term": "phone on a desk at night",
@@ -1058,15 +1085,15 @@ should feel they are living it, understand every idea completely and not be able
 1. return only a JSON object with the keys shown in the output example; no markdown, no code fences.
 2. {language_rule}; every image_term must be in English.
 3. "title": a curiosity-driven title of at most 70 characters (for example "What it's really like to...", "Why ... is disappearing", "What would happen if...").
-4. "intro": at most 80 words. Open INSIDE a concrete scene: a precise moment, a place and a person (the viewer as "you", or a named character) living the situation, with one or two sensory details; then a short, intriguing turn that opens a question the video will answer. Never greet, never say "in this video", never start with a definition or a statistic.
+4. {_intro_rule(100, persona)} The hook opens a question the video will answer.{(" " + PERSONAS[persona]) if persona in PERSONAS else ""}
 5. "items": exactly {item_count} chapters that continue the same story in order (cause and consequence, rising stakes), each with:
-   - "name": a chapter title of at most 6 words for the YouTube chapters (it is NOT read aloud);
-   - "text": about {words_per_item} words that flow from the previous chapter (never start by announcing the chapter or its name), develop ONE main idea completely (what happens, how it works and why, with one concrete example, number or character), and end with a line that pulls into the next chapter.
+   - "name": the subject of the chapter in 1 to 4 words, usually the person, place, thing or discovery it is about (for a video about scientists: "Isaac Newton"); it is shown on the chapter's title card with a photo and SAID ALOUD right before the chapter, so it must sound natural on its own;
+   - "text": about {words_per_item} words that flow from the previous chapter (do not repeat the name as the first words: it was just said), develop ONE main idea completely (what happens, how it works and why, with one concrete example, number or character), and end with a line that pulls into the next chapter.
 6. pacing: calm and clear, like a thoughtful narrator. Short sentences, one idea per sentence, many full stops so the voice can pause; finish every idea before starting the next; no lists, no markdown, no emojis, no hype words.
 7. explain like a great teacher: when a technical term appears, say what it means in plain words; when a number appears, make it tangible with a comparison; always say why things happen.
 8. "outro": at most 50 words: answer the question opened in the intro, leave a final thought, and ask one question for the comments.
-9. each "image_term": 3 to 8 English words describing one concrete, drawable picture of that moment, with no text in the picture.
-10. use only accurate, verifiable facts and real numbers; characters may be illustrative but must be presented as typical, not as real people; for health topics never give treatment instructions or dosages.
+9. "intro_image_term" and "outro_image_term": 3 to 8 English words describing one concrete, drawable picture of that moment. Each item's "image_term": an English search for a real photo of the chapter's subject for its title card (a portrait for a person: "Isaac Newton portrait"; a photo for a place or a thing).
+10. use only accurate, verifiable facts and real numbers; invented characters must be presented as typical, not as real people, while real historical people are named and described accurately; for health topics never give treatment instructions or dosages.
 
 ## Output Example:
 {json.dumps(example, ensure_ascii=False)}
@@ -1098,11 +1125,13 @@ def generate_list_script(
     words_per_item: int = DEFAULT_LIST_WORDS_PER_ITEM,
     app_config=None,
     script_format: str = "list",
+    persona: str = "",
 ):
     """Generate an editable ListVideoScript for a list-format video.
 
     ``script_format`` "story" writes one continuous narrative in chapters
     (opened by a gripping situation) instead of an "every X explained" list.
+    ``persona`` "otter" lets the narrator be the channel's otter mascot.
 
     Returns None when the provider fails or keeps returning invalid JSON, so the
     caller can report the failure instead of rendering an empty video.
@@ -1123,6 +1152,7 @@ def generate_list_script(
         item_count=item_count,
         language=language,
         words_per_item=words_per_item,
+        persona=persona,
     )
     logger.info(
         f"generating list script: subject={video_subject}, items={item_count}, "
@@ -1267,7 +1297,8 @@ EDIT_SCENE_TYPES = (
 )
 # Shots of the doodle look: everything above plus drawn compositions, real
 # video clips in a frame and comic reaction cut-ins.
-SHOT_TYPES = EDIT_SCENE_TYPES + ("single", "speech", "illustration", "clip", "meme", "animation")
+SHOT_TYPES = EDIT_SCENE_TYPES + ("single", "speech", "illustration", "clip", "meme", "animation", "archive")
+MAX_SHOT_CHARACTERS = 4
 MAX_ANIMATION_FRAMES = 6
 MAX_SHOTS_PER_SEGMENT = 80
 CAMERA_MOVES = ("in", "out", "left", "right")
@@ -1473,7 +1504,7 @@ def _scene_item(data, needs_anchor: bool = True, lookup: Optional[dict] = None) 
         "at": str(data.get("at") or "").strip(),
         "label": str(data.get("label") or "").strip()[:MAX_SCENE_LABEL_LENGTH],
         "icon": str(data.get("icon") or data.get("emoji") or "").strip()[:40],
-        "draw": str(data.get("draw") or "").strip()[:160],
+        "draw": " ".join(str(data.get("draw") or "").split())[:300],
     }
     if (needs_anchor and not item["at"]) or not (item["label"] or item["icon"] or item["draw"] or data.get("pose")):
         return None
@@ -1493,6 +1524,7 @@ def _scene_item(data, needs_anchor: bool = True, lookup: Optional[dict] = None) 
         item["link"] = link
     if data.get("otter"):
         item["otter"] = True
+    _picture_extras(data, item)
     if lookup is not None:
         pose = lookup.get(str(data.get("pose") or "").strip().lower(), "")
         if pose:
@@ -1501,6 +1533,39 @@ def _scene_item(data, needs_anchor: bool = True, lookup: Optional[dict] = None) 
         if expression:
             item["expression"] = expression
     return item
+
+
+def _slug(text) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")[:40]
+
+
+def _picture_extras(data: dict, out: dict) -> dict:
+    """Keep what a drawn or real picture may carry: the recurring characters it shows ("characters"),
+    a gentle movement for an AI video ("motion") and a picture file pinned in a review ("image")."""
+    if not isinstance(data, dict):
+        return out
+    characters = data.get("characters")
+    if isinstance(characters, str):
+        characters = [characters]
+    if isinstance(characters, list):
+        ids = [c for c in dict.fromkeys(_slug(c) for c in characters if c) if c][:MAX_SHOT_CHARACTERS]
+        if ids:
+            out["characters"] = ids
+    motion = " ".join(str(data.get("motion") or "").split())[:200]
+    if motion:
+        out["motion"] = motion
+    image = str(data.get("image") or "").strip()[:500]
+    if image:
+        out["image"] = image
+    video = str(data.get("video") or "").strip()[:500]
+    if video:
+        out["video"] = video
+    avoid = data.get("avoid")
+    if isinstance(avoid, list):
+        urls = [str(u).strip()[:500] for u in avoid if str(u or "").strip()][:20]
+        if urls:
+            out["avoid"] = urls
+    return out
 
 
 _ITEM_LIMITS = {
@@ -1537,7 +1602,7 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
         for key in ("draw", "query"):
             if _text(entry, key, 160):
                 stat[key] = _text(entry, key, 160)
-        return stat
+        return _picture_extras(entry, stat)
     if kind == "grid":
         value, total = _number(entry.get("value")), _number(entry.get("total") or 10)
         if not anchor or value is None or total is None or not 2 <= total <= 100 or not 0 <= value <= total:
@@ -1561,12 +1626,14 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
     if kind == "animation":
         frames = []
         for data in entry.get("frames") or entry.get("items") or []:
-            draw = _text(data, "draw", 200) if isinstance(data, dict) else " ".join(str(data or "").split())[:200]
+            draw = _text(data, "draw", 300) if isinstance(data, dict) else " ".join(str(data or "").split())[:300]
             if draw:
                 frame = {"draw": draw}
                 said = _text(data, "at", 80) if isinstance(data, dict) else ""
                 if said:
                     frame["at"] = said
+                if isinstance(data, dict) and str(data.get("image") or "").strip():
+                    frame["image"] = str(data["image"]).strip()[:500]
                 frames.append(frame)
         if not anchor or not frames:
             return None
@@ -1575,6 +1642,9 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
             animation["frames"] = frames[:MAX_ANIMATION_FRAMES]
         else:
             animation["draw"] = frames[0]["draw"]
+            if frames[0].get("image"):
+                animation["image"] = frames[0]["image"]
+        _picture_extras({k: v for k, v in entry.items() if k != "image"}, animation)
         if entry.get("otter"):
             animation["otter"] = True
         if entry.get("continue") is True or str(entry.get("continue")).lower() == "true":
@@ -1590,7 +1660,7 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
         item = _scene_item(dict(entry, at=anchor), needs_anchor=True, lookup=lookup)
         if item is None or (kind == "illustration" and not item.get("draw")):
             return None
-        item.update(type=kind, text=_text(entry, "text", 16 if kind == "illustration" else MAX_STATEMENT_LENGTH))
+        item.update(type=kind, text=_text(entry, "text", 24 if kind == "illustration" else MAX_STATEMENT_LENGTH))
         if kind == "illustration":
             if entry.get("continue") is True or str(entry.get("continue")).lower() == "true":
                 item["continue"] = True
@@ -1598,6 +1668,21 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
             if camera in CAMERA_MOVES:
                 item["camera"] = camera
         return item
+    if kind == "archive":
+        query = _text(entry, "query", 120)
+        if not anchor or not query:
+            return None
+        archive = {
+            "type": kind, "at": anchor, "query": query, "query_local": _text(entry, "query_local", 120),
+            "text": _text(entry, "caption", 60) or _text(entry, "text", 60),
+        }
+        draw = _text(entry, "draw", 300)
+        if draw:
+            archive["draw"] = draw
+        camera = str(entry.get("camera") or "").strip().lower()
+        if camera in CAMERA_MOVES:
+            archive["camera"] = camera
+        return _picture_extras(entry, archive)
     if kind == "clip":
         query = _text(entry, "query", 80)
         if not anchor or not query:
@@ -1609,7 +1694,7 @@ def _normalize_scene(entry: dict, lookup: dict, shot: bool = False) -> Optional[
         draw = _text(entry, "draw", 160)
         if draw:
             clip["draw"] = draw
-        return clip
+        return _picture_extras(entry, clip)
     if kind == "meme":
         if not anchor:
             return None
@@ -1735,7 +1820,7 @@ def _normalize_opener(data) -> Optional[dict]:
         opener["icon"] = icon
     if draw:
         opener["draw"] = draw
-    return opener
+    return _picture_extras({k: v for k, v in data.items() if k in ("image", "avoid")}, opener)
 
 
 def _image_beat(beat: dict, anchor: str) -> Optional[dict]:
@@ -1821,150 +1906,309 @@ def normalize_edit_plan(data, segment_count: int, expressions: list) -> list:
     ]
 
 
+# ---------------------------------------------------------------------------
+# The director: a visual bible for the whole video, then the shots, then a review
+# ---------------------------------------------------------------------------
+
+MAX_BIBLE_CHARACTERS = 10
+MAX_ARCHIVE_IDEAS = 6
+
+
+def build_visual_bible_prompt(segments: list, language: str = "", persona: str = "") -> str:
+    """One look at the whole script before any shot is planned: the art direction, the recurring characters
+    (how each looks, and a real portrait to draw them from) and the real historical pictures worth showing."""
+    language_name = language or "the language of the narration"
+    mascot = (
+        "The channel's mascot, an otter with round glasses, a teal sweater and a pencil behind its ear, narrates and "
+        "appears in the human situations; do not list it as a character."
+        if persona == "otter" else ""
+    )
+    example = {
+        "style": "warm candle-lit 17th and 19th century interiors and night skies; muted ochre, teal and deep blue",
+        "characters": [
+            {"id": "newton", "name": "Isaac Newton",
+             "look": "English scholar in his twenties, long wavy brown hair to the shoulders, pale thin face, white linen "
+                     "shirt with a loose collar under a long dark brown coat",
+             "portrait": "Isaac Newton portrait Godfrey Kneller 1689"},
+        ],
+        "sections": [
+            {"index": 2, "archive": [
+                {"query": "Great Plague of London 1665 engraving", "query_local": "gran peste de Londres 1665 grabado",
+                 "caption": "La gran peste de Londres, 1665", "about": "the plague that closed Cambridge"},
+                {"query": "Philosophiae Naturalis Principia Mathematica 1687 first edition title page",
+                 "query_local": "Principia Mathematica 1687 portada", "caption": "Principia, 1687",
+                 "about": "the book where he published the law of gravitation"},
+            ]},
+        ],
+    }
+    return f"""
+# Role: Art director of an animated educational YouTube channel
+
+## Goal:
+Before the shots are planned, read the whole narration below and write the visual bible of this video, so every
+picture is consistent and the real history is shown with real pictures.
+
+## Constrains:
+1. return only a JSON object like the example; no markdown.
+2. "style": one sentence of art direction for this video (moods, light, era details, two or three accent colours);
+   it is added to every drawing of the channel's polished 2D cartoon style.
+3. "characters": every real or invented person who appears in more than one moment (at most {MAX_BIBLE_CHARACTERS}):
+   "id" (lowercase, no spaces), "name", "look" (an English description of 20 to 40 words: age, face, hair, clothes and
+   colours of the period, so an illustrator draws them the same way every time) and, for a real historical person,
+   "portrait": an English search for a real, well-known portrait or photograph of them. {mascot}
+4. "sections": for each segment index, "archive": up to {MAX_ARCHIVE_IDEAS} REAL pictures worth showing full screen when
+   that segment is narrated: famous paintings, engravings, historical photographs, manuscripts, title pages, maps,
+   museum objects and real places of exactly what the narration tells (a portrait of the person, a painting of the
+   event, a photograph of the real instrument). Each with "query" (a precise English search for Wikimedia Commons:
+   who or what, the kind of picture, the year or the artist), "query_local" (the same in {language_name}), "caption"
+   (at most 6 words in {language_name}, e.g. a place and a year) and "about" (what it shows, in English).
+   Only things that really were painted, engraved or photographed; never invent a painting.
+5. never add facts that the narration does not state.
+
+## Output Example:
+{json.dumps(example, ensure_ascii=False)}
+
+## Segments:
+{json.dumps(segments, ensure_ascii=False)}
+""".strip()
+
+
+def normalize_visual_bible(data) -> dict:
+    """A valid visual bible: style, characters by id and archive ideas by segment index."""
+    if not isinstance(data, dict):
+        raise ValueError("visual bible is not an object")
+    bible = {"style": " ".join(str(data.get("style") or "").split())[:300], "characters": [], "sections": {}}
+    seen = set()
+    for entry in data.get("characters") or []:
+        if not isinstance(entry, dict):
+            continue
+        key = _slug(entry.get("id") or entry.get("name"))
+        look = " ".join(str(entry.get("look") or "").split())[:400]
+        if not key or not look or key in seen:
+            continue
+        seen.add(key)
+        bible["characters"].append({
+            "id": key, "name": " ".join(str(entry.get("name") or key).split())[:60], "look": look,
+            "portrait": " ".join(str(entry.get("portrait") or "").split())[:120],
+        })
+        if len(bible["characters"]) >= MAX_BIBLE_CHARACTERS:
+            break
+    for entry in data.get("sections") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("index"), int):
+            continue
+        ideas = []
+        for idea in entry.get("archive") or []:
+            if isinstance(idea, dict) and _text(idea, "query", 120):
+                ideas.append({
+                    "query": _text(idea, "query", 120), "query_local": _text(idea, "query_local", 120),
+                    "caption": _text(idea, "caption", 60), "about": _text(idea, "about", 160),
+                })
+        if ideas:
+            bible["sections"][entry["index"]] = ideas[:MAX_ARCHIVE_IDEAS]
+    return bible
+
+
+def generate_visual_bible(segments: list, language: str = "", persona: str = "", app_config=None) -> Optional[dict]:
+    """The visual bible of a video, or None when the model keeps failing."""
+    prompt = build_visual_bible_prompt(segments, language, persona)
+    for i in range(min(_max_retries, 3)):
+        try:
+            response = _generate_response(prompt) if app_config is None else _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                logger.error(f"failed to write the visual bible: {response}")
+                return None
+            bible = normalize_visual_bible(_parse_list_script_response(response))
+            logger.success(
+                f"visual bible written: {len(bible['characters'])} characters, "
+                f"{sum(len(v) for v in bible['sections'].values())} archive pictures"
+            )
+            return bible
+        except Exception as e:
+            logger.warning(f"failed to parse the visual bible: {type(e).__name__}: {e}")
+    return None
+
+
+def bible_for(bible: Optional[dict], indexes) -> dict:
+    """The part of the bible a chunk of segments needs: all characters, its own archive ideas."""
+    if not bible:
+        return {}
+    wanted = set(indexes)
+    return {
+        "style": bible.get("style", ""),
+        "characters": bible.get("characters", []),
+        "archive": {str(k): v for k, v in (bible.get("sections") or {}).items() if k in wanted},
+    }
+
+
 def _storyboard_example(expressions: list, clips: bool = True, memes: bool = False) -> dict:
     shots = [
-        {"type": "animation", "at": "imagine you call your bank", "otter": True, "camera": "in", "text": "",
-         "query": "person on phone at home", "frames": [
-             {"draw": "medium shot of the otter at home on a sofa in the evening, picking up a ringing phone"},
-             {"draw": "the otter holds the phone to its ear and smiles, waiting", "at": "and someone answers"},
-             {"draw": "a small friendly robot appears in a speech bubble coming out of the phone, the otter frowns",
-              "at": "but the voice is a robot"},
+        {"type": "archive", "at": "in the summer of 1665", "query": "Great Plague of London 1665 engraving",
+         "query_local": "gran peste de Londres 1665", "caption": "Londres, 1665", "camera": "in",
+         "draw": "a deserted 17th-century London street at dusk, doors marked with red crosses, carts of the sick"},
+        {"type": "animation", "at": "Newton went back to his farm", "characters": ["newton"], "camera": "right",
+         "query": "Woolsthorpe Manor", "frames": [
+             {"draw": "wide shot: young Newton walks along a country lane towards a small stone farmhouse with an apple "
+                      "orchard, late afternoon light"},
+             {"draw": "medium shot: Newton sits under an apple tree reading a book, the farmhouse behind him",
+              "at": "under an apple tree"},
+             {"draw": "close-up: an apple falls from the branch past Newton's face, he looks up surprised",
+              "at": "an apple fell"},
          ]},
-        {"type": "illustration", "at": "a call center in Manila", "camera": "out", "text": "MANILA",
-         "query": "call center office night",
-         "draw": "wide shot of a huge open-plan call center at night, rows of tiny desks with glowing screens"},
-        {"type": "animation", "at": "every call is answered by a person", "camera": "right", "query": "call center headset",
-         "frames": [
-             {"draw": "close-up of a tired worker's hand putting on a headset at a desk"},
-             {"draw": "the worker talks into the headset, a queue of glowing call icons on the screen"},
-             {"draw": "the queue on the screen keeps growing, the worker rubs its eyes"},
-         ]},
-        {"type": "sequence", "items": [
-            {"at": "no holidays", "label": "holidays", "draw": "a beach umbrella and a deck chair", "query": "beach umbrella",
-             "mark": "cross", "icon": "🏖️"},
-            {"at": "no salary", "label": "salary", "draw": "a pay cheque with coins", "query": "paycheck", "mark": "cross",
-             "icon": "💵"},
-        ]},
-        {"type": "illustration", "at": "the robot never gets tired", "continue": False, "camera": "left",
-         "query": "robot headset", "draw": "a smiling robot with a headset answering ten phones at once, wide awake at 3 a.m."},
+        {"type": "illustration", "at": "the same force that pulls the apple", "characters": ["newton"], "camera": "out",
+         "text": "", "query": "moon orbit earth illustration", "motion": "the moon slowly circles the earth",
+         "draw": "Newton on a hilltop at night points from a falling apple to the full moon, a faint dotted curve joins "
+                 "them, starry sky"},
+        {"type": "equation", "at": "the force grows with the masses", "name": "Ley de gravitación",
+         "formula": "F = G × m1 × m2 / r²", "terms": [{"symbol": "F", "label": "fuerza", "unit": "newtons (N)"},
+                                                     {"symbol": "r", "label": "distancia", "unit": "metros (m)"}]},
+        {"type": "archive", "at": "he published it in 1687", "query": "Principia Mathematica 1687 first edition title page",
+         "query_local": "Principia Mathematica 1687", "caption": "Principia, 1687", "camera": "left",
+         "draw": "an old leather-bound book opened on a desk by candlelight, a quill beside it"},
     ]
     if clips:
-        shots.append({"type": "clip", "at": "thousands of servers humming", "query": "data center servers", "label": "",
-                      "frame": "card", "draw": "rows of blinking servers in a dark data center"})
+        shots.append({"type": "clip", "at": "a storm over the sea", "query": "lightning storm over sea", "label": "",
+                      "frame": "full", "draw": "lightning over a dark sea at night"})
     if memes:
-        shots.append({"type": "meme", "at": "it costs ten cents an hour", "mood": "shock", "text": "TEN CENTS?!",
-                      "draw": "the otter dropping its coffee cup, eyes wide open in shock"})
-    return {"segments": [{"index": 1, "shots": shots}]}
+        shots.append({"type": "meme", "at": "and nobody believed him", "mood": "facepalm", "text": "",
+                      "draw": "the otter with a paw on its face, sighing"})
+    return {"segments": [{"index": 2, "shots": shots}]}
 
 
-def storyboard_shot_target(seconds: float, shot_seconds: float = 3.0) -> int:
+def storyboard_shot_target(seconds: float, shot_seconds: float = 5.0) -> int:
     """How many shots a segment of ``seconds`` needs to change picture every ``shot_seconds``."""
     return max(1, int(round(max(0.0, seconds) / max(1.5, shot_seconds))))
 
 
+COMPOSITION_TYPES = ("stat", "equation", "timeline", "compare", "single", "question", "statement")
+
+
 def build_storyboard_prompt(
     segments: list, expressions: list, language: str = "", reference: Optional[list] = None, openers: bool = True,
-    clips: str = "some", memes: bool = False,
+    clips: str = "some", memes: bool = False, bible: Optional[dict] = None,
 ) -> str:
-    """The director of the doodle look: an animatic of short drawn moments that never stops moving.
+    """The director of the doodle look: a calm animated film of full-screen pictures that follow the narration.
 
-    Segments may carry their spoken length ("seconds") and how many shots
-    they need ("shots"). ``clips`` is how often a real video clip appears
-    ("none", "some", "more"); ``memes`` allows comic reaction cut-ins.
+    Segments may carry their spoken length ("seconds") and how many shots they
+    need ("shots"). ``bible`` is the part of the visual bible these segments
+    use (style, characters and real pictures worth showing). ``clips`` is how
+    often a real video clip appears ("none", "some", "more"); ``memes``
+    allows comic reaction cut-ins.
     """
     language_name = language or "the language of the narration"
     pose_rule = (
-        '"pose": one of ' + json.dumps(expressions, ensure_ascii=False) + " to use the channel's otter in that mood "
-        "exactly as it is drawn (free and always on-model; best for the narrator explaining, reacting or thinking)"
-        if expressions else '"pose": always "" (the channel has no character poses)'
+        '"pose": one of ' + json.dumps(expressions, ensure_ascii=False) + " to show the channel's otter in that mood "
+        "exactly as it is drawn"
+        if expressions else '"pose": always ""'
     )
     opener_rule = (
-        '11. each item opens with a 3-second card (its number and title with one drawing): give items an "opener": '
-        '{"draw": an English description of one drawing strictly about the item TITLE, "icon": one emoji}, and start '
-        "its first shot after its first sentence."
-        if openers else "11. the segments flow into each other like one continuous story: keep the visual thread going across them."
+        "12. each item already opens with a 3-second title card (its number, its name and a photo) while its first "
+        "sentence is said: start its first shot after that sentence, and give items an \"opener\": {\"query\": an English "
+        "search for the most representative real photo or portrait of the item's subject, \"draw\": an illustration "
+        "of it to use if no photo fits}."
+        if openers else "12. the segments flow into each other like one continuous story: keep the visual thread going across them."
     )
     clips = clips if clips in CLIP_AMOUNTS else "some"
-    clip_goal = clip_mix = clip_type = ""
+    clip_type = ""
+    clip_rule = 'never use "clip" (no real video clips in this video).'
     if clips != "none":
-        clip_goal = (
-            " Now and then a short real video clip, in a frame on the drawn background, shows something real "
-            "(a storm, a power plant, a city at night) to give the video texture."
+        clip_rule = (
+            f'a "clip" (a real stock video) about {3 if clips == "some" else 7}% of the shots, only for real places, '
+            "nature, machines and everyday actions that a camera can film today."
         )
-        clip_mix = f", about {5 if clips == 'some' else 10}% \"clip\""
         clip_type = (
-            '\n- {"type": "clip", "at": ..., "query": an English stock-video search of 2 to 4 words for something a camera can '
-            "really film (a thunderstorm at night, a power plant chimney, a city skyline at night, hands plugging in a charger), "
-            '"label": an optional caption of at most 4 words, "frame": "card" (a framed video on the drawn background) or "full" '
-            '(filling the screen), "draw": an illustration to draw instead if no video is found}: a short real video for real '
-            "places, nature, machines and everyday actions; never for abstract ideas, close-ups of faces or anything that needs the mascot."
+            '\n- {"type": "clip", "at": ..., "query": an English stock-video search of 2 to 4 words, "label": "", '
+            '"frame": "full" or "card", "draw": an illustration to use instead if no video is found}.'
         )
-    meme_mix = meme_rule = meme_type = ""
+    meme_rule = meme_type = ""
     if memes:
-        meme_mix = ", and now and then a \"meme\""
         meme_rule = (
-            '12. "meme" shots are comic reaction cut-ins of about two seconds: only on a real punchline, a shocking number '
-            "or an absurd fact, at most one every 40 seconds, never two segments in a row."
+            '13. "meme": a two-second comic reaction, only on a real punchline or an absurd fact, at most one every '
+            "60 seconds."
         )
         meme_type = (
-            '\n- {"type": "meme", "at": ..., "mood": one of ' + json.dumps(list(MEME_MOODS)) + ', "text": a punchy caption of '
-            f'at most 5 words in {language_name} or "", "draw": an English description of the otter\'s exaggerated reaction '
-            '(eyes popping, jaw on the floor, head exploding into confetti)}: a comic reaction to what was just said.'
+            '\n- {"type": "meme", "at": ..., "mood": one of ' + json.dumps(list(MEME_MOODS)) + ', "text": "" or a caption '
+            f'of at most 4 words in {language_name}, "draw": the otter\'s exaggerated reaction}}.'
         )
+    bible_rule = ""
+    if bible:
+        bible_rule = f"""
+## Visual bible of this video (follow it):
+{json.dumps(bible, ensure_ascii=False)}
+- every drawing that shows one of these characters lists its id in "characters" and does not describe its looks
+  again (the illustrator draws it from its character sheet);
+- the "archive" ideas of a segment are real pictures that exist: use them as archive shots when their moment is said.
+"""
     reference_rule = ""
     if reference:
         reference_rule = f"""
 ## Reference storyboard:
-The same video was already drawn in another language. Keep, shot by shot, the same types, drawings ("draw"),
-icons, poses, queries, moods and numbers, so the same drawings and clips are reused; only translate texts and
-labels into {language_name} and pick new "at" anchors from this version's text.
+The same video was already planned in another language. Keep, shot by shot, the same types, drawings, queries,
+characters and numbers, so the same pictures are reused; only translate texts and labels into {language_name} and
+pick new "at" anchors from this version's text.
 {json.dumps(reference, ensure_ascii=False)}
 """
     return f"""
-# Role: Storyboard artist and animator of a calm, professional educational YouTube channel
+# Role: Director of a calm, professional animated documentary for YouTube
 
 ## Goal:
-The video is a short animated film: almost everything on screen is a full-screen cartoon picture drawn by an
-illustrator, and the pictures tell a continuous story that follows the narration, so the viewer always SEES what is
-being said. Most moments are tiny ANIMATIONS: 2 to 4 drawings (usually 3) of the same place and characters, about
-one second each, where one thing changes from drawing to drawing (the otter reaches for the switch -> flips it -> the bulb glows ->
-the room lights up), like the key frames of an animated film. Other moments are single full-screen illustrations with a
-slow camera move. Only now and then, when a comparison, a process or a number is clearer as a diagram, a minimalist
-explainer composition appears on the warm background, built from drawings and real pictures with short hand-lettered
-labels.{clip_goal}
+Plan what is on screen while the narration below is said, like the director of a good documentary: full-screen
+pictures that show EXACTLY what the narrator is saying at that moment and put it in context, one after another at a
+calm pace, so the viewer follows the story without effort. Three kinds of pictures fill the screen:
+- REAL pictures ("archive") for real history and the real world: the portrait of the person who is named, a painting or
+  engraving of the event, a historical photograph, the real instrument in a museum, a manuscript, a map. When the
+  narration tells real history, the real picture is always the first choice;
+- short ANIMATIONS ("animation"): 2 to 4 cartoon drawings of one action in the same place, one after another, about
+  1.5 to 2 seconds each (the moment an atom's core lights up, an apple falling, a scientist discovering something);
+- cartoon ILLUSTRATIONS ("illustration"): one drawn moment of the story with a slow camera move, for what has no real
+  picture (an idea, a mechanism, an invisible process, a scene with the channel's otter).
+Explainer compositions on the coloured background are the exception: only a number, a formula or a date line that is
+much clearer written.
 
 ## Constrains:
 1. return only a JSON object {{"segments": [...]}} with one entry per input segment, in the same order, each with "index" and "shots"; no markdown.
-2. pace: cover EVERY sentence. Each segment gives its spoken length in "seconds" and the shots it needs in "shots": plan about that many (an animation counts as one shot), in narration order, so the picture changes every 2 to 4 seconds; never leave more than 5 seconds without a new drawing.
-3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text (same spelling and accents); the shot (or the frame) appears when they are spoken. The anchors of a segment are all different and follow the order of the text.
-4. mix of shots across the video: about 50% "animation", about 35% "illustration", at most 12% explainer compositions{clip_mix}{meme_mix}. Compositions are the exception: never two in a row, at least 4 seconds each (their elements are named within about 3 seconds of each other), and at most one "statement" or "question" per minute.
-5. the pictures are one continuous animated story:
-   - in an "animation", every frame after the first is redrawn from the previous one, so describe in each later frame ONLY what changes (an action that advances, a light that turns on, an object that moves closer); give a frame its own "at" when it should appear on precise words;
-   - "continue": true on an illustration or an animation draws its first picture from the last picture before it (same place, same characters), to keep a scene going across shots; start fresh for a new place, object or idea;
-   - vary the framing like a film: wide shot, medium shot, close-up of a detail, a cutaway that shows the inside of something (a wire cut open with electrons flowing), a top view, a tiny world at the scale of an atom;
-   - "camera" is the slow camera move over the picture: "in", "out", "left" or "right"; vary it;
-   - "query" is a short English search (2 to 4 words) for a real photo of the same moment, used only if the drawing fails.
-6. never a picture without meaning: every drawing shows exactly what is being said at that moment; an abstract idea becomes a visual metaphor or a situation with the otter (pressure -> the otter pushing a crowd of tiny balls through a pipe).
-7. compositions never show text alone: every element has a "draw" (and a "query" for a real picture of it); labels have at most 4 words in {language_name}, titles at most 7 words, captions on pictures at most 3 words (most pictures need none); they are hand-lettered in capitals.
-8. "draw" is an English description of what is drawn (subject, action, place, mood, and the framing of a scene), concrete and visual, with no text or letters in the drawing and no style words. Each "draw" in the whole video is DIFFERENT.
-9. the channel's mascot is an otter with round glasses, a teal sweater and a pencil behind its ear: it is the protagonist of the human situations of the story (use "otter": true in an animation, illustration or drawing that shows it, or a {pose_rule}).
-10. keep the tone calm and clear; never add facts that the narration does not state.
+2. pace: calm. Each segment gives its spoken length in "seconds" and how many shots it needs in "shots": plan about
+   that many (an animation counts as one shot), in narration order, so the picture changes every 4 to 7 seconds; never
+   two shots less than 4 seconds apart. Cover EVERY sentence with something that shows what it says.
+3. every "at" is 2 to 6 consecutive words copied exactly from that segment's text (same spelling and accents); the shot
+   (or the frame) appears when they are spoken. The anchors of a segment are all different and follow the text's order.
+4. precision first: each picture shows exactly the person, object, place, event or idea being said at that moment, in its
+   real historical context (period, place, clothes, instruments). Never a generic or decorative picture (a character
+   walking on a road while the narration talks about a plague is wrong: show the plague). Never show the same object,
+   person in the same pose or place twice unless the action continues.
+5. mix for history, biography and science: about 30% "archive" when the narration tells real history (less when it
+   does not), about 35% "animation", about 25% "illustration", and at most 10% compositions ("stat", "equation",
+   "timeline", "single", "question", "statement"); {clip_rule} At most ONE "compare" (two things side by side) in the
+   whole video, and only when the narration explicitly contrasts two things; never two compositions in a row.
+6. animations are the jewel of the video: in each frame after the first describe ONLY what changes (the core starts to
+   glow -> it shines brightly -> rays burst out); keep the same framing and place; give a frame its own "at" when it
+   must appear on precise words.
+7. "continue": true on an illustration or an animation draws its first picture from the last drawn picture before it
+   (same place and characters), to keep a scene going.
+8. drawings: "draw" is an English description of 15 to 50 words written for an illustrator: the framing (wide shot,
+   medium shot, close-up, cutaway, top view), the subject, the action, the place and period, the light and mood. Keep
+   it simple and readable: one clear focal point, few objects, no complex machinery in tiny detail, never text,
+   letters, numbers, labels or formulas inside a drawing. "camera": "in", "out", "left" or "right"; vary it.
+9. the channel's mascot (an otter with round glasses and a teal sweater) appears only in a few human situations or
+   reactions ("otter": true, or a {pose_rule}); real people are drawn as themselves.
+10. every picture shot also has "query": a short English search for a real photo of the same moment, used if the
+   drawing fails; an illustration may have "motion": one short English sentence describing a gentle movement that would
+   bring it to life as a 4-second video (the apple slowly falls, the candle flame flickers), or "" when nothing moves.
+11. labels and captions have at most 6 words in {language_name}; most pictures need no caption; never add facts that the
+   narration does not state.
 {opener_rule}
 {meme_rule}
 
 ## Shot types:
-- {{"type": "animation", "at": ..., "otter": false, "continue": false, "camera": "in", "text": "", "query": ..., "frames": [{{"draw": ..., "at": optional}}, 2 to 4 frames, usually 3]}}: a tiny animation of one action, about a second per frame (the main shot type).
-- {{"type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": "", "query": ...}}: one full-screen cartoon picture of the story with a slow camera move; "text" is an optional big caption of at most 3 words, such as a time "05:30", a place or a name.
-- {{"type": "single", "at": ..., "text": title or "", "label": ..., "draw": ..., "query": ..., "icon": ..., "otter": false, "pose": ""}}: one big drawing on the background (with an optional title above it).
-- {{"type": "sequence", "items": [2 to 4 items]}}: things that appear left to right as each is named ("mark": "cross" to cross one out, "check" to tick it).
-- {{"type": "compare", "items": [left, right]}}: two things side by side, named close together.
-- {{"type": "stat", "at": ..., "value": 70, "unit": "%", "label": ..., "chart": "pie" or "number", "draw": ..., "icon": ...}}: a number that counts up next to a drawing, or a pie.
-- {{"type": "bars", "unit": ..., "items": [2 to 5 items with "value"]}}: quantities as bars, each with its drawing and label.
-- {{"type": "steps", "items": [2 to 5 items]}}, {{"type": "chain", "items": [2 to 4 items with "link"]}}, {{"type": "branch", "center": item, "items": [2 to 4]}}: processes, causes and effects.
-- {{"type": "equation", "at": ..., "name": ..., "formula": ..., "terms": [{{"symbol": ..., "label": ..., "unit": ...}}]}}: a formula, only when the narration states one.
-- {{"type": "statement", "at": ..., "text": ..., "expression": ...}} and {{"type": "question", "at": ..., "text": ..., "expression": ...}}: a punchline or a question with the otter (rare).{clip_type}{meme_type}
-   An item is {{"at": ..., "label": ..., "draw": ..., "query": ..., "icon": ..., "otter": false, "pose": ""}}: "draw" is an English description of 4 to 14 words of ONE simple subject for the illustrator (what it is and what it is doing); "query" is a 2 to 4 word English search for a real picture of it; "icon" is one emoji that depicts the thing literally, the very last resort.
-{reference_rule}
+- {{"type": "archive", "at": ..., "query": a precise English search for Wikimedia Commons (who or what, the kind of picture, the year or the artist), "query_local": the same in {language_name}, "caption": a place and year or a name ("Londres, 1665"), "camera": ..., "draw": an illustration of the same moment to use if no real picture fits}}: a real picture filling the screen.
+- {{"type": "animation", "at": ..., "characters": [ids], "otter": false, "continue": false, "camera": ..., "query": ..., "frames": [{{"draw": ..., "at": optional}}, 2 to 4 frames]}}: a short animation of one action.
+- {{"type": "illustration", "at": ..., "draw": ..., "characters": [ids], "otter": false, "continue": false, "camera": ..., "text": "" or a caption of at most 3 words such as "PADUA, 1609", "query": ..., "motion": ...}}: one drawn moment.
+- {{"type": "stat", "at": ..., "value": 6, "unit": "", "label": ..., "chart": "number" or "pie", "draw": a drawing of what is counted, "query": ...}}: a number that counts up next to its drawing.
+- {{"type": "equation", "at": ..., "name": ..., "formula": with ×, /, ² and Greek letters as symbols (never *, ^ or sqrt), "terms": [{{"symbol": ..., "label": ..., "unit": ...}}]}}: only when the narration states a formula.
+- {{"type": "timeline", "items": [2 to 4 items with "date", each with "label", "draw", "query" and "at"]}}: dates in order.
+- {{"type": "single", "at": ..., "text": "" or a title, "label": ..., "draw": a detailed drawing of one object, "query": ...}}: one object studied up close (a sample of polonium, a voltaic pile).
+- {{"type": "compare", "items": [left, right, each {{"at": ..., "label": ..., "draw": ..., "query": ...}}]}}: two things side by side (at most once).
+- {{"type": "question", "at": ..., "text": ..., "expression": ...}}, {{"type": "statement", "at": ..., "text": ..., "expression": ...}}: a big question or punchline with the otter (at most one per segment).{clip_type}{meme_type}
+{bible_rule}{reference_rule}
 ## Output Example:
 {json.dumps(_storyboard_example(expressions, clips != "none", memes), ensure_ascii=False)}
 
@@ -2043,15 +2287,65 @@ def _storyboard_request(prompt: str, count: int, expressions: list, app_config=N
     return None
 
 
+def build_storyboard_review_prompt(
+    segments: list, board: list, language: str = "", bible: Optional[dict] = None, clips: str = "some",
+) -> str:
+    """The film editor's pass over a planned storyboard: it fixes what a viewer would notice before anything is drawn."""
+    language_name = language or "the language of the narration"
+    planned = [
+        {"index": entry.get("index"), "shots": entry.get("shots") or [], **({"opener": entry["opener"]} if entry.get("opener") else {})}
+        for entry in board
+    ]
+    bible_rule = f"\n## Visual bible of this video:\n{json.dumps(bible, ensure_ascii=False)}\n" if bible else ""
+    return f"""
+# Role: Film editor of a calm, professional animated documentary for YouTube
+
+## Goal:
+A director planned the pictures of the narration below. Watch it in your head, sentence by sentence, as a viewer
+would, and return the storyboard corrected, so that every picture shows exactly what is being said, in context, at a
+calm pace that is easy to follow.
+
+## Fix:
+1. a picture that does not show exactly what is said at that moment (a generic, decorative or off-topic picture), or
+   whose real-world context is wrong (period, place, person, instrument): change it so it does;
+2. real history told with a drawing when a real picture exists (a portrait of the person named, a painting or engraving
+   of the event, a historical photograph, the real instrument, the manuscript): turn it into an "archive" shot with a
+   precise "query" (and keep its "draw" as the fallback);
+3. compositions on the coloured background that are not essential: turn them into full-screen "illustration",
+   "animation" or "archive" shots. Keep at most ONE "compare" in the whole video and never two compositions in a row;
+4. repetition: the same object, person pose or place shown twice without the action continuing: replace one;
+5. pace: shots less than 4 seconds apart, or one picture held while the narration moves to something new: merge or add
+   so the picture changes every 4 to 7 seconds;
+6. drawings that ask for text, labels, numbers, formulas or intricate machinery inside the picture: simplify them;
+7. recurring characters of the bible that are described again instead of listed in "characters": list their ids;
+8. anchors ("at") that are not words copied exactly from the segment's text, in order: fix them.
+Keep everything that is already good. Labels and captions stay in {language_name}.{" No clips." if clips == "none" else ""}
+
+## Constrains:
+return only the corrected JSON object {{"segments": [...]}} with every segment and ALL its shots (not only the changed
+ones), in exactly the same format; no markdown, no comments.
+{bible_rule}
+## Narration:
+{json.dumps(segments, ensure_ascii=False)}
+
+## Storyboard to review:
+{json.dumps({"segments": planned}, ensure_ascii=False)}
+""".strip()
+
+
 def generate_storyboard(
     segments: list, expressions: list, language: str = "", app_config=None, reference: Optional[list] = None,
-    openers: bool = True, clips: str = "some", memes: bool = False,
+    openers: bool = True, clips: str = "some", memes: bool = False, bible: Optional[dict] = None,
+    review: bool = True,
 ):
     """Ask the model for the doodle storyboard; None when it keeps failing.
 
     Long videos are planned a few segments at a time, in parallel, so every
-    answer stays short enough to be complete. Segments whose request failed
-    come back without "shots" (the caller draws them its own simple way).
+    answer stays short enough to be complete. With ``review`` a second pass,
+    the film editor, corrects each part against the narration (relevance,
+    real pictures, repetition, pace) before anything is drawn. Segments whose
+    request failed come back without "shots" (the caller draws them its own
+    simple way).
     """
     count = len(segments)
     chunks = storyboard_chunks(segments) if any(isinstance(s, dict) and s.get("shots") for s in segments) else [segments]
@@ -2060,8 +2354,23 @@ def generate_storyboard(
         indexes = [s.get("index", n) if isinstance(s, dict) else n for n, s in enumerate(chunk)]
         wanted = set(indexes) if len(chunks) > 1 else None
         part = [e for e in reference or [] if not wanted or (isinstance(e, dict) and e.get("index") in wanted)]
-        prompt = build_storyboard_prompt(chunk, expressions, language, part or None, openers, clips, memes)
-        return _storyboard_request(prompt, count, expressions, app_config)
+        guide = bible_for(bible, indexes) or None
+        prompt = build_storyboard_prompt(chunk, expressions, language, part or None, openers, clips, memes, guide)
+        board = _storyboard_request(prompt, count, expressions, app_config)
+        if board is None or not review or reference:
+            return board
+        mine = [board[i] for i in indexes if isinstance(i, int) and 0 <= i < count]
+        reviewed = _storyboard_request(
+            build_storyboard_review_prompt(chunk, mine, language, guide, clips), count, expressions, app_config
+        )
+        if reviewed is None:
+            return board
+        for i in indexes:
+            if isinstance(i, int) and 0 <= i < count and reviewed[i].get("shots"):
+                if not reviewed[i].get("opener") and board[i].get("opener"):
+                    reviewed[i]["opener"] = board[i]["opener"]
+                board[i] = reviewed[i]
+        return board
 
     if len(chunks) == 1:
         boards = [plan(chunks[0])]
@@ -2087,7 +2396,7 @@ def build_storyboard_gaps_prompt(
 ) -> str:
     """Extra shots for stretches of narration where the picture stays the same for too long."""
     language_name = language or "the language of the narration"
-    types = ["animation", "illustration", "single", "compare", "chain"]
+    types = ["archive", "animation", "illustration"]
     if clips in ("some", "more"):
         types.append("clip")
     pose_rule = (
@@ -2098,7 +2407,7 @@ def build_storyboard_gaps_prompt(
 
 ## Goal:
 In these stretches of the narration ({language_name}) the screen shows the same picture for too long.
-Add new shots so the picture changes every 2 to 4 seconds, following exactly what is said.
+Add new shots so the picture changes every 4 to 7 seconds, showing exactly what is said at that moment.
 
 ## Constrains:
 1. return only a JSON object {{"shots": [...]}}; no markdown.
@@ -2106,21 +2415,21 @@ Add new shots so the picture changes every 2 to 4 seconds, following exactly wha
    and how many new shots it needs ("shots"); add that many shots for the gap, each with that "index".
 3. every "at" is 2 to 6 consecutive words copied exactly from that gap's "text", all different, in order;
    never on its first 3 words (the current picture stays a moment).
-4. shot types: {", ".join(types)}, in the same format as the main storyboard (below). Almost always "animation"
-   (2 to 4 drawings of one action, about a second each) or "illustration": when the story stays in the same place
-   as the current picture, set "continue": true and describe only what changes; vary "camera" ("in", "out", "left",
-   "right"); give each a short English "query" for a real photo of the moment, used if the drawing fails.
+4. shot types: {", ".join(types)}, in the same format as the main storyboard (below). A real picture ("archive")
+   when the narration tells real history (a portrait, a painting of the event, a historical photograph, the real
+   instrument); otherwise an "animation" (2 to 4 drawings of one action, about 1.5 to 2 seconds each) or an
+   "illustration": when the story stays in the same place as the current picture, set "continue": true and describe
+   only what changes; vary "camera" ("in", "out", "left", "right"); give each a short English "query" for a real
+   photo of the moment, used if the drawing fails.
 5. "draw" is an English description of what is drawn, concrete and visual, never text in it; the channel's
    mascot is an otter with round glasses and a teal sweater ("otter": true when it is in the drawing {pose_rule}).
 6. labels at most 4 words in {language_name}; never add facts the narration does not state.
 
 ## Formats:
+{{"index": 2, "type": "archive", "at": ..., "query": precise English search for Wikimedia Commons, "query_local": ..., "caption": "", "draw": fallback illustration}}
 {{"index": 2, "type": "animation", "at": ..., "otter": false, "continue": false, "camera": "in", "query": ..., "frames": [{{"draw": ...}}, {{"draw": only what changes, "at": optional}}]}}
 {{"index": 2, "type": "illustration", "at": ..., "draw": ..., "otter": false, "continue": false, "camera": "in", "text": "", "query": ...}}
-{{"index": 2, "type": "single", "at": ..., "text": "", "label": ..., "draw": ..., "query": ..., "icon": ...}}
-{{"index": 2, "type": "compare", "items": [left item, right item, each {{"at": ..., "label": ..., "draw": ..., "query": ...}}]}}
-{{"index": 2, "type": "chain", "items": [2 to 4 items with "link"]}}
-{{"index": 2, "type": "clip", "at": ..., "query": English stock video search, "label": "", "frame": "card", "draw": fallback illustration}}
+{{"index": 2, "type": "clip", "at": ..., "query": English stock video search, "label": "", "frame": "full", "draw": fallback illustration}}
 
 ## Gaps:
 {json.dumps(gaps, ensure_ascii=False)}
@@ -2136,7 +2445,8 @@ def generate_storyboard_gaps(
     prompt = build_storyboard_gaps_prompt(gaps, expressions, language, clips, memes)
     indexes = {gap["index"] for gap in gaps}
     lookup = {expression.lower(): expression for expression in expressions}
-    allowed = set(SHOT_TYPES) - ({"clip"} if clips == "none" else set()) - ({"meme"} if not memes else set())
+    # The gap pass only adds full-screen pictures (never compositions on the canvas).
+    allowed = {"archive", "animation", "illustration"} | ({"clip"} if clips in ("some", "more") else set())
     for i in range(_max_retries):
         try:
             response = _generate_response(prompt) if app_config is None else _generate_response(prompt, app_config=app_config)

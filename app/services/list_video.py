@@ -30,6 +30,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import wave
 from dataclasses import dataclass, field
@@ -98,13 +99,23 @@ class _Visual:
     pieces: List[tuple] = field(default_factory=list)
 
 
+def says_name_first(text: str, name: str) -> bool:
+    """True when the narration already starts by saying ``name``."""
+    wanted = editor_service.normalize_words(name)
+    said = editor_service.normalize_words(text)[: len(wanted)]
+    return bool(wanted) and said == wanted
+
+
 def build_segments(
-    script: ListVideoScript, number_items: bool = True
+    script: ListVideoScript, number_items: bool = True, say_names: bool = False
 ) -> List[ListSegment]:
     """Flatten a list script into ordered segments.
 
     Intro and outro reuse the first and last item's visual when they have none
-    of their own, so a hand-written script only needs item visuals.
+    of their own, so a hand-written script only needs item visuals. With
+    ``say_names`` each item's narration opens by saying its name on its own
+    ("Isaac Newton."), while its title card is on screen, unless the text
+    already starts with it.
     """
     items = script.items
     segments: List[ListSegment] = []
@@ -125,10 +136,13 @@ def build_segments(
     for index, item in enumerate(items, start=1):
         name = item.name.strip()
         label = f"{index}. {name}" if number_items else name
+        text = item.text.strip()
+        if say_names and name and not says_name_first(text, name):
+            text = f"{name.rstrip('.!?…')}. {text}"
         segments.append(
             ListSegment(
                 "item",
-                item.text.strip(),
+                text,
                 label,
                 label,
                 item.image_term.strip() or name,
@@ -516,6 +530,46 @@ def prepare_still_image(
         fitted = ImageOps.fit(image, (width, height), Image.LANCZOS)
     fitted.save(output_file)
     return output_file
+
+
+# Settings that change how a voice sounds: part of the narration cache key.
+_VOICE_SETTINGS = ("gemini_tts_model", "gemini_tts_style", "gcloud_tts_pitch")
+
+
+def _narration_key(text: str, voice_name: str, voice_rate: float) -> str:
+    import hashlib
+
+    settings = {key: str(config.app.get(key, "") or "") for key in _VOICE_SETTINGS}
+    voice_settings = {k: v for k, v in dict(getattr(config, "elevenlabs", {}) or {}).items() if "key" not in str(k)}
+    settings["elevenlabs"] = json.dumps(voice_settings, sort_keys=True, default=str)
+    payload = json.dumps([text, voice_name, round(float(voice_rate or 1.0), 3), settings], ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def narrate(text: str, voice_name: str, voice_rate: float, audio_file: str):
+    """The narration of ``text`` (a SubMaker), reusing the same take when it was already recorded.
+
+    Voices without word timings (Gemini, Cloud TTS, ElevenLabs...) are not
+    deterministic: a cached take keeps a review and its final render, or two
+    renders of the same script, on exactly the same timing, and is free.
+    Voices with word timings (Edge) are always synthesized again.
+    """
+    folder = utils.storage_dir(os.path.join("cache", "narration"), create=True)
+    cached = os.path.join(folder, f"{_narration_key(text, voice_name, voice_rate)}.mp3")
+    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        duration = _probe_duration(cached)
+        if duration > 0:
+            shutil.copyfile(cached, audio_file)
+            logger.info(f"narration reused from the cache: {os.path.basename(cached)}")
+            sub_maker = voice.ensure_legacy_submaker_fields(voice.SubMaker())
+            return voice.populate_legacy_submaker_with_full_text(sub_maker, text, duration)
+    sub_maker = voice.tts(text=text, voice_name=voice_name, voice_rate=voice_rate, voice_file=audio_file)
+    if sub_maker is not None and not editor_service.cue_word_times(sub_maker) and os.path.isfile(audio_file):
+        try:
+            shutil.copyfile(audio_file, cached)
+        except OSError as exc:
+            logger.debug(f"narration not cached: {exc}")
+    return sub_maker
 
 
 def _probe_duration(media_file: str) -> float:
@@ -926,6 +980,8 @@ def generate_list_video(
     edit: Optional[editor_service.EditOptions] = None,
     voice_polish_enabled: bool = True,
     pause_seconds: float = DEFAULT_PAUSE_SECONDS,
+    say_names: bool = False,
+    review: bool = False,
 ) -> dict:
     """Render a list-format video and return its files and chapters.
 
@@ -936,12 +992,13 @@ def generate_list_video(
     With ``edit`` the video is edited automatically: chapter labels, a host
     character, pictures and key facts timed to the narration, a subscribe
     animation, sound effects and a progress bar. Without it each segment
-    shows its visual and an "N. name" title.
+    shows its visual and an "N. name" title. With ``review`` it stops before
+    rendering, once every picture is made, and returns the review file.
 
     ``image_file`` paths in the script are used as given; callers that accept
     scripts from untrusted clients must restrict them first.
     """
-    segments = build_segments(script, number_items=number_items)
+    segments = build_segments(script, number_items=number_items, say_names=say_names)
     validate_visual_sources(segments, params.video_source)
     if not utils.check_ffmpeg_ready():
         raise ListVideoError(
@@ -968,12 +1025,7 @@ def generate_list_video(
         step = f"[{index + 1}/{len(segments)}] {segment.chapter}"
         logger.info(f"list video narration {step}")
         audio_file = os.path.join(task_dir, f"segment-{index:02d}.mp3")
-        sub_maker = voice.tts(
-            text=segment.text,
-            voice_name=voice_name,
-            voice_rate=params.voice_rate,
-            voice_file=audio_file,
-        )
+        sub_maker = narrate(segment.text, voice_name, params.voice_rate, audio_file)
         if sub_maker is None:
             raise ListVideoError(f"failed to synthesize narration for {step}")
         try:
@@ -1012,6 +1064,20 @@ def generate_list_video(
         )
         editor = editor_service.Editor(edit, theme, task_dir, segments, narrations)
         editor.make_plan()
+    if review:
+        # Stop before rendering: every picture is made, pinned in the plan and listed for a review.
+        if editor is None:
+            raise ListVideoError("a review needs the automatic edit")
+        review_file = editor.write_review()
+        warnings += editor.warnings
+        for warning in dict.fromkeys(warnings):
+            logger.warning(warning)
+        logger.success(f"list video review ready: {review_file}")
+        return {
+            "review_file": review_file,
+            "plan_file": os.path.join(task_dir, "edit-plan.json"),
+            "warnings": list(dict.fromkeys(warnings)),
+        }
 
     narration_file = os.path.join(task_dir, "narration.wav")
     segment_videos: List[str] = []

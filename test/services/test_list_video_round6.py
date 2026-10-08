@@ -107,7 +107,7 @@ class TestSturdyDrawing(_TempDirCase):
     def setUp(self):
         super().setUp()
         for patcher in (
-            patch.dict(gemini_media._state, {"imagen_failed": "", "last_error": ""}),
+            patch.dict(gemini_media._state, {"imagen_failed": "", "last_error": "", "gone": {}, "no_size": set()}),
             patch.object(gemini_media, "RETRY_SECONDS", (0.0, 0.0)),
             patch.object(gemini_media, "_client_kwargs", return_value={}),
             patch.object(gemini_media, "_cache_path", side_effect=lambda model, key: self.path(f"{abs(hash((model, key)))}.png")),
@@ -115,12 +115,14 @@ class TestSturdyDrawing(_TempDirCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    IMAGEN = {"gemini_image_model": "imagen-4.0-fast-generate-001"}  # Imagen only when config.toml names it
+
     def test_a_broken_imagen_hands_over_to_the_gemini_image_model(self):
         calls = []
         client = _client(calls, imagen=[_Error("404 Publisher model imagen-4.0 not found", code=404)])
         with patch("google.genai.Client", client):
-            first = gemini_media.draw("a copper wire", app_config={})
-            second = gemini_media.draw("a light bulb", app_config={})
+            first = gemini_media.draw("a copper wire", app_config=self.IMAGEN)
+            second = gemini_media.draw("a light bulb", app_config=self.IMAGEN)
         self.assertTrue(os.path.isfile(first) and os.path.isfile(second))
         self.assertEqual([kind for kind, _ in calls], ["imagen", "gemini", "gemini"])  # Imagen is not asked again
         self.assertEqual(calls[1][1]["model"], gemini_media.SEQUENCE_DEFAULT_MODEL)
@@ -130,15 +132,18 @@ class TestSturdyDrawing(_TempDirCase):
         calls = []
         client = _client(calls, imagen=[None], gemini=[_Error("429 RESOURCE_EXHAUSTED", code=429), _png()])
         with patch("google.genai.Client", client):
-            path = gemini_media.draw("a storm cloud", app_config={})
+            path = gemini_media.draw("a storm cloud", app_config=self.IMAGEN)
         self.assertTrue(os.path.isfile(path))
         self.assertEqual([kind for kind, _ in calls], ["imagen", "gemini", "gemini"])  # filtered, then busy, then drawn
         self.assertEqual(gemini_media.imagen_failure(), "")  # one filtered prompt does not condemn Imagen
         calls.clear()
-        failing = _client(calls, gemini=[_Error("400 invalid argument")])
+        failing = _client(calls, gemini=[_Error("400 invalid argument")] * 5)
         with patch("google.genai.Client", failing):
             self.assertEqual(gemini_media.draw("x", app_config={"gemini_image_model": "gemini-2.5-flash-image"}), "")
-        self.assertEqual(len(calls), 1)  # a real error is not retried
+        models = [kwargs["model"] for _, kwargs in calls]
+        self.assertEqual(models[0], "gemini-2.5-flash-image")  # the configured model goes first
+        self.assertEqual(len(models), len(set(models)))  # a real error is not retried: the next model is asked
+        self.assertEqual(set(models), {"gemini-2.5-flash-image", *gemini_media.FLASH_IMAGE_MODELS})
         self.assertIn("invalid argument", gemini_media.last_error())
 
     def test_next_frame_and_styles(self):
@@ -155,8 +160,8 @@ class TestSturdyDrawing(_TempDirCase):
         self.assertIn("previous frame", frame["contents"][1])
         self.assertIn("the bulb lights up", frame["contents"][1])
         self.assertEqual(frame["config"].image_config.aspect_ratio, "16:9")
-        self.assertIn("ink line art", calls[1][1]["prompt"])
-        self.assertIn("cinematic lighting", calls[2][1]["prompt"])
+        self.assertIn("ink line art", calls[1][1]["contents"])
+        self.assertIn("cinematic lighting", calls[2][1]["contents"])
 
     def test_icon_and_clip_checks(self):
         prompt = gemini_media.build_choice_prompt("CORRIENTE CONTINUA", "steady electric current", 3, "es", purpose="icon")
@@ -192,14 +197,14 @@ class TestAnimaticPlan(unittest.TestCase):
     def test_prompt_asks_for_an_animatic(self):
         segments = [{"index": 0, "kind": "intro", "title": "t", "text": "hola", "seconds": 30.0, "shots": 10}]
         prompt = llm.build_storyboard_prompt(segments, ["feliz"], "es-CO")
-        for words in ("ANIMATIONS", "every 2 to 4 seconds", '"continue": true', "redrawn from the previous one", '"camera"',
-                      '"shots": 10', '"type": "clip"', "5%", "cutaway", "never show text alone"):
+        for words in ("ANIMATIONS", "every 4 to 7 seconds", '"continue": true', "last drawn picture before it", '"camera"',
+                      '"shots": 10', '"type": "clip"', "3%", "cutaway", '"archive"', "At most ONE"):
             self.assertIn(words, prompt)
         self.assertNotIn('"type": "meme"', prompt)
         more = llm.build_storyboard_prompt(segments, [], "es", clips="more", memes=True)
-        self.assertIn("10%", more)
+        self.assertIn("7%", more)
         self.assertIn('"type": "meme"', more)
-        self.assertIn("one every 40 seconds", more)
+        self.assertIn("one every 60 seconds", more)
         none = llm.build_storyboard_prompt(segments, [], "es", clips="none")
         self.assertNotIn('"type": "clip"', none)
         self.assertEqual(llm.storyboard_shot_target(30, 3), 10)
@@ -219,13 +224,13 @@ class TestAnimaticPlan(unittest.TestCase):
             ]})
 
         with patch.object(llm, "_generate_response", side_effect=reply) as ask:
-            board = llm.generate_storyboard(segments, [], "es")
+            board = llm.generate_storyboard(segments, [], "es", review=False)
         self.assertEqual(ask.call_count, 3)
         self.assertEqual([len(entry.get("shots") or []) for entry in board], [1, 1, 0, 0, 1])
         self.assertNotIn("shots", board[2])  # left for the simple fallback
         self.assertEqual(board[4]["shots"][0]["draw"], "drawing 4")
         with patch.object(llm, "_generate_response", return_value="Error: no"):
-            self.assertIsNone(llm.generate_storyboard(segments, [], "es"))
+            self.assertIsNone(llm.generate_storyboard(segments, [], "es", review=False))
 
     def test_gap_shots(self):
         gaps = [{"index": 1, "text": "la corriente cruza el cable de cobre", "showing": "single: a wire", "seconds": 9, "shots": 2}]
@@ -469,7 +474,7 @@ class TestAnimaticEditor(_TempDirCase):
             scenes.Scene("illustration", 2, 4, center=Item(draw="it flips the switch", otter=True), follows=True),
         ]
         with patch.object(editor.gemini_media, "draw", side_effect=draw):
-            ed._illustration_chain(chain)
+            ed._illustration_chain([(scene, "") for scene in chain])
         self.assertEqual(asked[0], ("the otter in the dark", "", True))
         self.assertEqual(asked[1], ("it flips the switch", self.path("d1.png"), False))  # drawn from frame 1, no extra mascot
         self.assertTrue(all(ed._item_pictures[id(s.center)].info["framed"] for s in chain))
@@ -547,9 +552,10 @@ class TestAnimaticEditor(_TempDirCase):
             scenes.Scene("sequence", 7, 9, items=[Item()]),
         ]
         editor.Editor._crossfade(shots)
-        self.assertEqual([s.overlap for s in shots], [0.3, 0.25, 0.0, 0.0])
-        self.assertEqual([s.fade_in for s in shots], [0.0, 0.3, 0.25, 0.0])
-        self.assertEqual(shots[2].linger, 0.3)  # back to the canvas: it fades out over the drawings
+        fade = scenes.CROSSFADE_SECONDS
+        self.assertEqual([s.overlap for s in shots], [fade, 0.25, 0.0, 0.0])
+        self.assertEqual([s.fade_in for s in shots], [0.0, fade, 0.25, 0.0])
+        self.assertEqual(shots[2].linger, fade)  # back to the canvas: it fades out over the drawings
 
         ed = self._editor(max_drawings=1)
         ed._failed_drawings = 2
@@ -603,12 +609,12 @@ class TestAnimaticOptions(unittest.TestCase):
     def test_cli_flags(self):
         _, generate, _ = self._run()
         edit = generate.call_args.kwargs["edit"]
-        self.assertEqual((edit.shot_seconds, edit.clips, edit.memes, edit.memes_dir, edit.drawing_style), (3.0, "some", "off", "", "cartoon"))
+        self.assertEqual((edit.shot_seconds, edit.clips, edit.memes, edit.memes_dir, edit.drawing_style), (5.0, "some", "off", "", "cartoon"))
         _, generate, _ = self._run("--look", "doodle", "--shot-seconds", "1", "--clips", "more", "--memes", "folder",
                                    "--memes-dir", self.temp_dir, "--drawing-style", "ink")
         edit = generate.call_args.kwargs["edit"]
         self.assertEqual((edit.shot_seconds, edit.clips, edit.memes, edit.memes_dir, edit.drawing_style),
-                         (2.0, "more", "folder", os.path.abspath(self.temp_dir), "ink"))
+                         (3.0, "more", "folder", os.path.abspath(self.temp_dir), "ink"))  # never faster than every 3 s
         code, _, stderr = self._run("--memes-dir", os.path.join(self.temp_dir, "missing"))
         self.assertEqual(code, 2)
         self.assertIn("--memes-dir folder not found", stderr)
@@ -626,7 +632,7 @@ class TestAnimaticOptions(unittest.TestCase):
         self.assertIn("otter", otter)
         self.assertNotIn("--memes-dir", otter)
         defaults = studio.RenderSettings()
-        self.assertEqual((defaults.clips, defaults.memes, defaults.shot_seconds), ("some", "off", 3.0))
+        self.assertEqual((defaults.clips, defaults.memes, defaults.shot_seconds), ("some", "off", 5.0))
 
     def test_memes_folder_is_documented_and_private(self):
         folder = Path(utils.resource_dir("memes"))

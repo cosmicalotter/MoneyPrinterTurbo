@@ -142,7 +142,7 @@ class TestMastering(_TempDirCase):
 
 
 class TestShotTiming(unittest.TestCase):
-    TIMES = {"uno": 1.0, "dos": 4.0, "tres": 4.8, "cuatro": 9.0, "cinco": 9.6, "seis": 12.0}
+    TIMES = {"uno": 1.0, "dos": 4.0, "tres": 4.8, "cuatro": 9.0, "cinco": 9.6, "seis": 15.0}
 
     def test_shots_follow_each_other_without_gaps(self):
         specs = [
@@ -154,13 +154,13 @@ class TestShotTiming(unittest.TestCase):
             {"type": "bogus", "at": "uno"},
             {"type": "single", "at": "missing", "label": "x"},
         ]
-        shots = scenes.time_shots(specs, self.TIMES.get, 15.0, start=0.5)
+        shots = scenes.time_shots(specs, self.TIMES.get, 21.0, start=0.5)
         self.assertEqual([s.type for s in shots], ["single", "sequence", "stat", "speech"])
         self.assertEqual(shots[0].start, 0.5)
         for shot, following in zip(shots, shots[1:]):
             self.assertAlmostEqual(shot.end, following.start)
             self.assertGreaterEqual(shot.end - shot.start, scenes.COMPOSITION_SECONDS - 0.5)  # long enough to follow
-        self.assertEqual(shots[-1].end, 15.0)
+        self.assertEqual(shots[-1].end, 21.0)
         self.assertTrue(all(not s.exit for s in shots))
         self.assertAlmostEqual(shots[1].start, 0.85 + scenes.COMPOSITION_SECONDS)  # waited for the single to be read
         self.assertEqual([i.label for i in shots[1].items], ["b", "c"])
@@ -172,7 +172,7 @@ class TestShotTiming(unittest.TestCase):
         # A single item is enough for a list shot; a shot at the very end is dropped.
         one = scenes.time_shots([{"type": "sequence", "items": [{"at": "uno", "label": "b"}]}], self.TIMES.get, 5.0)
         self.assertEqual(len(one[0].items), 1)
-        self.assertEqual(scenes.time_shots([{"type": "single", "at": "seis", "label": "x"}], self.TIMES.get, 13.0), [])
+        self.assertEqual(scenes.time_shots([{"type": "single", "at": "seis", "label": "x"}], self.TIMES.get, 17.0), [])
 
 
 class TestStoryboardPlan(unittest.TestCase):
@@ -194,11 +194,11 @@ class TestStoryboardPlan(unittest.TestCase):
         self.assertEqual((shots[0]["otter"], shots[0]["text"]), (True, "Título"))
         self.assertEqual(shots[1]["pose"], "feliz")
         self.assertEqual(shots[2]["items"][0]["pose"], "explicando")
-        self.assertEqual(shots[3]["text"], "05:30 de la maña"[:16])
+        self.assertEqual(shots[3]["text"], "05:30 de la mañana")
         self.assertEqual(board[0]["opener"]["query"], "call center")
         self.assertEqual(board[1]["shots"], [])
         prompt = llm.build_storyboard_prompt([{"index": 0, "kind": "item", "title": "t", "text": "hola"}], ["feliz"], "es-CO")
-        for words in ("animated film", "EVERY sentence", "DIFFERENT", '"illustration"', '"animation"', "otter", "es-CO"):
+        for words in ("animated documentary", "EVERY sentence", '"archive"', '"illustration"', '"animation"', "otter", "es-CO"):
             self.assertIn(words, prompt)
         reply = json.dumps(data)
         with patch.object(llm, "_generate_response", return_value=reply):
@@ -208,7 +208,7 @@ class TestStoryboardPlan(unittest.TestCase):
 
 
 class TestDrawing(_TempDirCase):
-    def test_draw_uses_imagen_or_a_reference_model_and_caches(self):
+    def test_draw_uses_the_gemini_image_models_and_caches(self):
         calls = []
 
         class Models:
@@ -238,24 +238,31 @@ class TestDrawing(_TempDirCase):
                 return False
 
         mascot = _icon(self.path("otter.png"))
+        imagen = {"gemini_image_model": "imagen-4.0-fast-generate-001"}
         with patch("google.genai.Client", Client), patch.object(gemini_media, "_client_kwargs", return_value={}), patch.object(
             gemini_media, "_cache_path", side_effect=lambda model, key: self.path(f"{abs(hash((model, key)))}.png")
-        ):
+        ), patch.dict(gemini_media._state, {"gone": {}, "no_size": set(), "imagen_failed": "", "last_error": ""}):
             first = gemini_media.draw("a robot with a headset", app_config={})
             again = gemini_media.draw("a robot with a headset", app_config={})
             otter = gemini_media.draw("the otter on the phone", mascot=mascot, app_config={})
             scene = gemini_media.draw("a dark bedroom at dawn", scene=True, app_config={})
             self.assertTrue(os.path.isfile(scene))
             self.assertEqual(gemini_media.draw("  ", app_config={}), "")
+            gemini_media.draw("a lamp", app_config=imagen)  # Imagen only when config.toml names it
+            gemini_media.draw("the otter waves", mascot=mascot, app_config=imagen)
         self.assertEqual(first, again)
         self.assertTrue(os.path.isfile(otter))
         kinds = [kind for kind, _ in calls]
-        self.assertEqual(kinds, ["imagen", "gemini", "imagen"])  # cached once; the mascot needs a reference model
-        self.assertIn("cel shading", calls[0][1]["prompt"])  # the polished cartoon look by default
-        self.assertEqual(calls[1][1]["model"], gemini_media.SEQUENCE_DEFAULT_MODEL)
+        self.assertEqual(kinds, ["gemini", "gemini", "gemini", "imagen", "gemini"])  # cached once; Imagen cannot follow a picture
+        self.assertEqual(calls[0][1]["model"], gemini_media.FLASH_IMAGE_MODELS[0])
+        self.assertIn("cel shading", calls[0][1]["contents"])  # the polished cartoon look by default
         self.assertEqual(len(calls[1][1]["contents"]), 2)  # the reference picture and the prompt
-        self.assertEqual(calls[2][1]["config"].aspect_ratio, "16:9")
-        self.assertIn("16:9", calls[2][1]["prompt"])
+        self.assertIn("mascot", calls[1][1]["contents"][1])
+        scene_call = calls[2][1]
+        self.assertEqual(scene_call["config"].image_config.aspect_ratio, "16:9")
+        self.assertEqual(scene_call["config"].image_config.image_size, gemini_media.SHARP_SIZE)  # sharp on a 1080p video
+        self.assertIn("16:9", scene_call["contents"])
+        self.assertEqual(calls[4][1]["model"], gemini_media.FLASH_IMAGE_MODELS[0])
 
 
 class TestDoodleRenderer(_TempDirCase):
@@ -342,8 +349,8 @@ class TestDoodleEditor(_TempDirCase):
         {"index": 0, "shots": []},
         {"index": 1, "shots": [
             {"type": "single", "at": "palabra3", "label": "a", "draw": "a battery with arms", "otter": True},
-            {"type": "illustration", "at": "palabra12", "draw": "a dark lab", "text": "05:30"},
-            {"type": "speech", "at": "palabra20", "text": "hola", "items": [{"pose": "feliz"}, {"label": "robot", "draw": "a robot", "icon": "🤖"}]},
+            {"type": "illustration", "at": "palabra16", "draw": "a dark lab", "text": "05:30"},
+            {"type": "speech", "at": "palabra30", "text": "hola", "items": [{"pose": "feliz"}, {"label": "robot", "draw": "a robot", "icon": "🤖"}]},
             {"type": "sequence", "items": [{"at": "palabra40", "label": "x", "icon": "🔋"}, {"at": "palabra44", "label": "y", "draw": "a plug"}]},
         ]},
         {"index": 2, "shots": []},
@@ -505,7 +512,7 @@ class TestStoryFormat(unittest.TestCase):
 
     def test_story_prompt(self):
         prompt = llm.build_story_script_prompt("Cómo es ser cada rango de la NCIS", 5, "es-CO", 140)
-        for words in ("ONE continuous story", "exactly 5 chapters", "INSIDE a concrete scene", "never start by announcing",
+        for words in ("ONE continuous story", "exactly 5 chapters", "INSIDE a concrete", "Never greet",
                       "about 140 words", "Short sentences", "in es-CO", "why things happen"):
             self.assertIn(words, prompt)
         self.assertTrue(prompt.endswith("Cómo es ser cada rango de la NCIS"))
@@ -514,7 +521,7 @@ class TestStoryFormat(unittest.TestCase):
             llm.generate_list_script("NCIS", 3, script_format="story")
         self.assertIn("ONE continuous story", ask.call_args.args[0])
         list_prompt = llm.build_list_script_prompt("X", 3)
-        self.assertIn("gripping situation", list_prompt)
+        self.assertIn("gripping moment", list_prompt)
         self.assertNotIn("ONE continuous story", list_prompt)
         self.assertIn("flow into each other", llm.build_edit_plan_prompt([], [], "es", openers=False))
         self.assertIn('"opener"', llm.build_storyboard_prompt([], [], "es", openers=True))
@@ -527,11 +534,17 @@ class TestStoryFormat(unittest.TestCase):
         with patch.object(list_video, "generate_list_video", return_value={}) as generate, redirect_stdout(stdout), redirect_stderr(stderr):
             list_video_cli.run(["--script", script, "--format", "story"])
         kwargs = generate.call_args.kwargs
-        self.assertFalse(kwargs["number_items"])
-        self.assertFalse(kwargs["show_item_titles"])
-        self.assertFalse(kwargs["edit"].openers)
+        # A story keeps its section cards (a photo, the name said aloud) and their labels, and flows on.
+        self.assertTrue(kwargs["number_items"])
+        self.assertTrue(kwargs["show_item_titles"])
+        self.assertTrue(kwargs["edit"].openers)
+        self.assertTrue(kwargs["say_names"])
         self.assertTrue(kwargs["edit"].seamless)
         self.assertEqual(kwargs["gap_seconds"], 0.25)
+        with patch.object(list_video, "generate_list_video", return_value={}) as generate, redirect_stdout(stdout), redirect_stderr(stderr):
+            list_video_cli.run(["--script", script, "--format", "story", "--no-openers", "--no-item-titles", "--no-numbers"])
+        kwargs = generate.call_args.kwargs
+        self.assertFalse(kwargs["number_items"] or kwargs["show_item_titles"] or kwargs["edit"].openers or kwargs["say_names"])
         with patch.object(llm, "generate_list_script", return_value=None) as write, redirect_stdout(stdout), redirect_stderr(stderr):
             list_video_cli.run(["--subject", "NCIS", "--format", "story", "--script-only"])
         self.assertEqual(write.call_args.kwargs["script_format"], "story")

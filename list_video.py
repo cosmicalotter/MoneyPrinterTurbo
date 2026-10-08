@@ -254,7 +254,8 @@ for the YouTube description, and edit-plan.json.
         choices=["list", "story"],
         default="list",
         help="list: numbered sections (every X explained); story: one continuous narrative opened by a "
-        "gripping situation, with chapters only in the description (no numbers, titles or section cards)",
+        "gripping situation whose chapters flow into each other; both open each section with a title card "
+        "(a photo and its name said aloud) and a small label (--no-openers, --no-say-names, --no-item-titles)",
     )
     parser.add_argument(
         "--items",
@@ -347,8 +348,8 @@ for the YouTube description, and edit-plan.json.
         "--look",
         choices=["footage", "doodle"],
         default="footage",
-        help="footage: stock video with pictures and explainer scenes; doodle: the whole video drawn on a "
-        "flat colour, a new drawing for every idea (Gemini/Imagen drawings, about US$0.02-0.04 each)",
+        help="footage: stock video with pictures and explainer scenes; doodle: an animated documentary of real "
+        "historical pictures, short AI animations and illustrations (Gemini drawings, about US$0.04-0.13 each)",
     )
     edit_group.add_argument(
         "--canvas-color",
@@ -371,8 +372,35 @@ for the YouTube description, and edit-plan.json.
     edit_group.add_argument(
         "--shot-seconds",
         type=float,
-        default=3.0,
-        help="doodle look: a new picture about every this many seconds, 2 to 6 (default: 3, like an animatic)",
+        default=5.0,
+        help="doodle look: a new picture about every this many seconds, 3 to 8 (default: 5, a calm documentary pace)",
+    )
+    edit_group.add_argument(
+        "--image-quality",
+        choices=["economy", "standard", "high", "max"],
+        default="standard",
+        help="doodle look: AI drawings by Gemini 2.5 Flash Image (economy, ~US$0.04), Gemini 3.1 Flash Image "
+        "(standard, ~US$0.07), Gemini 3 Pro Image for new scenes and character sheets (high) or for everything "
+        "(max, ~US$0.13 each)",
+    )
+    edit_group.add_argument(
+        "--ai-videos",
+        type=int,
+        default=0,
+        help="doodle look: bring this many illustrations to life with Veo 3.1 (4-8 s videos without sound, "
+        "about US$0.10 per second with the standard quality; default: 0)",
+    )
+    edit_group.add_argument(
+        "--no-director-review",
+        action="store_true",
+        help="doodle look: skip the film editor pass that corrects the storyboard before anything is drawn",
+    )
+    edit_group.add_argument(
+        "--review",
+        action="store_true",
+        help="doodle look: make the plan and every picture, then stop before rendering, so they can be checked "
+        "(Studio > Revisar, or review.json); render afterwards with --edit-plan <task>/edit-plan.json "
+        "and the same --task-id",
     )
     edit_group.add_argument(
         "--clips",
@@ -394,14 +422,19 @@ for the YouTube description, and edit-plan.json.
     )
     edit_group.add_argument(
         "--drawing-style",
-        choices=["cartoon", "ink"],
+        choices=["cartoon", "flat", "ink"],
         default="cartoon",
-        help="doodle look: polished 2D cartoon frames (default) or pen-and-ink doodles",
+        help="doodle look: simple 2D cartoon frames (default), flat minimalist vector shapes or pen-and-ink doodles",
     )
     edit_group.add_argument(
         "--logo",
         default="",
         help='a round channel badge in the top-right corner: "nutria" or a picture file',
+    )
+    edit_group.add_argument(
+        "--no-say-names",
+        action="store_true",
+        help="do not say each section's name aloud on its title card (it is said by default when cards are shown)",
     )
     edit_group.add_argument(
         "--no-openers",
@@ -578,6 +611,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         parser.error(f"--memes-dir folder not found: {args.memes_dir}")
     if args.edit_plan and not os.path.isfile(args.edit_plan):
         parser.error(f"--edit-plan file not found: {args.edit_plan}")
+    if args.review and args.no_edit:
+        parser.error("--review needs the automatic edit (leave out --no-edit)")
     if not args.also_in and (args.also_voice or args.also_voice_style or args.also_script):
         parser.error("--also-voice, --also-voice-style and --also-script need --also-in")
     try:
@@ -633,6 +668,9 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     task_id = args.task_id or utils.get_uuid()
     script_file = os.path.abspath(args.script) if args.script else ""
+    # The bundled otter narrates in the first person (and may joke about being an otter).
+    persona = "otter" if os.path.basename(os.path.normpath(args.assets or "")) == "nutria" else ""
+    openers = not args.no_openers
     if script is None:
         words = args.words_per_item or llm.DEFAULT_LIST_WORDS_PER_ITEM
         script = llm.generate_list_script(
@@ -641,6 +679,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             language=params.video_language or "",
             words_per_item=words,
             script_format=args.format,
+            persona=persona,
         )
         if script is None:
             logger.error("the LLM did not return a valid list script")
@@ -705,13 +744,16 @@ def run(argv: Sequence[str] | None = None) -> int:
             scene_color=args.scene_color or "",
             picture_check=not args.no_picture_check,
             host_presence=args.host_presence,
-            openers=not args.no_openers and not story,
+            openers=openers,
             seamless=story,
             look=args.look,
             canvas_color=args.canvas_color or "",
             boil=not args.no_boil,
             max_drawings=max(0, args.max_drawings),
-            shot_seconds=min(6.0, max(2.0, args.shot_seconds)),
+            shot_seconds=min(8.0, max(3.0, args.shot_seconds)),
+            image_quality=args.image_quality,
+            ai_videos=max(0, args.ai_videos),
+            director_review=not args.no_director_review,
             clips=args.clips,
             memes=args.memes,
             memes_dir=os.path.abspath(args.memes_dir) if args.memes_dir else "",
@@ -726,8 +768,10 @@ def run(argv: Sequence[str] | None = None) -> int:
                 render_task_id,
                 render_script,
                 render_params,
-                number_items=not args.no_numbers and not story,
-                show_item_titles=not args.no_item_titles and not story,
+                number_items=not args.no_numbers,
+                show_item_titles=not args.no_item_titles,
+                say_names=openers and not args.no_say_names and not args.no_edit,
+                review=args.review,
                 **render_options,
             )
         except (list_video.ListVideoError, ValueError) as exc:
@@ -742,6 +786,11 @@ def run(argv: Sequence[str] | None = None) -> int:
     if result is None:
         return 1
     summary = {"task_id": task_id, "script_file": script_file, "result": result}
+    if args.review:
+        # Only the first version is reviewed; the others are made from it after the final render.
+        summary["review_file"] = result.get("review_file", "")
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0
 
     if args.also_in:
         summary["also"] = []

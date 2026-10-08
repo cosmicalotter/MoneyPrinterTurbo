@@ -133,26 +133,27 @@ class TestAnimationShots(unittest.TestCase):
         self.assertTrue(all(b - a >= scenes.ANIMATION_MIN_FRAME - 1e-6 for a, b in zip(times, times[1:])))
         self.assertTrue(all(frame.otter for frame in shot.items))
         self.assertEqual(shot.center.query, "switch")
-        short, = scenes.time_shots([dict(spec, frames=[{"draw": str(n)} for n in range(6)])], self.TIMES.get, 2.9)
-        self.assertLessEqual(len(short.items), 4)  # 2.9 s leave room for four drawings, not six
-        self.assertTrue(all(f.time <= 2.9 - scenes.ANIMATION_MIN_FRAME + 1e-6 for f in short.items[1:]))
+        short, = scenes.time_shots([dict(spec, frames=[{"draw": str(n)} for n in range(6)])], self.TIMES.get, 4.0)
+        self.assertLessEqual(len(short.items), 3)  # 4 s leave room for three drawings, not six
+        self.assertTrue(all(f.time <= 4.0 - scenes.ANIMATION_MIN_FRAME + 1e-6 for f in short.items[1:]))
         gaps = [b.time - a.time for a, b in zip(short.items, short.items[1:])]
         self.assertTrue(all(gap >= scenes.ANIMATION_MIN_FRAME - 1e-6 for gap in gaps))
 
     def test_compositions_stay_long_enough_to_follow(self):
+        times = {"uno": 1.0, "dos": 2.5, "tres": 4.0, "cinco": 11.0, "seis": 16.0}
         specs = [
             {"type": "single", "at": "uno", "label": "a", "draw": "x"},
-            {"type": "illustration", "at": "tres", "draw": "y"},  # 2.4 s after the single: waits until it is read
+            {"type": "illustration", "at": "tres", "draw": "y"},  # 3 s after the single: waits until it is read
             {"type": "illustration", "at": "cinco", "draw": "z"},
             {"type": "compare", "items": [{"at": "seis", "label": "p"}, {"at": "seis", "label": "q"}]},
         ]
-        shots = scenes.time_shots(specs, self.TIMES.get, 20.0)
+        shots = scenes.time_shots(specs, times.get, 22.0)
         self.assertEqual([s.type for s in shots], ["single", "illustration", "illustration", "compare"])
         self.assertAlmostEqual(shots[1].start, 0.85 + scenes.COMPOSITION_SECONDS)
         far = scenes.time_shots([specs[0], {"type": "illustration", "at": "dos", "draw": "y"},
-                                 {"type": "illustration", "at": "tres", "draw": "w"}], self.TIMES.get, 20.0)
+                                 {"type": "illustration", "at": "cinco", "draw": "w"}], times.get, 22.0)
         self.assertEqual([s.center.draw for s in far], ["x", "w"])  # "y" would have waited too long: left out
-        holds = scenes.long_holds(shots, 20.0, 6.0)
+        holds = scenes.long_holds(shots, 22.0, 6.0)
         self.assertTrue(all(b - a > 6.0 for a, b in holds))
 
 
@@ -230,8 +231,8 @@ class TestPicturesAlways(_TempDirCase):
                                                        Item(draw="the light is on", otter=True)])
         second = scenes.Scene("animation", 3, 5, follows=True, items=[Item(draw="it smiles", otter=True)])
         with patch.object(editor.gemini_media, "draw", side_effect=draw), \
-                patch.object(editor.gemini_media, "check_drawing", return_value=True):
-            ed._illustration_chain([first, second])
+                patch.object(editor.gemini_media, "audit_drawing", return_value=(True, "")):
+            ed._illustration_chain([(first, ""), (second, "")])
         self.assertEqual(asked[0], ("the otter in the dark", "", True))
         self.assertEqual(asked[1][1], "d1.png")
         self.assertEqual(asked[2], ("the light is on", "d1.png", False))  # the failed frame is skipped
@@ -248,7 +249,7 @@ class TestPicturesAlways(_TempDirCase):
             return _picture(self.path(f"a{len(calls)}.png"))
 
         with patch.object(editor.gemini_media, "draw", side_effect=draw), \
-                patch.object(editor.gemini_media, "check_drawing", side_effect=[False, True]) as check:
+                patch.object(editor.gemini_media, "audit_drawing", side_effect=[(False, ""), (True, "")]) as check:
             image = ed._drawing("a copper wire", scene=True)
         self.assertIsNotNone(image)
         self.assertEqual(len(calls), 2)

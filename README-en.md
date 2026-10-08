@@ -504,9 +504,9 @@ that come off as one clean shape are cut out as stickers; photos become framed c
 **Two script formats:** `--format list` (default) writes an "every X explained" video
 with numbered sections; `--format story` writes one continuous narrative in chapters
 that opens inside a concrete, gripping situation ("It's 5:30 in the morning..."), flows
-from chapter to chapter in calm, short sentences with every idea finished, and is
-rendered without section numbers, titles or cards (the chapters stay in the
-description).
+from chapter to chapter in calm, short sentences with every idea finished. Both formats
+open each section with a title card whose name is said aloud (`--no-openers`,
+`--no-say-names`, `--no-item-titles` and `--no-numbers` turn the parts off).
 
 **The doodle look (`--look doodle`):** the whole video is drawn on one flat, warm
 canvas (`--canvas-color`, default `#F4C24F`), like hand-drawn explainer channels. An
@@ -560,10 +560,45 @@ drawn, failed and redrawn, the stand-ins used and every warning. The corner badg
 off by default (`--logo nutria` brings it back) and `--max-drawings` defaults to 260 (about
 US$5-10 for a 5-minute video).
 
+**The animated documentary (round 8):** the doodle look now plans and checks every picture
+like a documentary team. An art director reads the whole script first and writes a
+*visual bible*: the art direction of the video, every recurring person with a fixed look
+(and a real portrait to draw them from) and the real historical pictures worth showing.
+The director then plans calm shots (a new picture every 4-7 seconds, `--shot-seconds`,
+default 5) that show exactly what is said, in its real context: `archive` shots are real
+paintings, engravings, photographs, manuscripts and instruments from Wikimedia Commons
+that Gemini confirms are authentic and about that very moment (never a staged stock
+photo; the moment is drawn when none passes), next to short `animation`s and
+`illustration`s; compositions are at most ~10% and there is at most one side-by-side
+comparison. A film-editor pass (`--no-director-review` skips it) corrects the plan before
+anything is drawn: off-topic or decorative pictures, history told with a drawing when a
+real picture exists, repeated subjects, a rushed pace; shots planned twice are dropped.
+Drawings use the Gemini image models (`--image-quality economy|standard|high|max`:
+Gemini 2.5 Flash Image ~US$0.04, Gemini 3.1 Flash Image ~US$0.07, Gemini 3 Pro Image
+~US$0.13 for new scenes and character sheets or for everything; scenes at 2K), follow
+reference pictures (the frame before, the mascot, each person's character sheet), use a
+simpler style that asks for correct, recognisable shapes (`--drawing-style flat` is the
+most minimal) and are audited by Gemini against the sentence said meanwhile, then redrawn
+with the fix it gives. A missing picture is never replaced by a giant icon.
+`--ai-videos N` turns the N longest illustrations that have a gentle motion into 4-8 s
+Veo 3.1 videos without sound (about US$0.10 per second with Veo 3.1 Fast). Each section
+opens on its own colour card with the photo of its subject while its name is said, and
+its label ("01 Albert Einstein") stays in the top-left corner over the pictures (it
+leaves for compositions, whose titles use the top). Formulas are written like on a
+blackboard (×, ², √) with the otter in its own column, the subscribe animation waits in
+the top-right corner, and transparent pictures never get black corners.
+
+**Review before rendering:** `--review` makes the plan and every picture, then stops:
+`review.json` lists each shot with its pictures and the sentence said meanwhile, and the
+plan pins every picture. In the Studio's **Revisar** page each shot can be kept, made
+again (with a new description), turned into a real archive picture or removed; the final
+render (with `--edit-plan <task>/edit-plan.json` and the same `--task-id`) reuses the kept
+pictures on exactly the same timing, since narrations are cached.
+
 ```shell
-uv run python list_video.py --subject "Why call centres are disappearing" --format story \
-  --items 6 --video-language es-CO --look doodle --logo nutria \
-  --voice-name gemini:Schedar-Even --voice-style calmado
+uv run python list_video.py --subject "The greatest scientists in history" --format story \
+  --items 6 --video-language es-CO --look doodle --assets nutria --review \
+  --voice-name gemini:Schedar-Even --voice-style calmado --image-quality high
 ```
 
 **Scientific but easy:** the script writer is asked to define each technical term,

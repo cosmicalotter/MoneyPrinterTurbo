@@ -24,7 +24,7 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
   - Rama de trabajo: **`claude/relaxed-sagan-nl9ga3`**. Todo se commitea y se sube ahí.
   - No crear pull requests salvo que yo lo pida.
 - **Entorno:** Python 3.11 con `uv`, entorno virtual en `.venv`. Se instala con `uv sync --frozen`.
-- **Pruebas:** `.venv/bin/python -X utf8 -m pytest -q test` (unas 1527 pruebas, tardan unos 5 minutos). La cobertura mínima que exige el CI es del 70 %.
+- **Pruebas:** `.venv/bin/python -X utf8 -m pytest -q test` (unas 1610 pruebas, tardan unos 6 minutos). La cobertura mínima que exige el CI es del 70 %.
 - **Lint:** `.venv/bin/ruff check app cli.py list_video.py research.py voice_lab.py main.py webui studio test docs/skill`
 - **Estilo del código:**
   - Seguir el estilo de cada archivo: docstrings cortos en inglés y comentarios solo donde aportan.
@@ -34,15 +34,16 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
 ## Cómo se usa
 
 - **Interfaz gráfica, "Cabeceando Studio":** `./studio.sh` abre http://127.0.0.1:8600. Con `./studio.sh --install` se agrega al menú de aplicaciones.
-  - Páginas: Proyectos, Guion, Voz, Estilo, Producir, Resultados, Plan de edición, Investigación y Ajustes.
+  - Páginas: Proyectos, Guion, Voz, Estilo, Producir, Revisar, Resultados, Plan de edición, Investigación y Ajustes.
   - Los renders corren en segundo plano y se ve su progreso.
 - **Desde la terminal:** `python list_video.py ...`. Ejemplo:
   ```
   uv run python list_video.py --subject "Por qué los call centers están desapareciendo" --format story \
     --items 6 --video-language es-CO --look doodle --logo nutria \
     --voice-name gemini:Schedar-Even --voice-style calmado --assets nutria \
-    --shot-seconds 3 --clips some --memes otter
+    --image-quality high --review
   ```
+  - Con `--review` se detiene antes de montar el video: se revisan las imágenes en **Revisar** del Studio y luego se renderiza con `--edit-plan storage/tasks/<id>/edit-plan.json --task-id <id>`.
   - Con `--script-only` solo escribe el guion (JSON) para revisarlo; luego se renderiza con `--script archivo.json`.
 - **Laboratorio de voces:** `python voice_lab.py` compara varias voces con el mismo texto.
 - **Investigación de canales:** `python research.py --channel @Canal --analyze`. Usa la YouTube Data API y calcula qué videos destacan sobre el promedio del canal.
@@ -54,7 +55,7 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
 - **Voz Gemini:**
   - Modelo: `gemini_tts_model`. Recomendado: `gemini-2.5-pro-preview-tts`.
   - Estilo: `gemini_tts_style`. Acepta los presets divulgador, entusiasta, profe, calmado, sereno y narrador, o un texto propio.
-- **Imágenes:** `gemini_vision_model` (revisa las imágenes, por defecto gemini-2.5-flash) y `gemini_image_model` (dibuja, por defecto imagen-4.0-fast-generate-001).
+- **Imágenes:** `gemini_vision_model` (revisa las imágenes, por defecto gemini-2.5-flash), `gemini_image_model` (vacío = según `--image-quality`: gemini-3.1-flash-image o gemini-3-pro-image; Imagen 4 solo si se escribe aquí) y `gemini_video_model` (Veo; vacío = veo-3.1-fast-generate-001) con `gemini_video_location` (vacío = la región de Vertex; poner `us-central1` si Veo no responde en `global`).
 - **Google Cloud TTS:** `gcloud_tts_api_key` (opcional) y `gcloud_tts_pitch`. Las voces son `gcloud:es-US-Chirp3-HD-*`.
 - **ElevenLabs:** en `[elevenlabs]` van `api_key`, `model_id`, `stability`, `similarity_boost` y `style`. Las voces se escriben `elevenlabs:<voice_id>`; sin el prefijo `elevenlabs:` el sistema las trata como voces de Azure.
 - **Imágenes y videos de stock:** `pexels_api_keys` y `pixabay_api_keys`.
@@ -151,17 +152,30 @@ Pega este texto al inicio de un chat nuevo (o pide al asistente que lea este arc
 - **Fiabilidad:** máximo 2 dibujos a la vez; ante cuota agotada (429) espera 5, 15, 30 y 60 s; los dibujos que aún fallan se reintentan al final y, si no, se usa una foto real aprobada del momento (cada toma lleva un `query` en inglés para eso). Una toma que falla al renderizarse la reemplaza la nutria con su etiqueta.
 - **Otros:** el texto en color de marca se oscurece si no contrasta con el fondo; se descartan clips oscuros; `render-report.txt` (también en Resultados del Studio) resume tomas, dibujos (hechos, fallidos, rehechos), respaldos y advertencias. **Sin logo** en la esquina por defecto (los proyectos guardados también lo pierden; se vuelve a activar en Estilo). `--max-drawings` por defecto 260.
 
+### Ronda 8: documental animado, fotos históricas reales y revisión antes de renderizar
+- **Diagnóstico del tercer video ("Los científicos más importantes", 3 h de render):** íconos gigantes a pantalla completa (dibujos de animación que fallaban y caían a un ícono), imágenes genéricas fuera de contexto (la nutria en un camino mientras se habla de la peste), demasiadas comparaciones partidas, ritmo muy rápido, temas repetidos (el polonio dos veces), artefactos en objetos complejos (el telescopio), la nutria de las fórmulas tapando texto y la notación `*`/`^` fea.
+- **El director ahora planifica en tres pasos:** (1) una "biblia visual" que lee todo el guion: dirección de arte, personajes recurrentes con su aspecto fijo y un retrato real, y las fotos históricas reales que vale la pena mostrar por sección; (2) el guion gráfico, por grupos de segmentos en paralelo; (3) un montajista IA que lo corrige antes de dibujar (imágenes fuera de contexto, historia contada con dibujos cuando hay foto real, repetidos, ritmo). Tomas repetidas se quitan automáticamente.
+- **Fotos de archivo (`"type": "archive"`):** pinturas, grabados, fotos históricas, manuscritos e instrumentos reales de Wikimedia Commons (en grande); Gemini confirma que son auténticas y del momento exacto (rechaza fotos de stock montadas, recreaciones, IA). Si ninguna pasa, el momento se dibuja. Se muestran a pantalla completa (o enteras sobre una copia desenfocada si son verticales) con un pie tipo museo ("Londres, 1665") abajo a la izquierda.
+- **Mezcla:** ~30 % archivo (cuando hay historia), ~35 % animaciones, ~25 % ilustraciones, composiciones ≤ 10 %, una sola comparación como mucho. **Ritmo calmado:** imagen nueva cada 4–7 s (`--shot-seconds` 5 por defecto, de 3 a 8; los proyectos guardados con 3 pasan a 5).
+- **Mejores dibujos:** modelos Gemini por calidad (`--image-quality`: economy = Gemini 2.5 Flash Image ~US$0,04; standard = Gemini 3.1 Flash Image ~US$0,07; high = Gemini 3 Pro Image en escenas nuevas y fichas de personaje; max = Pro en todo ~US$0,13), escenas a 2K, estilo más simple que pide formas correctas y reconocibles ("menos detalles antes que detalles mal hechos"), estilo `flat` aún más minimalista. Cada persona recurrente tiene una **ficha de personaje** dibujada a partir de su retrato real, y todos sus dibujos la siguen. La **auditoría** compara cada dibujo con la frase que se dice en ese momento (y la anatomía y los objetos) y, si falla, se redibuja con la corrección que propone Gemini. **Nunca** un ícono gigante en lugar de un dibujo.
+- **Videos con IA opcionales (`--ai-videos N`):** las N ilustraciones más largas que tienen un movimiento suave se convierten en videos Veo 3.1 de 4–8 s sin sonido (~US$0,10/s con Veo 3.1 Fast: 10 videos de 5 s ≈ US$5); se reproducen una vez, un poco más lento si la toma es larga, y se quedan en el último cuadro.
+- **Secciones:** el guion dice el nombre de cada sección en voz alta ("Albert Einstein."); la sección abre con una **tarjeta de color propio** con la foto real del protagonista en un marco tipo polaroid, el número y el nombre; luego la **etiqueta "01 Albert Einstein"** queda arriba a la izquierda sobre las imágenes y se aparta en las composiciones. Aplica también al formato historia.
+- **Intro:** gancho y luego una frase que dice de qué trata el video usando la idea del título (con la nutria puede bromear una vez: "...bueno, aunque yo sea una nutria").
+- **Nada tapa nada:** la nutria de las fórmulas tiene su propia columna; las fórmulas se escriben como en el tablero (×, ², √); el botón de suscribirse va arriba a la derecha; las imágenes con transparencia ya no dejan esquinas negras.
+- **Revisar antes de renderizar:** `--review` (o "Preparar revisión" en Producir) hace el plan y todas las imágenes y se detiene. En **Revisar** cada toma muestra sus imágenes y la frase que suena; se puede mantener, pedir otra versión (cambiando qué se dibuja), cambiar por una foto real o quitar. "Renderizar con esta revisión" usa exactamente lo que se mantuvo, con la misma narración (las narraciones quedan en caché).
+- **Progreso:** mientras se preparan las imágenes, el Studio cuenta cuántas van listas (antes se quedaba en "Montando la sección 1" mucho tiempo, porque todas las imágenes del video se hacen al empezar la sección 1).
+
 ## Tipos de escena y de toma disponibles
 
 - **Escenas clásicas:** statement, stat, sequence, compare, diagram, figure, zoom, story, steps, bars, grid, formula, timeline, gauge, question.
 - **Escenas científicas:** definition, equation, annotate, chain, branch.
-- **Tomas del estilo dibujado:** animation (2–4 dibujos de ~1 s que continúan uno del otro), illustration (con `continue`, `camera` y `query` de respaldo), single, speech, clip (video real enmarcado o a pantalla completa) y meme (reacción por emoción: shock, mindblown, laugh, facepalm, confused, scared, sad, proud, suspicious, panic).
+- **Tomas del estilo dibujado:** archive (foto o pintura histórica real con pie de museo), animation (2–4 dibujos de ~1,5–2 s que continúan uno del otro), illustration (con `continue`, `camera`, `motion` para Veo y `query` de respaldo), single, speech, clip (video real enmarcado o a pantalla completa) y meme (reacción por emoción: shock, mindblown, laugh, facepalm, confused, scared, sad, proud, suspicious, panic). Los dibujos pueden llevar `characters` (ids de la biblia visual) y, tras una revisión, `image`/`video` fijados.
 - **Uso interno:** opener (portada de sección).
 
 ## Pendiente o ideas para seguir
 
-- Probar en mi PC la ronda 6 con Gemini real: revisar en el log si aparece "Imagen failed" (entonces todo lo dibuja `gemini-2.5-flash-image`) y ajustar los prompts de estilo (`CARTOON_PROMPT`, `CARTOON_SCENE_PROMPT` y `NEXT_FRAME_PROMPT` en `gemini_media.py`).
-- Costo aproximado por video de ~5 min con la ronda 7: 200–260 dibujos ≈ US$5–10 (se guardan en caché; re-renderizar o hacer otro idioma no los vuelve a cobrar). Si sale caro, bajar `--max-drawings`: lo que no se dibuje se reemplaza por fotos reales.
+- Probar en mi PC la ronda 8 con Gemini y Veo reales (las llamadas a los modelos están probadas con simulaciones, no con la API real): revisar en `render-report.txt` cuántas fotos de archivo se usaron y si algún modelo aparece como no disponible (región `global` recomendada para los modelos Gemini 3; Veo suele pedir `us-central1`). Ajustar los prompts de estilo (`CARTOON_PROMPT`, `CARTOON_SCENE_PROMPT`, `FLAT_*` y `NEXT_FRAME_PROMPT` en `gemini_media.py`).
+- Costo aproximado por video de ~5 min con la ronda 8: menos dibujos que antes (el ritmo es más calmado y ~30 % son fotos reales gratis): ~120–180 dibujos ≈ US$8–12 en calidad estándar, ~US$15–25 en alta; + Veo si se activa. Todo queda en caché; re-renderizar tras una revisión solo cobra lo que se rehace.
 - Después de cada render, revisar `render-report.txt` (o el informe en Resultados): si dice muchos "failed", copiar la línea "Last drawing error" para diagnosticar (cuota de Vertex, región, filtro de seguridad).
 - Escuchar la voz masterizada y ajustar la cadena (`polish_chain` en `voice_polish.py`) y la pausa.
 - Ideas:

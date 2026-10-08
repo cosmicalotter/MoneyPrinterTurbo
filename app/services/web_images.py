@@ -90,19 +90,20 @@ def _api_key(name: str) -> str:
         return ""
 
 
-def search_wikimedia(query: str, limit: int = 8) -> List[_Candidate]:
+def search_wikimedia(query: str, limit: int = 8, width: int = 1280, bitmaps: bool = False) -> List[_Candidate]:
+    """Files of Wikimedia Commons for ``query``; ``bitmaps`` leaves out drawings in SVG (for real pictures)."""
     response = _request(
         "https://commons.wikimedia.org/w/api.php",
         params={
             "action": "query",
             "format": "json",
             "generator": "search",
-            "gsrsearch": query,
+            "gsrsearch": f"{query} filetype:bitmap" if bitmaps else query,
             "gsrnamespace": 6,
             "gsrlimit": limit,
             "prop": "imageinfo",
             "iiprop": "url|size|mime|extmetadata",
-            "iiurlwidth": 1280,
+            "iiurlwidth": width,
         },
     )
     response.raise_for_status()
@@ -183,17 +184,25 @@ def search_pixabay_images(query: str, limit: int = 6) -> List[_Candidate]:
     return candidates
 
 
+def search_archive(query: str) -> List[_Candidate]:
+    """Real historical pictures: paintings, engravings, photographs and documents of Wikimedia Commons, large."""
+    return search_wikimedia(query, width=1920, bitmaps=True)
+
+
 SEARCHERS: Dict[str, Callable[[str], List[_Candidate]]] = {
     "wikimedia": search_wikimedia,
+    "archive": search_archive,
     "pexels": search_pexels_photos,
     "pixabay": search_pixabay_images,
 }
 
 
 def source_order(kind: str) -> List[str]:
-    """Diagrams are best on Wikimedia Commons, real-life scenes on Pexels."""
+    """Diagrams are best on Wikimedia Commons, real-life scenes on Pexels; real history only on Commons."""
     if kind == "photo":
         return ["pexels", "pixabay", "wikimedia"]
+    if kind == "archive":
+        return ["archive"]
     return ["wikimedia", "pixabay", "pexels"]
 
 

@@ -123,17 +123,18 @@ class TestGeminiMedia(_TempDirCase):
     def test_illustrations_are_drawn_once(self):
         buffer = io.BytesIO()
         Image.new("RGB", (64, 64), "white").save(buffer, format="PNG")
-        generated = SimpleNamespace(generated_images=[SimpleNamespace(image=SimpleNamespace(image_bytes=buffer.getvalue()))])
-        client = self._client(images=generated)
+        part = SimpleNamespace(inline_data=SimpleNamespace(data=buffer.getvalue()))
+        client = self._client(content=SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]))]))
         settings = {"gemini_api_key": "k"}
         with patch.object(gemini_media.utils, "storage_dir", return_value=self.temp_dir), patch(
             "google.genai.Client", return_value=client
-        ):
+        ), patch.dict(gemini_media._state, {"gone": {}, "no_size": set(), "imagen_failed": "", "last_error": ""}):
             path = gemini_media.illustrate("a lit candle", settings)
             self.assertTrue(os.path.isfile(path))
             self.assertEqual(gemini_media.illustrate("a lit candle", settings), path)
-            self.assertEqual(client.models.generate_images.call_count, 1)
-            prompt = client.models.generate_images.call_args.kwargs["prompt"]
+            self.assertEqual(client.models.generate_content.call_count, 1)  # the Gemini image model, not Imagen
+            self.assertEqual(client.models.generate_content.call_args.kwargs["model"], gemini_media.FLASH_IMAGE_MODELS[0])
+            prompt = client.models.generate_content.call_args.kwargs["contents"]
             self.assertIn("a lit candle", prompt)
             self.assertIn("No text", prompt)
             self.assertEqual(gemini_media.illustrate("", settings), "")

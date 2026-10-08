@@ -34,10 +34,12 @@ ILLUSTRATIONS = ("icons", "ai")
 STYLE_PRESETS = ("divulgador", "entusiasta", "profe", "calmado", "sereno", "narrador")
 LOOKS = ("doodle", "footage")
 FORMATS = ("story", "list")
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 CLIPS = ("none", "some", "more")
 MEMES = ("off", "otter", "folder")
-DRAWING_STYLES = ("cartoon", "ink")
+DRAWING_STYLES = ("cartoon", "flat", "ink")
+IMAGE_QUALITIES = ("economy", "standard", "high", "max")
+REVIEW_ACTIONS = ("keep", "redo", "photo", "remove")
 
 
 def studio_dir(*parts: str) -> Path:
@@ -73,7 +75,10 @@ class RenderSettings:
     boil: bool = True
     logo: str = ""  # "nutria" adds the round channel badge in the corner
     max_drawings: int = 260
-    shot_seconds: float = 3.0  # a new picture about this often (the animatic pace)
+    shot_seconds: float = 5.0  # a new picture about this often (a calm documentary pace)
+    image_quality: str = "standard"  # AI drawings: economy, standard, high or max
+    ai_videos: int = 0  # illustrations brought to life by Veo (paid per second)
+    director_review: bool = True  # a film editor pass corrects the storyboard before drawing
     clips: str = "some"  # real video clips in a frame now and then
     memes: str = "off"  # comic reactions: off, otter or folder
     memes_dir: str = ""
@@ -118,6 +123,9 @@ class RenderSettings:
             values["logo"] = ""
             if int(values.get("max_drawings") or 0) == 160:
                 values["max_drawings"] = 260
+        if values and int(values.get("version") or 1) < 3 and float(values.get("shot_seconds") or 3.0) <= 3.0:
+            # Round 8: a calmer, documentary pace.
+            values["shot_seconds"] = 5.0
         values["version"] = SETTINGS_VERSION
         settings = cls(**values)
         settings.also = {str(k): str(v) for k, v in dict(settings.also or {}).items() if str(k).strip()}
@@ -140,8 +148,12 @@ def build_argv(
     edit_plan: str = "",
     task_id: str = "",
     output: str = "",
+    review: bool = False,
 ) -> List[str]:
-    """The list_video.py arguments for these settings (the GUI and the CLI stay in step)."""
+    """The list_video.py arguments for these settings (the GUI and the CLI stay in step).
+
+    ``review`` makes every picture and stops before rendering (see ``load_review``).
+    """
     if bool(script_file) == bool(subject):
         raise ValueError("give either a script file or a subject")
     s = settings
@@ -173,6 +185,13 @@ def build_argv(
         argv += ["--max-drawings", str(int(s.max_drawings))]
         argv += ["--shot-seconds", _number(s.shot_seconds), "--clips", s.clips if s.clips in CLIPS else "some"]
         argv += ["--drawing-style", s.drawing_style if s.drawing_style in DRAWING_STYLES else "cartoon"]
+        argv += ["--image-quality", s.image_quality if s.image_quality in IMAGE_QUALITIES else "standard"]
+        if int(s.ai_videos) > 0:
+            argv += ["--ai-videos", str(int(s.ai_videos))]
+        if not s.director_review:
+            argv.append("--no-director-review")
+        if review:
+            argv.append("--review")
     if s.memes in MEMES and s.memes != "off":
         argv += ["--memes", s.memes]
         if s.memes == "folder" and s.memes_dir:
@@ -347,18 +366,31 @@ _STAGES = (
     (re.compile(r"generating list script"), 0.03, "Escribiendo el guion con IA"),
     (re.compile(r"list script generated"), 0.08, "Guion listo"),
     (re.compile(r"list video narration \[(\d+)/(\d+)\]"), (0.08, 0.22), "Narrando la sección {0} de {1}"),
+    (re.compile(r"visual bible written"), 0.29, "Dirección de arte lista (personajes y fotos de archivo)"),
+    (re.compile(r"storyboard generated"), 0.31, "Guion gráfico listo"),
     (re.compile(r"edit plan generated"), 0.32, "Plan de edición listo"),
     (re.compile(r"pictures added where only footage"), 0.35, "Imágenes extra añadidas"),
+    (re.compile(r"character sheets ready"), 0.34, "Fichas de personajes dibujadas"),
     (re.compile(r"list video segment \[(\d+)/(\d+)\]"), (0.38, 0.57), "Montando la sección {0} de {1}"),
     (re.compile(r"rendering the (\S+) version"), 0.0, "Versión en {0}"),
+    (re.compile(r"review ready"), 1.0, "Revisión lista: abre Revisar"),
     (re.compile(r"list video finished"), 1.0, "Video terminado"),
 )
+# Every picture made before the first section is assembled (drawings, real archive pictures, character sheets).
+_PICTURE_LINE = re.compile(r" - (?:drawn|illustration drawn|character sheet drawn|archive picture|video made with \S+): ")
 
 
 def progress_from_log(text: str) -> Tuple[float, str]:
     """(fraction done, what is happening) read from a render log."""
     fraction, stage = 0.0, "Preparando"
+    pictures = 0
     for line in (text or "").splitlines():
+        if _PICTURE_LINE.search(line):
+            # Every picture is made while the first section is assembled: count them, so a long wait shows progress.
+            pictures += 1
+            if fraction <= 0.38:
+                fraction, stage = max(fraction, 0.34), f"Preparando las imágenes: {pictures} listas"
+            continue
         for pattern, value, label in _STAGES:
             match = pattern.search(line)
             if not match:
@@ -527,6 +559,167 @@ def task_outputs(task_id: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Review before rendering
+# ---------------------------------------------------------------------------
+
+
+def new_task_id() -> str:
+    """A task id chosen in advance, so a review and its final render share one folder (and its narration)."""
+    from app.utils import utils
+
+    return utils.get_uuid()
+
+
+def load_review(task_id: str) -> Optional[dict]:
+    """The review.json of a render prepared with --review (the shots, their pictures and what is said)."""
+    folder = Path(task_outputs(task_id)["folder"])
+    review = _read_json(folder / "review.json")
+    if review is None or not isinstance(review.get("shots"), list):
+        return None
+    review["task_id"] = task_id
+    return review
+
+
+def review_jobs(slug: str) -> List[dict]:
+    """Finished review preparations of a project, newest first: {"job", "task_id", "label", "started"}."""
+    found = []
+    for job in list_jobs(limit=40, project=slug):
+        summary = job.get("summary") or {}
+        if job["state"] == "done" and summary.get("review_file") and summary.get("task_id"):
+            found.append({"job": job["id"], "task_id": summary["task_id"], "label": job["label"], "started": job["started"]})
+    return found
+
+
+_TAKE = re.compile(r" \(new take (\d+)\)$")
+
+
+def _new_take(text: str) -> str:
+    """The same description asked once more (a cached drawing is never reused for it)."""
+    match = _TAKE.search(text or "")
+    number = int(match.group(1)) + 1 if match else 2
+    return f"{_TAKE.sub('', text or '')} (new take {number})"
+
+
+def _unpin(place: dict) -> None:
+    for key in ("image", "video"):
+        place.pop(key, None)
+    for part in (place.get("frames") or []) + (place.get("items") or []):
+        if isinstance(part, dict):
+            part.pop("image", None)
+
+
+def _redo(shot: dict, pictures: List[dict], describe: str, query: str) -> None:
+    """Make a shot again: its pictures are unpinned, its web pictures avoided and its drawings asked anew."""
+    _unpin(shot)
+    urls = [p.get("url") for p in pictures if p.get("url")]
+    if urls:
+        shot["avoid"] = list(dict.fromkeys(list(shot.get("avoid") or []) + urls))[-20:]
+    if query.strip():
+        shot["query"] = query.strip()[:120]
+    frames = [f for f in shot.get("frames") or [] if isinstance(f, dict)]
+    parts = [p.strip() for p in (describe or "").split(" / ") if p.strip()]
+    if frames:
+        if parts and parts != [f.get("draw", "") for f in frames]:
+            shot["frames"] = [dict(frames[n] if n < len(frames) else {}, draw=part[:300]) for n, part in enumerate(parts[:4])]
+        else:
+            for frame in frames:
+                frame["draw"] = _new_take(frame.get("draw", ""))
+    elif describe.strip() and describe.strip() != shot.get("draw", ""):
+        shot["draw"] = describe.strip()[:300]
+    elif shot.get("draw"):
+        shot["draw"] = _new_take(shot["draw"])
+
+
+def apply_review(task_id: str, decisions: Dict[str, dict]) -> str:
+    """Write the reviewed plan of a render prepared with --review and return its path.
+
+    ``decisions`` is {shot id: {"action": keep | redo | photo | remove,
+    "describe": new description, "query": new search}}: kept pictures stay
+    pinned, redone ones are made again (from the new description, or as a
+    new take), "photo" turns a drawn shot into a search for a real archive
+    picture, and removed shots leave the plan (the shot before stays longer).
+    """
+    review = load_review(task_id)
+    if review is None:
+        raise ValueError(f"no review for task {task_id}")
+    folder = Path(task_outputs(task_id)["folder"])
+    plan_file = Path(review.get("plan_file") or folder / "edit-plan.json")
+    # Decisions always apply to the plan as it was reviewed, so saving twice changes nothing more.
+    data = _read_json(Path(review.get("reviewed_plan") or folder / "review-plan.json")) or _read_json(plan_file)
+    if data is None or not isinstance(data.get("segments"), list):
+        raise ValueError(f"the plan of task {task_id} cannot be read")
+    shots = {shot["id"]: shot for shot in review["shots"] if isinstance(shot, dict) and "id" in shot}
+    removed: Dict[int, set] = {}
+    for shot_id, decision in decisions.items():
+        listed = shots.get(shot_id)
+        action = (decision or {}).get("action", "keep")
+        if listed is None or action not in REVIEW_ACTIONS or action == "keep":
+            continue
+        segment = data["segments"][listed["segment"]] if 0 <= listed["segment"] < len(data["segments"]) else None
+        if segment is None:
+            continue
+        describe = str(decision.get("describe") or "")
+        query = str(decision.get("query") or "")
+        if listed["shot"] < 0:  # the section's card: its photo can only be searched again
+            opener = segment.setdefault("opener", {"query": listed.get("query") or listed.get("chapter", "")})
+            if action in ("redo", "photo"):
+                _redo(opener, listed.get("pictures") or [], "", query)
+            continue
+        planned = segment.get("shots") or []
+        if not 0 <= listed["shot"] < len(planned):
+            continue
+        shot = planned[listed["shot"]]
+        if action == "remove":
+            removed.setdefault(listed["segment"], set()).add(listed["shot"])
+        elif action == "redo":
+            _redo(shot, listed.get("pictures") or [], describe, query)
+        elif action == "photo":
+            frames = [f.get("draw", "") for f in shot.get("frames") or [] if isinstance(f, dict)]
+            draw = shot.get("draw") or (frames[0] if frames else "") or listed.get("describe", "")
+            search = query.strip() or shot.get("query") or listed.get("query") or describe or draw
+            planned[listed["shot"]] = {
+                "type": "archive", "at": shot.get("at") or (shot.get("items") or [{}])[0].get("at", ""),
+                "query": search[:120], "query_local": "", "caption": shot.get("text", "")[:60], "draw": draw[:300],
+                **({"camera": shot["camera"]} if shot.get("camera") else {}),
+                **({"avoid": shot["avoid"]} if shot.get("avoid") else {}),
+            }
+    for index, positions in removed.items():
+        segment = data["segments"][index]
+        segment["shots"] = [shot for n, shot in enumerate(segment.get("shots") or []) if n not in positions]
+    _write_json(plan_file, data)
+    return str(plan_file)
+
+
+def clean_plan(data: dict) -> dict:
+    """An edited plan made valid again: a storyboard (doodle look) or an edit plan (footage look), with its bible."""
+    from app.services import llm
+
+    if not isinstance(data, dict) or not isinstance(data.get("segments"), list):
+        raise ValueError('the plan needs a "segments" list')
+    segments = data["segments"]
+    names: set = set()
+
+    def collect(value) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in ("expression", "pose") and isinstance(item, str) and item:
+                    names.add(item)
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(segments)
+    if any(isinstance(entry, dict) and "shots" in entry for entry in segments):
+        clean = {"segments": llm.normalize_storyboard(data, len(segments), sorted(names))}
+    else:
+        clean = {"segments": llm.normalize_edit_plan(data, len(segments), sorted(names))}
+    if isinstance(data.get("bible"), dict):
+        clean["bible"] = data["bible"]
+    return clean
+
+
 def youtube_description(title: str, intro: str, chapters: str, credits: str, hashtags: Sequence[str] = ()) -> str:
     """A ready-to-paste YouTube description: hook, chapters, credits and hashtags."""
     parts = [p for p in (title.strip(), intro.strip()) if p]
@@ -559,8 +752,8 @@ def voice_groups() -> Dict[str, List[str]]:
 SETTINGS_GROUPS = (
     ("Inteligencia artificial (Google)", ("llm_provider", "gemini_use_vertexai", "gemini_vertex_project", "gemini_vertex_location",
                                          "gemini_api_key", "gemini_model_name")),
-    ("Modelos de voz e imagen", ("gemini_tts_model", "gemini_vision_model", "gemini_image_model", "gcloud_tts_api_key",
-                                 "gcloud_tts_pitch", "api_key")),
+    ("Modelos de voz e imagen", ("gemini_tts_model", "gemini_vision_model", "gemini_image_model", "gemini_video_model",
+                                 "gemini_video_location", "gcloud_tts_api_key", "gcloud_tts_pitch", "api_key")),
     ("Imágenes, videos e investigación", ("pexels_api_keys", "pixabay_api_keys", "youtube_api_key", "ffmpeg_path")),
 )
 SETTINGS_FIELDS: Tuple[Tuple[str, str, str, str, str], ...] = (
@@ -573,7 +766,11 @@ SETTINGS_FIELDS: Tuple[Tuple[str, str, str, str, str], ...] = (
     ("app", "gemini_model_name", "Modelo de texto", "text", "Ej.: gemini-2.5-flash o gemini-2.5-pro"),
     ("app", "gemini_tts_model", "Modelo de voz Gemini", "text", "gemini-2.5-flash-preview-tts o gemini-2.5-pro-preview-tts"),
     ("app", "gemini_vision_model", "Modelo que revisa imágenes", "text", "Por defecto gemini-2.5-flash"),
-    ("app", "gemini_image_model", "Modelo que dibuja", "text", "Por defecto imagen-4.0-fast-generate-001"),
+    ("app", "gemini_image_model", "Modelo que dibuja", "text",
+     "Vacío = según la calidad elegida en Estilo (gemini-3.1-flash-image o gemini-3-pro-image)"),
+    ("app", "gemini_video_model", "Modelo de video (Veo)", "text", "Vacío = veo-3.1-fast-generate-001 (Vertex AI)"),
+    ("app", "gemini_video_location", "Región de Veo", "text",
+     "Vacío = la misma de Vertex AI; us-central1 si Veo no está disponible en tu región (p. ej. global)"),
     ("app", "gcloud_tts_api_key", "Cloud TTS API key", "secret", "Opcional: si no, usa las credenciales de Vertex AI"),
     ("app", "gcloud_tts_pitch", "Tono Cloud TTS (semitonos)", "float", "Solo voces Neural2/Studio"),
     ("app", "pexels_api_keys", "Pexels API keys", "list", "Videos de fondo y fotos; separa varias con comas"),

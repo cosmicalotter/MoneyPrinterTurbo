@@ -346,19 +346,41 @@ def page_style() -> None:
         s.canvas_color = c1.color_picker("Color del fondo", s.canvas_color or "#F4C24F")
         s.boil = c2.toggle("Trazo vivo (hecho a mano)", s.boil, help="Los dibujos tiemblan muy levemente, como animación hecha a mano")
         s.max_drawings = c3.number_input("Máximo de dibujos IA", 0, 600, int(s.max_drawings), step=10,
-                                         help="Cada dibujo cuesta ~US$0,02-0,04 y cada animación usa 2-4. Un video de 5 min "
-                                              "usa unos 200-260 (~US$5-10). Después se usan fotos reales")
+                                         help="Cada dibujo cuesta ~US$0,04-0,13 según la calidad y cada animación usa 2-4. "
+                                              "Las fotos históricas reales no cuentan. Después del máximo se usan fotos reales")
         logos = ["ninguno", "nutria"]
         s.logo = "nutria" if c4.selectbox("Logo en la esquina", logos, index=1 if s.logo == "nutria" else 0) == "nutria" else ""
         c1, c2, c3 = st.columns(3)
-        s.shot_seconds = c1.slider("Cambio de imagen cada (s)", 2.0, 6.0, float(s.shot_seconds), 0.5,
-                                   help="Como un animatic: escenas cortas y continuas que cuentan la historia")
+        s.shot_seconds = c1.slider("Cambio de imagen cada (s)", 3.0, 8.0, min(8.0, max(3.0, float(s.shot_seconds))), 0.5,
+                                   help="Ritmo de documental: 5 s es calmado y fácil de seguir; menos es más dinámico")
         s.clips = c2.selectbox("Videos reales dentro del dibujo", studio.CLIPS, index=studio.CLIPS.index(s.clips) if s.clips in studio.CLIPS else 1,
                                format_func=lambda v: {"none": "Ninguno", "some": "Algunos (~8 %)", "more": "Más (~15 %)"}[v],
                                help="Clips de Pexels/Pixabay en un marco sobre el fondo, para lugares, naturaleza y máquinas reales")
         s.drawing_style = c3.selectbox("Estilo de dibujo", studio.DRAWING_STYLES,
                                        index=studio.DRAWING_STYLES.index(s.drawing_style) if s.drawing_style in studio.DRAWING_STYLES else 0,
-                                       format_func=lambda v: {"cartoon": "Caricatura animada (pulida)", "ink": "Tinta a mano (garabato)"}[v])
+                                       format_func=lambda v: {"cartoon": "Caricatura 2D simple (documental animado)",
+                                                              "flat": "Plano y minimalista (formas vectoriales)",
+                                                              "ink": "Tinta a mano (garabato)"}[v])
+        c1, c2, c3 = st.columns(3)
+        s.image_quality = c1.selectbox(
+            "Calidad de los dibujos IA", studio.IMAGE_QUALITIES,
+            index=studio.IMAGE_QUALITIES.index(s.image_quality) if s.image_quality in studio.IMAGE_QUALITIES else 1,
+            format_func=lambda v: {"economy": "Económica · Gemini 2.5 Flash Image (~US$0,04)",
+                                   "standard": "Estándar · Gemini 3.1 Flash Image (~US$0,07)",
+                                   "high": "Alta · Gemini 3 Pro Image en escenas nuevas (~US$0,13)",
+                                   "max": "Máxima · Gemini 3 Pro Image en todo (~US$0,13)"}[v],
+            help="Los modelos Pro siguen mejor las indicaciones y dibujan objetos y manos con menos errores",
+        )
+        s.ai_videos = int(c2.number_input(
+            "Ilustraciones animadas con Veo", 0, 40, int(s.ai_videos), step=1,
+            help="Convierte las ilustraciones más largas en videos de 4-8 s (Veo 3.1 Fast, sin sonido, ~US$0,10 por "
+                 "segundo: 10 videos ≈ US$5). 0 = solo movimiento de cámara",
+        ))
+        s.director_review = c3.toggle(
+            "Revisión del montajista IA", s.director_review,
+            help="Una segunda pasada del LLM corrige el guion gráfico antes de dibujar: imágenes fuera de contexto, "
+                 "repetidas, demasiadas comparaciones o un ritmo muy rápido",
+        )
         c1, c2 = st.columns(2)
         s.memes = c1.selectbox("Reacciones tipo meme", studio.MEMES, index=studio.MEMES.index(s.memes) if s.memes in studio.MEMES else 0,
                                format_func=lambda v: {"off": "No", "otter": "La nutria reacciona (dibujada, sin derechos de autor)",
@@ -367,9 +389,10 @@ def page_style() -> None:
         if s.memes == "folder":
             s.memes_dir = c2.text_input("Carpeta de memes", s.memes_dir, placeholder="resource/memes",
                                         help="Subcarpetas por emoción: sorpresa, risa, facepalm, mente, confundido, miedo, triste...")
-        st.caption("Casi todo son dibujos de IA a pantalla completa: animaciones cortas (un dibujo por segundo que "
-                   "continúa del anterior) e ilustraciones con un movimiento de cámara suave. De vez en cuando, una escena "
-                   "explicativa con imágenes o un video real enmarcado.")
+        st.caption("Un documental animado: fotos y pinturas históricas reales cuando la narración cuenta historia, "
+                   "animaciones cortas (2 a 4 dibujos de una acción) e ilustraciones con un movimiento de cámara suave. "
+                   "Cada sección abre con una tarjeta de color con la foto de su protagonista, y su nombre queda en una "
+                   "etiqueta arriba a la izquierda.")
     look, motion, sound, languages = st.tabs(["🎨 Imagen", "🎬 Edición", "🔊 Sonido", "🌎 Idiomas"])
     with look:
         c1, c2, c3 = st.columns(3)
@@ -441,7 +464,16 @@ def page_render() -> None:
     argv = studio.build_argv(s, script_file=str(studio.script_path(slug)), edit_plan=str(plan) if use_plan else "")
     with st.expander("Comando equivalente"):
         st.code("python list_video.py " + " ".join(f'"{a}"' if " " in a else a for a in argv), language="bash")
-    if st.button("🎬 Renderizar video", type="primary"):
+    c1, c2 = st.columns(2)
+    if c1.button("🔍 Preparar revisión (recomendado)", type="primary", use_container_width=True,
+                 disabled=s.look != "doodle", help="Hace el plan y todas las imágenes y se detiene antes de montar el "
+                                                    "video, para que revises cada imagen en **Revisar**"):
+        task_id = studio.new_task_id()
+        review_argv = studio.build_argv(s, script_file=str(studio.script_path(slug)), edit_plan=str(plan) if use_plan else "",
+                                        task_id=task_id, review=True)
+        job = studio.start_job(review_argv, label=f"Revisión · {script.get('title', slug)}", project=slug)
+        st.toast(f"Preparando la revisión: {job}")
+    if c2.button("🎬 Renderizar directo", use_container_width=True):
         job = studio.start_job(argv, label=script.get("title", slug), project=slug)
         st.toast(f"Render iniciado: {job}")
     st.divider()
@@ -461,6 +493,10 @@ def jobs_panel(slug: str) -> None:
                 c1.progress(job["progress"], text=job["stage"])
                 if c2.button("Cancelar", key=f"cancel-{job['id']}"):
                     studio.cancel_job(job["id"])
+            elif job["state"] == "done" and job["summary"] and job["summary"].get("review_file"):
+                if c2.button("Revisar", key=f"review-{job['id']}"):
+                    st.session_state["review-task"] = job["summary"].get("task_id")
+                    st.switch_page(PAGES["review"])
             elif job["state"] == "done" and job["summary"]:
                 if c2.button("Ver resultado", key=f"see-{job['id']}"):
                     st.session_state["result-job"] = job["id"]
@@ -507,8 +543,6 @@ def page_results() -> None:
 
 
 def page_plan() -> None:
-    from app.services import llm
-
     slug = require_project()
     st.title("Plan de edición")
     st.caption("Lo que la IA decidió mostrar en cada momento. Edítalo y vuelve a renderizar con **Producir**.")
@@ -531,19 +565,122 @@ def page_plan() -> None:
     script = studio.load_script(slug) or {}
     names = ["Intro"] + [i.get("name", "") for i in script.get("items") or []] + ["Cierre"]
     for number, entry in enumerate(segments):
+        name = names[number] if number < len(names) else number
+        if "shots" in entry:
+            shots = ", ".join(shot.get("type", "") for shot in entry.get("shots") or []) or "—"
+            st.markdown(f"**{name}** · tomas: {shots}")
+            continue
         scenes = ", ".join(sc.get("type", "") for sc in entry.get("scenes") or []) or "—"
         beats = len([b for b in entry.get("beats") or [] if b.get("type") != "react"])
-        st.markdown(f"**{names[number] if number < len(names) else number}** · escenas: {scenes} · imágenes: {beats}")
+        st.markdown(f"**{name}** · escenas: {scenes} · imágenes: {beats}")
     edited = st.text_area("JSON", json.dumps(data, ensure_ascii=False, indent=2), height=420)
     if st.button("💾 Guardar como plan del proyecto", type="primary"):
         try:
-            parsed = json.loads(edited)
-            expressions = sorted({e.get("expression") for e in parsed.get("segments") or [] if e.get("expression")})
-            clean = llm.normalize_edit_plan(parsed, len(parsed.get("segments") or []), expressions)
-            project_plan.write_text(json.dumps({"segments": clean}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            clean = studio.clean_plan(json.loads(edited))
+            project_plan.write_text(json.dumps(clean, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             st.success("Plan guardado. Actívalo en **Producir**.")
         except Exception as exc:
             st.error(f"El JSON no es válido: {exc}")
+
+
+SHOT_LABELS = {
+    "archive": "📜 Foto o pintura real", "illustration": "🎨 Ilustración", "animation": "🎞️ Animación corta",
+    "opener": "🏷️ Tarjeta de sección", "single": "🔎 Objeto de cerca", "stat": "🔢 Dato", "timeline": "🗓️ Línea de tiempo",
+    "compare": "↔️ Comparación", "clip": "🎥 Video real", "equation": "➗ Fórmula", "speech": "💬 Diálogo",
+}
+ACTION_LABELS = {"keep": "✅ Mantener", "redo": "🔁 Otra versión", "photo": "📜 Foto real", "remove": "🗑️ Quitar"}
+
+
+def _clock(seconds: float) -> str:
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
+
+
+def page_review() -> None:
+    slug = require_project()
+    s = settings_for(slug)
+    st.title("Revisar antes de renderizar")
+    st.caption("Cada imagen con la frase que se dice mientras está en pantalla. Mantén las buenas, pide otra versión "
+               "(puedes cambiar lo que se dibuja), cámbiala por una foto real o quítala. El video final usa exactamente "
+               "lo que mantienes, con la misma narración.")
+    reviews = studio.review_jobs(slug)
+    if not reviews:
+        st.info("Prepara una revisión en **Producir** con «Preparar revisión».")
+        st.stop()
+    labels = {r["task_id"]: f"{r['label']} · {when(r['started'])}" for r in reviews}
+    ids = list(labels)
+    chosen = st.session_state.get("review-task") if st.session_state.get("review-task") in ids else ids[0]
+    task_id = st.selectbox("Revisión", ids, index=ids.index(chosen), format_func=labels.get)
+    review = studio.load_review(task_id)
+    if review is None:
+        st.error("No se pudo leer esta revisión.")
+        st.stop()
+    shots = review["shots"]
+    decisions = st.session_state.setdefault(f"review::{task_id}", {})
+    pictures = [p for shot in shots for p in shot.get("pictures") or []]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Tomas", len(shots))
+    c2.metric("Fotos reales", sum(1 for p in pictures if p.get("kind") == "archive"))
+    c3.metric("Imágenes", len(pictures))
+    c4.metric("Cambios", sum(1 for d in decisions.values() if d.get("action", "keep") != "keep"))
+    if review.get("report") or review.get("warnings"):
+        with st.expander("Informe de la preparación"):
+            st.code("\n".join((review.get("report") or []) + (review.get("warnings") or [])), language=None)
+    chapters = list(dict.fromkeys(shot["chapter"] for shot in shots))
+    chapter = st.selectbox("Sección", ["Todas"] + chapters)
+    for shot in shots:
+        if chapter != "Todas" and shot["chapter"] != chapter:
+            continue
+        key = f"{task_id}-{shot['id']}"
+        with st.container(border=True):
+            left, right = st.columns([3, 4], gap="medium")
+            with left:
+                videos = [p["file"] for p in shot.get("pictures") or [] if p.get("kind") == "video" and os.path.isfile(p["file"])]
+                images = [p["file"] for p in shot.get("pictures") or [] if p.get("kind") != "video" and os.path.isfile(p["file"])]
+                if videos:
+                    st.video(videos[0])
+                if len(images) == 1:
+                    st.image(images[0], width="stretch")
+                elif images:
+                    st.image(images[:4], width=150)
+                if not videos and not images:
+                    st.caption("Sin imagen propia (texto, fórmula o la nutria)")
+            with right:
+                kind = SHOT_LABELS.get(shot["type"], shot["type"])
+                if shot.get("planned") not in ("", shot["type"], "opener"):
+                    kind += f" (en lugar de {SHOT_LABELS.get(shot['planned'], shot['planned']).split(' ', 1)[-1].lower()})"
+                st.markdown(f"**{shot['chapter']}** · {kind} · {_clock(shot['start'])}–{_clock(shot['end'])}")
+                if shot.get("said"):
+                    st.markdown(f"> {shot['said']}")
+                actions = ["keep", "redo", "photo"] if shot["shot"] < 0 else list(studio.REVIEW_ACTIONS)
+                current = decisions.get(shot["id"], {}).get("action", "keep")
+                action = st.radio("Decisión", actions, index=actions.index(current) if current in actions else 0,
+                                  format_func=ACTION_LABELS.get, horizontal=True, key=f"act-{key}", label_visibility="collapsed")
+                describe, query = shot.get("describe", ""), shot.get("query", "")
+                if action == "redo" and shot["shot"] >= 0 and shot["type"] != "archive":
+                    describe = st.text_area("Qué se dibuja (en inglés; en animaciones, los dibujos separados por « / »)",
+                                            shot.get("describe", ""), key=f"draw-{key}", height=90)
+                if action == "photo" or (action == "redo" and (shot["type"] == "archive" or shot["shot"] < 0)):
+                    query = st.text_input("Búsqueda de la foto real (en inglés, como en Wikimedia Commons)",
+                                          shot.get("query") or shot.get("describe", "")[:100], key=f"query-{key}")
+                decisions[shot["id"]] = {"action": action, "describe": describe, "query": query}
+    st.divider()
+    c1, c2 = st.columns(2)
+    if c1.button("💾 Guardar decisiones", use_container_width=True):
+        try:
+            studio.apply_review(task_id, decisions)
+            st.success("Decisiones guardadas en el plan de esta revisión.")
+        except ValueError as exc:
+            st.error(str(exc))
+    if c2.button("🎬 Renderizar con esta revisión", type="primary", use_container_width=True):
+        try:
+            plan = studio.apply_review(task_id, decisions)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
+        argv = studio.build_argv(s, script_file=str(studio.script_path(slug)), edit_plan=plan, task_id=task_id)
+        script = studio.load_script(slug) or {}
+        job = studio.start_job(argv, label=script.get("title", slug), project=slug)
+        st.success(f"Render iniciado ({job}). Síguelo en **Producir**; el video aparecerá en **Resultados**.")
 
 
 def page_research() -> None:
@@ -632,6 +769,7 @@ PAGES = {
     "voice": st.Page(page_voice, title="Voz", icon="🎙️", url_path="voz"),
     "style": st.Page(page_style, title="Estilo", icon="🎨", url_path="estilo"),
     "render": st.Page(page_render, title="Producir", icon="🎬", url_path="producir"),
+    "review": st.Page(page_review, title="Revisar", icon="🔍", url_path="revisar"),
     "results": st.Page(page_results, title="Resultados", icon="📦", url_path="resultados"),
     "plan": st.Page(page_plan, title="Plan de edición", icon="🧩", url_path="plan"),
     "research": st.Page(page_research, title="Investigación", icon="🔎", url_path="investigacion"),
@@ -642,7 +780,7 @@ PAGES = {
 def main() -> None:
     navigation = st.navigation({
         "Crear": [PAGES["projects"], PAGES["script"], PAGES["voice"], PAGES["style"]],
-        "Producir": [PAGES["render"], PAGES["results"], PAGES["plan"]],
+        "Producir": [PAGES["render"], PAGES["review"], PAGES["results"], PAGES["plan"]],
         "Más": [PAGES["research"], PAGES["settings"]],
     })
     sidebar()
