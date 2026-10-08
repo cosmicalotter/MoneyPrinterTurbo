@@ -16,7 +16,7 @@ Credentials).
 
 Costs (2026 list prices, check yours): a picture check sends a few small JPEGs to a
 Flash model, a fraction of a cent; a drawing costs about US$0.04 (Gemini 2.5
-Flash Image), US$0.07 (3.1 Flash Image) or US$0.13 (3 Pro Image); a Veo 3.1
+Flash Image), US$0.07-0.10 (3.1 Flash Image, 1K-2K) or US$0.13 (3 Pro Image); a Veo 3.1
 Fast video about US$0.10 per second without sound. Drawings and videos are
 cached by prompt and references, so re-renders and other languages reuse them
 for free.

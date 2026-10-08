@@ -380,7 +380,8 @@ for the YouTube description, and edit-plan.json.
         choices=["economy", "standard", "high", "max"],
         default="standard",
         help="doodle look: AI drawings by Gemini 2.5 Flash Image (economy, ~US$0.04), Gemini 3.1 Flash Image "
-        "(standard, ~US$0.07), Gemini 3 Pro Image for new scenes and character sheets (high) or for everything "
+        "(standard, ~US$0.07, a 2K scene ~US$0.10), Gemini 3 Pro Image for new scenes and character sheets (high) or "
+        "for everything "
         "(max, ~US$0.13 each)",
     )
     edit_group.add_argument(

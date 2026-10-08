@@ -366,7 +366,7 @@ def page_style() -> None:
             "Calidad de los dibujos IA", studio.IMAGE_QUALITIES,
             index=studio.IMAGE_QUALITIES.index(s.image_quality) if s.image_quality in studio.IMAGE_QUALITIES else 1,
             format_func=lambda v: {"economy": "Económica · Gemini 2.5 Flash Image (~US$0,04)",
-                                   "standard": "Estándar · Gemini 3.1 Flash Image (~US$0,07)",
+                                   "standard": "Estándar · Gemini 3.1 Flash Image (~US$0,07-0,10)",
                                    "high": "Alta · Gemini 3 Pro Image en escenas nuevas (~US$0,13)",
                                    "max": "Máxima · Gemini 3 Pro Image en todo (~US$0,13)"}[v],
             help="Los modelos Pro siguen mejor las indicaciones y dibujan objetos y manos con menos errores",

@@ -574,7 +574,7 @@ comparison. A film-editor pass (`--no-director-review` skips it) corrects the pl
 anything is drawn: off-topic or decorative pictures, history told with a drawing when a
 real picture exists, repeated subjects, a rushed pace; shots planned twice are dropped.
 Drawings use the Gemini image models (`--image-quality economy|standard|high|max`:
-Gemini 2.5 Flash Image ~US$0.04, Gemini 3.1 Flash Image ~US$0.07, Gemini 3 Pro Image
+Gemini 2.5 Flash Image ~US$0.04, Gemini 3.1 Flash Image ~US$0.07 (US$0.10 for a 2K scene), Gemini 3 Pro Image
 ~US$0.13 for new scenes and character sheets or for everything; scenes at 2K), follow
 reference pictures (the frame before, the mascot, each person's character sheet), use a
 simpler style that asks for correct, recognisable shapes (`--drawing-style flat` is the
